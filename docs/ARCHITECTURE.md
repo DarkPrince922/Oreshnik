@@ -490,7 +490,8 @@ An SSH runner moves **only Strix itself** to another machine. Everything the pan
 under `STRIX_RUNS_DIR` is still the source of truth, the log is still `oreshnik.log`, results are still read from
 `scan-<id>/strix_runs/<name>/`, and the live cost, the agent feed, the budget bar, cancel, schedules, cost accounting and
 "Продолжить" work unchanged. Migration `0007` adds `ssh_host_key`, `ssh_host_key_pending`, `provision_log`, `provision_started_at`;
-the host, port, user and the (Fernet-encrypted) private key were already in the model.
+the host, port, user and the (Fernet-encrypted) private key were already in the model; migration `0008` adds the encrypted password
+(`ssh_password_enc`).
 
 ### Trust: the host key is pinned, never learned silently
 - **First contact looks, it does not log in.** The first check fetches the host's public key (no credentials are sent — the host
@@ -502,8 +503,22 @@ the host, port, user and the (Fernet-encrypted) private key were already in the 
   prompt and never an automatic update: the panel stops **before any credential is sent**, shows both fingerprints, and offers no
   "trust" button — only an explicit "Сбросить старый ключ", after which the new key goes through the same confirmation. Changing the
   host or port forgets the pinned key as well.
-- Key authentication only: no passwords, no SSH agent, none of the panel host's `~/.ssh/config`. The private key is never part of an
-  error message or a log, and operators/viewers never see connection details or fingerprints.
+- **Logging in: a key, a password, or both** (an administrator chooses per runner; at least one must exist, and the API refuses to
+  remove the last one). With both, the key is tried first and the password is only offered if the key is rejected. No SSH agent, and
+  none of the panel host's `~/.ssh/config`. A **key is the better choice**: a password can be guessed, and the form says so.
+  - A password is only ever offered to a host whose key is **pinned** — sent to an impostor it would be handed over in the clear.
+    Verified on a real `sshd`: on first contact, and when the key has changed, the host sees no login attempt at all.
+  - Stored encrypted (Fernet), kept exactly as typed, never returned by the API (`has_ssh_password` only), never in an error message,
+    a log, a command line or the remote disk.
+  - **A wrong password is not repeated.** Each connection makes one attempt; a runner that rejected its login (or whose host key
+    changed) is put in the `error` state and the periodic check leaves it alone — retrying a wrong password every two minutes is
+    exactly what gets a client locked out by fail2ban. An administrator's "Проверить", or saving corrected credentials (which puts the
+    runner back in the rotation), starts it again. A saved change of credentials keeps the confirmed host key (it is about the host,
+    not the login); changing the address forgets it.
+  - The password is **not** used for `sudo`: installing system packages still needs root or passwordless sudo (feeding a password to
+    `sudo -S` would put it on the installer's stdin next to the script, and an askpass helper would write it to the remote disk).
+- The private key is never part of an error message or a log, and operators/viewers never see connection details, passwords or
+  fingerprints.
 
 ### Is the host ready?
 One script over SSH (`ssh_runner.probe`) reports OS, user, root/sudo, Docker (present, and usable by this user), Strix on the
@@ -559,25 +574,30 @@ value cannot become a command. One installation at a time; an installation lost 
 90 minutes; the log is cleaned of terminal escapes and capped at 200 kB.
 
 ### Tests
-**Backend: 117 new tests (540 in total)** — 36 for the SSH layer, 18 for host-key trust and checks, 33 for scans on a host, 30 for
-installation — run against a **real SSH server** (asyncssh, no external binary) playing a hermetic remote machine with a fake
+**Backend: 138 new tests (561 in total)** — 36 for the SSH layer, 18 for host-key trust and checks, 33 for scans on a host, 30 for
+installation, 21 for password login — run against a **real SSH server** (asyncssh, no external binary) playing a hermetic remote machine with a fake
 `strix`/`docker` on it: the whole scan path, secrets (never in a command line or on the remote disk, redacted in the log and the
 feed), cancel of the process group with and without SIGINT, connection loss, host key changes, fetch limits and symlinks, live
 mirroring of a WAL database, continuation in place and as a copy, leftovers of an earlier attempt, the reaper, schedules. Every
-safeguard was **broken on purpose** (38 mutations: key in the command line, group not signalled, quoting removed, host key not pinned,
+safeguard was **broken on purpose** (50 mutations: key in the command line, group not signalled, quoting removed, host key not pinned,
 symlinks followed, no size cap, remote deletion unrestricted, unconfirmed hosts accepted, one-click trust of a changed key, no
-cleanup after a lost connection, freshness by file time, …) and a test failed each time. Frontend: 6 new unit tests (69 in total) for the host key states and fingerprints. Browser end-to-end against a **real OpenSSH `sshd`**:
-37 checks (see below); the earlier browser suites (77, 28, 65, 34 checks) were rerun as regression.
+cleanup after a lost connection, freshness by file time, …) and a test failed each time. Frontend: 9 new unit tests (72 in total) for the host key states, fingerprints and login methods. Browser end-to-end against a **real
+OpenSSH `sshd`**: 37 checks for keys and 15 for passwords (see below); the earlier browser suites (77, 28, 65, 34 checks) were rerun as
+regression.
 
 ### Verified for real, and what is not
 Verified against a real `sshd` (OpenSSH, as a non-root user): the fingerprint equals `ssh-keygen -lf`; pinned-key login; the probe;
 SFTP; exec exit codes and separate stderr; scans through the UI with cancel (SIGINT ignored, child process), live log/feed/cost,
-continuation in place; a changed host key blocks scans before any login; and the **real Strix installer step** — `uv tool install
+continuation in place; a changed host key blocks scans before any login; **password login** (a runner created with a password only,
+nothing offered before the fingerprint is confirmed, a scan over the password with the password in no log or record, a wrong password
+tried exactly once per check and not retried by the periodic check, recovery by saving the corrected password, swapping the password
+for a key); and the **real Strix installer step** — `uv tool install
 --python 3.12 --force strix-agent==1.7.0` run from the UI through SSH installed a working `strix 1.7.0` into `~/.local/bin`.
 
 **Not verified:** the Docker installer (`get.docker.com`) and the uv installer script — those hosts are not reachable from the
 development sandbox, so they run only against stand-ins in the tests; a **real Docker daemon** on a remote host (sandbox containers,
 `docker pull` of the image) — none is available here; a **real LLM-backed scan** on a host; non-Debian systems (by design not
-touched); rootless Docker / `DOCKER_HOST` on the host; SSH through jump hosts; password or agent authentication (not supported).
+touched); rootless Docker / `DOCKER_HOST` on the host; SSH through jump hosts; SSH agent authentication and keys protected by a passphrase (not supported); keyboard-interactive logins that ask for more than one
+password (a second factor); `sudo` with a password.
 Known limits: Strix's repository clones in `/tmp/strix_repos/<run>` on the host are not removed by the panel; the host's own load is
 not throttled beyond the per-user active-scan limit and the worker's concurrency.

@@ -18,7 +18,7 @@ import {
   type RunnerStatus,
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { groupFingerprint, shortFingerprint, sshActions } from "../lib/hostKey";
+import { authLabel, groupFingerprint, hasLogin, shortFingerprint, sshActions } from "../lib/hostKey";
 
 const KIND_LABEL: Record<RunnerKind, string> = { mock: "Mock", local: "Локальный", ssh: "SSH" };
 const STATUS: Record<RunnerStatus, { label: string; tone: "ok" | "warn" | "bad" | "muted" }> = {
@@ -35,8 +35,11 @@ interface Form {
   ssh_port: string;
   ssh_user: string;
   ssh_private_key: string;
+  ssh_password: string;
+  clear_key: boolean;
+  clear_password: boolean;
 }
-const emptyForm: Form = { name: "", kind: "mock", ssh_host: "", ssh_port: "22", ssh_user: "", ssh_private_key: "" };
+const emptyForm: Form = { name: "", kind: "mock", ssh_host: "", ssh_port: "22", ssh_user: "", ssh_private_key: "", ssh_password: "", clear_key: false, clear_password: false };
 
 /** What the panel knows about the host's key, and what to do about it. */
 function HostKeyBlock({ runner, busy, onConfirm, onForget }: { runner: Runner; busy: boolean; onConfirm: () => void; onForget: () => void }) {
@@ -283,7 +286,7 @@ export default function Runners() {
   };
   const openEdit = (r: Runner) => {
     setEditing(r);
-    setForm({ name: r.name, kind: r.kind, ssh_host: r.ssh_host ?? "", ssh_port: String(r.ssh_port ?? 22), ssh_user: r.ssh_user ?? "", ssh_private_key: "" });
+    setForm({ ...emptyForm, name: r.name, kind: r.kind, ssh_host: r.ssh_host ?? "", ssh_port: String(r.ssh_port ?? 22), ssh_user: r.ssh_user ?? "" });
     setFormError(null);
     setOpen(true);
   };
@@ -291,22 +294,30 @@ export default function Runners() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setFormError(null);
+    const ssh = form.kind === "ssh";
+    if (ssh && !hasLogin({ key: form.ssh_private_key, password: form.ssh_password, hadKey: !!editing?.has_ssh_key, hadPassword: !!editing?.has_ssh_password, clearKey: form.clear_key, clearPassword: form.clear_password })) {
+      setFormError("Нужен хотя бы один способ входа: приватный ключ или пароль.");
+      return;
+    }
     setBusy(true);
     try {
-      const ssh = form.kind === "ssh";
       const port = Number(form.ssh_port) || 22;
+      const credentials = {
+        ...(form.ssh_private_key.trim() ? { ssh_private_key: form.ssh_private_key } : {}),
+        ...(form.ssh_password ? { ssh_password: form.ssh_password } : {}),
+      };
       if (editing) {
         await updateRunner(editing.id, {
           name: form.name,
           ...(ssh
-            ? { ssh_host: form.ssh_host, ssh_port: port, ssh_user: form.ssh_user, ...(form.ssh_private_key.trim() ? { ssh_private_key: form.ssh_private_key } : {}) }
+            ? { ssh_host: form.ssh_host, ssh_port: port, ssh_user: form.ssh_user, ...credentials, clear_ssh_key: form.clear_key, clear_ssh_password: form.clear_password }
             : {}),
         });
       } else {
         await createRunner({
           name: form.name,
           kind: form.kind,
-          ...(ssh ? { ssh_host: form.ssh_host, ssh_port: port, ssh_user: form.ssh_user, ssh_private_key: form.ssh_private_key } : {}),
+          ...(ssh ? { ssh_host: form.ssh_host, ssh_port: port, ssh_user: form.ssh_user, ...credentials } : {}),
         });
       }
       setOpen(false);
@@ -369,7 +380,10 @@ export default function Runners() {
                     <div className="min-w-0">
                       <h3 className="truncate text-sm font-semibold text-white">{r.name}</h3>
                       {r.kind === "ssh" && r.ssh_host && (
-                        <p className="mt-0.5 truncate font-mono text-xs text-slate-500">{r.ssh_user}@{r.ssh_host}:{r.ssh_port}</p>
+                        <p className="mt-0.5 truncate font-mono text-xs text-slate-500">
+                          {r.ssh_user}@{r.ssh_host}:{r.ssh_port}
+                          <span className="ml-2 font-sans text-slate-600" data-testid="auth-label">· вход: {authLabel(r)}</span>
+                        </p>
                       )}
                     </div>
                     <Badge tone="accent">{KIND_LABEL[r.kind]}</Badge>
@@ -436,7 +450,7 @@ export default function Runners() {
           </Field>
 
           {!editing && (
-            <Field label="Тип" hint={{ mock: "Симуляция: токены не тратятся — для отладки панели.", local: "Strix + Docker на сервере панели.", ssh: "Удалённый хост. Панель подключится по SSH (только ключом), попросит сверить отпечаток хоста и сможет установить Docker и Strix." }[form.kind]}>
+            <Field label="Тип" hint={{ mock: "Симуляция: токены не тратятся — для отладки панели.", local: "Strix + Docker на сервере панели.", ssh: "Удалённый хост. Панель подключится по SSH (ключом или паролем), попросит сверить отпечаток хоста и сможет установить Docker и Strix." }[form.kind]}>
               <select className="field" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as RunnerKind })}>
                 <option value="mock">Mock (симуляция)</option>
                 <option value="local">Локальный (Strix + Docker)</option>
@@ -460,9 +474,23 @@ export default function Runners() {
               <Field label="Пользователь">
                 <input className="field font-mono" value={form.ssh_user} onChange={(e) => setForm({ ...form, ssh_user: e.target.value })} required placeholder="root" />
               </Field>
-              <Field label="Приватный ключ" hint={editing?.has_ssh_key ? "Ключ сохранён. Оставьте пустым, чтобы не менять." : "PEM / OpenSSH, без пароля; публичная часть — в authorized_keys пользователя. Хранится в зашифрованном виде."}>
-                <textarea className="field h-28 resize-none font-mono text-xs" value={form.ssh_private_key} onChange={(e) => setForm({ ...form, ssh_private_key: e.target.value })} required={!editing?.has_ssh_key} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" spellCheck={false} />
+              <Field label="Приватный ключ" hint={editing?.has_ssh_key ? "Ключ сохранён. Оставьте пустым, чтобы не менять." : "PEM / OpenSSH, без пароля; публичная часть — в authorized_keys пользователя. Хранится в зашифрованном виде. Нужен ключ или пароль."}>
+                <textarea className="field h-24 resize-none font-mono text-xs" value={form.ssh_private_key} onChange={(e) => setForm({ ...form, ssh_private_key: e.target.value })} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" spellCheck={false} />
               </Field>
+              <Field label="Пароль" hint={editing?.has_ssh_password ? "Пароль сохранён. Оставьте пустым, чтобы не менять." : "Вход по паролю менее надёжен, чем по ключу: пароль можно подобрать. Хранится в зашифрованном виде и отправляется только хосту с подтверждённым ключом. Если указаны оба, сначала пробуется ключ."}>
+                <input className="field font-mono" type="password" autoComplete="new-password" value={form.ssh_password} onChange={(e) => setForm({ ...form, ssh_password: e.target.value })} placeholder={editing?.has_ssh_password ? "••••••••" : ""} aria-label="Пароль" />
+              </Field>
+              {editing && (editing.has_ssh_key || editing.has_ssh_password) && (
+                <div className="space-y-1.5 text-xs text-slate-400">
+                  {editing.has_ssh_password && (
+                    <label className="flex items-center gap-2"><input type="checkbox" className="accent-[#7c5cff]" checked={form.clear_password} onChange={(e) => setForm({ ...form, clear_password: e.target.checked })} /> Удалить сохранённый пароль</label>
+                  )}
+                  {editing.has_ssh_key && (
+                    <label className="flex items-center gap-2"><input type="checkbox" className="accent-[#7c5cff]" checked={form.clear_key} onChange={(e) => setForm({ ...form, clear_key: e.target.checked })} /> Удалить сохранённый ключ</label>
+                  )}
+                  <p className="text-[11px] text-slate-600">Хотя бы один способ входа должен остаться. Для установки системных пакетов нужен root или sudo без пароля — пароль входа для sudo не используется.</p>
+                </div>
+              )}
             </>
           )}
 

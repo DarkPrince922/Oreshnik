@@ -189,7 +189,7 @@ def test_the_periodic_check_refreshes_trusted_hosts_only(client, admin, fake_hos
 
     other = FakeHost(tmp_path / "other-home").start()
     try:
-        ready = make_ssh_runner(fake_host, "ready", trusted=True, status=RunnerStatus.error)
+        ready = make_ssh_runner(fake_host, "ready", trusted=True, status=RunnerStatus.offline)
         unconfirmed = make_ssh_runner(other, "unconfirmed", trusted=False)
         assert check_ssh_runners() == 1
         assert load_runner(ready.id).status == RunnerStatus.online

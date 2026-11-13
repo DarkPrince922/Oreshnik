@@ -119,16 +119,22 @@ def probe(conn: SshConnection) -> RemoteState:
     return parse_probe(result.stdout)
 
 
+def is_configured(runner: Runner) -> bool:
+    """Host, user and at least one way to log in (a key and/or a password)."""
+    return bool(runner.ssh_host and runner.ssh_user and (runner.ssh_key_enc or runner.ssh_password_enc))
+
+
 def target_for(runner: Runner) -> SshTarget:
-    """Connection details with the key decrypted. Only for use inside the worker; never log or serialise the result."""
-    if not (runner.ssh_host and runner.ssh_user and runner.ssh_key_enc):
-        raise SshError(SshErrorKind.other, "У раннера не заданы хост, пользователь или ключ")
+    """Connection details with the secrets decrypted. Only for use inside the worker; never log or serialise the result."""
+    if not is_configured(runner):
+        raise SshError(SshErrorKind.other, "У раннера не заданы хост, пользователь или ключ/пароль")
     return SshTarget(
         host=runner.ssh_host,
         port=runner.ssh_port or 22,
         user=runner.ssh_user,
-        private_key=decrypt(runner.ssh_key_enc),
+        private_key=decrypt(runner.ssh_key_enc) if runner.ssh_key_enc else None,
         host_key=runner.ssh_host_key,
+        password=decrypt(runner.ssh_password_enc) if runner.ssh_password_enc else None,
     )
 
 
@@ -163,8 +169,8 @@ def describe_state(state: RemoteState) -> tuple[RunnerStatus, str]:
 
 def check_ssh_runner(runner: Runner) -> CheckResult:
     """Check an SSH runner end to end. Never raises: every failure becomes a status and a reason."""
-    if not (runner.ssh_host and runner.ssh_user and runner.ssh_key_enc):
-        return CheckResult(RunnerStatus.offline, "Не заданы хост, пользователь или ключ")
+    if not is_configured(runner):
+        return CheckResult(RunnerStatus.offline, "Не заданы хост, пользователь или ключ/пароль")
     port = runner.ssh_port or 22
 
     if not runner.ssh_host_key:

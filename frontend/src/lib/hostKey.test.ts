@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { groupFingerprint, hostKeyState, shortFingerprint, sshActions } from "./hostKey";
+import { authLabel, groupFingerprint, hasLogin, hostKeyState, shortFingerprint, sshActions } from "./hostKey";
 
 const FP = "SHA256:WbG543CEp/v2MBcF1fK4H+yLpG2/YatrKrRVq1dIE0w";
 const OTHER = "SHA256:Zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
@@ -45,5 +45,30 @@ describe("sshActions", () => {
       canInstall: false,
       busy: true,
     });
+  });
+});
+
+describe("authLabel", () => {
+  it("names the ways the panel logs in", () => {
+    expect(authLabel({ has_ssh_key: true, has_ssh_password: false })).toBe("ключ");
+    expect(authLabel({ has_ssh_key: false, has_ssh_password: true })).toBe("пароль");
+    expect(authLabel({ has_ssh_key: true, has_ssh_password: true })).toBe("ключ + пароль");
+    expect(authLabel({ has_ssh_key: false, has_ssh_password: false })).toBe("нет входа");
+  });
+});
+
+describe("hasLogin", () => {
+  const none = { key: "", password: "", hadKey: false, hadPassword: false, clearKey: false, clearPassword: false };
+  it("needs a key or a password", () => {
+    expect(hasLogin(none)).toBe(false);
+    expect(hasLogin({ ...none, key: "-----BEGIN" })).toBe(true);
+    expect(hasLogin({ ...none, password: "x" })).toBe(true);
+    expect(hasLogin({ ...none, key: "   " })).toBe(false); // whitespace is not a key
+  });
+  it("counts what is already stored, unless it is being removed", () => {
+    expect(hasLogin({ ...none, hadPassword: true })).toBe(true);
+    expect(hasLogin({ ...none, hadPassword: true, clearPassword: true })).toBe(false);
+    expect(hasLogin({ ...none, hadKey: true, hadPassword: true, clearKey: true })).toBe(true); // the password remains
+    expect(hasLogin({ ...none, hadPassword: true, clearPassword: true, password: "new" })).toBe(true); // replaced in the same step
   });
 });

@@ -15,6 +15,18 @@ export function hostKeyState(r: KeyFields): HostKeyState {
   return pending ? "pending" : "unknown";
 }
 
+/** How the panel logs in to the host: "ключ", "пароль" or "ключ + пароль". */
+export function authLabel(r: Pick<Runner, "has_ssh_key" | "has_ssh_password">): string {
+  return [r.has_ssh_key ? "ключ" : null, r.has_ssh_password ? "пароль" : null].filter(Boolean).join(" + ") || "нет входа";
+}
+
+/** Whether a runner form describes at least one way to log in (what is stored, what is typed, minus what is being removed). */
+export function hasLogin(input: { key: string; password: string; hadKey: boolean; hadPassword: boolean; clearKey: boolean; clearPassword: boolean }): boolean {
+  const key = input.key.trim() !== "" || (input.hadKey && !input.clearKey);
+  const password = input.password !== "" || (input.hadPassword && !input.clearPassword);
+  return key || password;
+}
+
 /** "SHA256:AbCd…WxYz" for a tight spot; the full value is always available on hover and in the dialog. */
 export function shortFingerprint(fp: string, keep = 10): string {
   const body = fp.replace(/^SHA256:/, "");

@@ -9,8 +9,9 @@ Security rules that live here, not in the callers:
 * **The host key is always pinned.** A connection is only opened against a key an administrator has confirmed; a different key
   is an error ("host key changed"), never a prompt and never an automatic update. The only thing allowed without a pinned key
   is *fetching* the key to show its fingerprint (`fetch_host_key`), which authenticates nothing and sends no credentials.
-* Key authentication only: no passwords, no SSH agent, no ~/.ssh/config of the machine the panel runs on.
-* Secrets (the private key, anything passed as `input`) are never part of an error message.
+* Authentication by key and/or password (never an SSH agent, never the ~/.ssh/config of the machine the panel runs on). Either
+  secret is only ever offered to a host whose key is pinned — a password sent to an impostor would be handed over in the clear.
+* Secrets (the private key, the password, anything passed as `input`) are never part of an error message.
 * What is downloaded from a remote host is untrusted: names are validated, symlinks are skipped, and the total size and the
   number of files are capped.
 """
@@ -61,8 +62,13 @@ class SshTarget:
     host: str
     port: int
     user: str
-    private_key: str = field(repr=False)
+    private_key: str | None = field(default=None, repr=False)
     host_key: str | None = None  # the pinned OpenSSH public key line; required to connect
+    password: str | None = field(default=None, repr=False)  # login by password; the key, if any, is tried first
+
+    @property
+    def methods(self) -> str:
+        return "+".join(m for m, present in (("ключ", self.private_key), ("пароль", self.password)) if present)
 
 
 @dataclass
@@ -245,31 +251,48 @@ class SshConnection:
             return self
         if not self.target.host_key:
             raise SshError(SshErrorKind.host_key_untrusted, "Ключ хоста не подтверждён: подтвердите отпечаток на странице «Раннеры»")
+        if not (self.target.private_key or self.target.password):
+            raise SshError(SshErrorKind.auth, "Для входа не задан ни ключ, ни пароль")
         try:
             trusted = asyncssh.import_public_key(self.target.host_key)
-            client_key = asyncssh.import_private_key(self.target.private_key)
+            client_key = asyncssh.import_private_key(self.target.private_key) if self.target.private_key else None
         except (asyncssh.KeyImportError, ValueError) as exc:
             raise SshError(SshErrorKind.auth, "Не удалось прочитать ключ (приватный или ключ хоста)") from exc
         self._loop = _LoopThread()
         try:
             self._conn = self._loop.call(self._connect(trusted, client_key), self.connect_timeout + 10)
+        except SshError as exc:
+            self.close()
+            if exc.kind == SshErrorKind.auth and self.target.password and not self.target.private_key:
+                raise SshError(
+                    SshErrorKind.auth,
+                    "Хост не принял пароль: проверьте пользователя и пароль, и что на хосте разрешён вход по паролю",
+                ) from exc
+            if exc.kind == SshErrorKind.auth and self.target.password:
+                raise SshError(SshErrorKind.auth, "Хост не принял ни ключ, ни пароль: проверьте пользователя и учётные данные") from exc
+            raise
         except BaseException:
             self.close()
             raise
         return self
 
-    async def _connect(self, trusted: "asyncssh.SSHKey", client_key: "asyncssh.SSHKey") -> asyncssh.SSHClientConnection:
+    async def _connect(self, trusted: "asyncssh.SSHKey", client_key: "asyncssh.SSHKey | None") -> asyncssh.SSHClientConnection:
+        # Methods in order of preference; password and keyboard-interactive (how PAM usually asks for a password) are
+        # only on offer when a password was given.
+        methods = ["publickey"] if client_key is not None else []
+        if self.target.password:
+            methods += ["password", "keyboard-interactive"]
         return await asyncio.wait_for(
             asyncssh.connect(
                 self.target.host,
                 self.target.port,
                 username=self.target.user,
-                client_keys=[client_key],
+                client_keys=[client_key] if client_key is not None else None,
                 known_hosts=([trusted], [], []),  # only this key is acceptable
                 agent_path=None,
                 config=None,
-                password=None,
-                preferred_auth="publickey",
+                password=self.target.password,
+                preferred_auth=",".join(methods),
                 keepalive_interval=15,
                 keepalive_count_max=3,
                 connect_timeout=self.connect_timeout,

@@ -39,6 +39,7 @@ def _out(runner: Runner, viewer: User) -> RunnerOut:
         out.ssh_port = runner.ssh_port
         out.ssh_user = runner.ssh_user
         out.has_ssh_key = bool(runner.ssh_key_enc)
+        out.has_ssh_password = bool(runner.ssh_password_enc)
         out.ssh_host_key_fingerprint = _fingerprint(runner.ssh_host_key)
         out.ssh_host_key_pending_fingerprint = _fingerprint(runner.ssh_host_key_pending)
         out.ssh_host_key_algorithm = key_algorithm(runner.ssh_host_key or runner.ssh_host_key_pending or "") or None
@@ -80,6 +81,7 @@ def create_runner(
         ssh_port=body.ssh_port,
         ssh_user=body.ssh_user,
         ssh_key_enc=encrypt(body.ssh_private_key) if body.ssh_private_key else None,
+        ssh_password_enc=encrypt(body.ssh_password) if body.ssh_password else None,
         status=RunnerStatus.offline,
         status_detail="Ещё не проверялся",
     )
@@ -115,8 +117,22 @@ def update_runner(
             runner.ssh_port = body.ssh_port
         if body.ssh_user is not None:
             runner.ssh_user = body.ssh_user
+        credentials_changed = False
         if body.ssh_private_key:
-            runner.ssh_key_enc = encrypt(body.ssh_private_key)
+            runner.ssh_key_enc, credentials_changed = encrypt(body.ssh_private_key), True
+        if body.ssh_password:
+            runner.ssh_password_enc, credentials_changed = encrypt(body.ssh_password), True
+        if body.clear_ssh_key and not body.ssh_private_key:
+            runner.ssh_key_enc, credentials_changed = None, True
+        if body.clear_ssh_password and not body.ssh_password:
+            runner.ssh_password_enc, credentials_changed = None, True
+        if not (runner.ssh_key_enc or runner.ssh_password_enc):
+            db.rollback()
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Нужен хотя бы один способ входа: ключ или пароль")
+        if credentials_changed and not moved:
+            # New credentials deserve a fresh look; the pinned host key stays (it is about the host, not the login).
+            runner.status = RunnerStatus.offline
+            runner.status_detail = "Учётные данные изменены — проверьте раннер"
         if moved:
             # A different address is a different machine: what was confirmed for the old one means nothing here.
             runner.ssh_host_key = runner.ssh_host_key_pending = None

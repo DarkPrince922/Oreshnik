@@ -16,7 +16,7 @@ from app.models.llm_profile import LLMProfile
 from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, Scan, ScanMode, ScanStatus
 from app.models.user import Role, User
-from app.services.ssh_runner import is_provisioning
+from app.services.ssh_runner import is_configured, is_provisioning
 from app.services.targets import TargetKind, classify_all
 
 
@@ -45,8 +45,8 @@ def check_runner_usable(runner: Runner) -> None:
     """Refuse what can never work, before a scan is created (so a schedule is switched off with a reason instead of
     producing a failed scan every night)."""
     if runner.kind == RunnerKind.ssh:
-        if not (runner.ssh_host and runner.ssh_user and runner.ssh_key_enc):
-            raise ScanRequestError(422, "SSH-раннер не настроен: нужны хост, пользователь и ключ")
+        if not is_configured(runner):
+            raise ScanRequestError(422, "SSH-раннер не настроен: нужны хост, пользователь и ключ или пароль")
         if is_provisioning(runner):
             raise ScanRequestError(409, "На раннере идёт установка — дождитесь её окончания")
         if not runner.ssh_host_key:

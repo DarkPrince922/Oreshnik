@@ -194,15 +194,17 @@ def fake_host(tmp_path):
     host.stop()
 
 
-def make_ssh_runner(host, name: str = "remote", *, trusted: bool = False, status=None):
-    """An SSH runner row pointing at a FakeHost (the private key is stored encrypted, like the API does)."""
+def make_ssh_runner(host, name: str = "remote", *, trusted: bool = False, status=None, password: str | None = None, with_key: bool = True):
+    """An SSH runner row pointing at a FakeHost (key and/or password are stored encrypted, like the API does)."""
     from app.core.crypto import encrypt
     from app.models.runner import Runner, RunnerKind, RunnerStatus
 
     with SessionLocal() as db:
         runner = Runner(
             name=name, kind=RunnerKind.ssh, status=status or RunnerStatus.offline, status_detail="Ещё не проверялся",
-            ssh_host="127.0.0.1", ssh_port=host.port, ssh_user=host.user, ssh_key_enc=encrypt(host.client_key_pem),
+            ssh_host="127.0.0.1", ssh_port=host.port, ssh_user=host.user,
+            ssh_key_enc=encrypt(host.client_key_pem) if with_key else None,
+            ssh_password_enc=encrypt(password) if password else None,
             ssh_host_key=host.host_key_line if trusted else None,
         )
         db.add(runner)

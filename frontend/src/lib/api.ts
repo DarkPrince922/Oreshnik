@@ -113,6 +113,7 @@ export interface Runner {
   ssh_port: number | null;
   ssh_user: string | null;
   has_ssh_key: boolean;
+  has_ssh_password: boolean;
   /** The pinned host key (every connection is checked against it) and a key still waiting for confirmation. */
   ssh_host_key_fingerprint: string | null;
   ssh_host_key_pending_fingerprint: string | null;
@@ -240,6 +241,10 @@ export interface RunnerInput {
   ssh_port?: number | null;
   ssh_user?: string | null;
   ssh_private_key?: string | null;
+  ssh_password?: string | null;
+  /** Remove a stored key / password (at least one way to log in must remain). */
+  clear_ssh_key?: boolean;
+  clear_ssh_password?: boolean;
 }
 export const listRunners = async () => (await api.get<Runner[]>("/api/runners")).data;
 export const createRunner = async (body: RunnerInput) => (await api.post<Runner>("/api/runners", body)).data;

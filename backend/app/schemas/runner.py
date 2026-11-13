@@ -18,6 +18,15 @@ def _check_private_key(value: str | None) -> str | None:
     return value + "\n"
 
 
+def _check_password(value: str | None) -> str | None:
+    """A password is kept exactly as typed (spaces can matter); only the impossible is refused."""
+    if value is None or value == "":
+        return None
+    if len(value) > 1024 or "\x00" in value:
+        raise ValueError("ssh_password is too long or contains a NUL character")
+    return value
+
+
 class RunnerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     kind: RunnerKind
@@ -25,8 +34,10 @@ class RunnerCreate(BaseModel):
     ssh_port: int = Field(default=22, ge=1, le=65535)
     ssh_user: str | None = Field(default=None, max_length=100)
     ssh_private_key: str | None = None
+    ssh_password: str | None = None
 
     _key = field_validator("ssh_private_key")(_check_private_key)
+    _password = field_validator("ssh_password")(_check_password)
 
     @field_validator("name")
     @classmethod
@@ -39,25 +50,29 @@ class RunnerCreate(BaseModel):
     @model_validator(mode="after")
     def _ssh_requirements(self) -> "RunnerCreate":
         if self.kind == RunnerKind.ssh:
-            if not (self.ssh_host and self.ssh_user and self.ssh_private_key):
-                raise ValueError("ssh runners require ssh_host, ssh_user and ssh_private_key")
+            if not (self.ssh_host and self.ssh_user and (self.ssh_private_key or self.ssh_password)):
+                raise ValueError("ssh runners require ssh_host, ssh_user and an ssh_private_key or an ssh_password")
         else:
             # SSH details make no sense for other kinds — drop them.
-            self.ssh_host = self.ssh_user = self.ssh_private_key = None
+            self.ssh_host = self.ssh_user = self.ssh_private_key = self.ssh_password = None
             self.ssh_port = 22
         return self
 
 
 class RunnerUpdate(BaseModel):
-    """Kind is immutable. `ssh_private_key` is only replaced when provided."""
+    """Kind is immutable. A key or password is only replaced when provided, and only removed on request (`clear_*`)."""
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
     ssh_host: str | None = Field(default=None, max_length=255)
     ssh_port: int | None = Field(default=None, ge=1, le=65535)
     ssh_user: str | None = Field(default=None, max_length=100)
     ssh_private_key: str | None = None
+    ssh_password: str | None = None
+    clear_ssh_key: bool = False
+    clear_ssh_password: bool = False
 
     _key = field_validator("ssh_private_key")(_check_private_key)
+    _password = field_validator("ssh_password")(_check_password)
 
 
 class RunnerOut(BaseModel):
@@ -73,6 +88,7 @@ class RunnerOut(BaseModel):
     ssh_port: int | None = None
     ssh_user: str | None = None
     has_ssh_key: bool = False
+    has_ssh_password: bool = False
     ssh_host_key_fingerprint: str | None = None          # the pinned host key
     ssh_host_key_pending_fingerprint: str | None = None  # a key waiting for confirmation
     ssh_host_key_algorithm: str | None = None

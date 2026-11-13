@@ -36,9 +36,11 @@ SYSTEM_TOOLS = (
 
 
 class FakeHost:
-    def __init__(self, home: Path, *, user: str = "scan"):
+    def __init__(self, home: Path, *, user: str = "scan", password: str | None = None):
         self.home = home
         self.user = user
+        self.password = password      # None: this host does not allow password login at all
+        self.allow_key = True
         self.client_key = asyncssh.generate_private_key("ssh-ed25519")
         self.host_key = asyncssh.generate_private_key("ssh-ed25519")
         # exported once: every export of an OpenSSH key carries a fresh random check value, so two exports differ as text
@@ -48,6 +50,8 @@ class FakeHost:
         self.connections: list[asyncssh.SSHServerConnection] = []
         self.logins = 0       # successful key authentications
         self.attempts = 0     # every public-key authentication attempt, successful or not
+        self.password_attempts = 0
+        self.password_logins = 0
         self._loop: _LoopThread | None = None
         self._server: asyncssh.SSHAcceptor | None = None
         self.port = 0
@@ -70,6 +74,10 @@ class FakeHost:
 
     def target(self, *, trusted: bool = True) -> SshTarget:
         return SshTarget("127.0.0.1", self.port, self.user, self.client_key_pem, self.host_key_line if trusted else None)
+
+    def password_target(self, password: str | None = None, *, trusted: bool = True) -> SshTarget:
+        """Log in with a password only (no key)."""
+        return SshTarget("127.0.0.1", self.port, self.user, None, self.host_key_line if trusted else None, password or self.password)
 
     # -- the fake machine
     def install_tools(self, *, strix: bool = True, docker: bool = True) -> None:
@@ -98,7 +106,16 @@ class FakeHost:
                 return True
 
             def public_key_auth_supported(self):
-                return True
+                return host.allow_key
+
+            def password_auth_supported(self):
+                return host.password is not None
+
+            def validate_password(self, username, password):
+                host.password_attempts += 1
+                ok = host.password is not None and username == host.user and password == host.password
+                host.password_logins += 1 if ok else 0
+                return ok
 
             def validate_public_key(self, username, key):
                 ok = username == host.user and key.public_data == host.client_key.public_data

@@ -114,7 +114,16 @@ def check_ssh_runners() -> int:
     confirmed yet are left alone — nobody asked for them to be contacted beyond the first look."""
     with SessionLocal() as db:
         ids = db.scalars(
-            select(Runner.id).where(Runner.kind == RunnerKind.ssh, Runner.ssh_host_key.is_not(None)).order_by(Runner.id)
+            select(Runner.id)
+            .where(
+                Runner.kind == RunnerKind.ssh,
+                Runner.ssh_host_key.is_not(None),
+                # A host that rejected the login (or changed its key) is not asked again every two minutes: a wrong
+                # password repeated that way gets the panel locked out by fail2ban and the like. An administrator's
+                # "Проверить" — or fixing the credentials — starts it again.
+                Runner.status != RunnerStatus.error,
+            )
+            .order_by(Runner.id)
         ).all()
     done = 0
     for runner_id in ids:
