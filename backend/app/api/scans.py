@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user, require_operator
-from app.core.config import settings
 from app.core.db import SessionLocal, get_db
 from app.core.security import decode_access_token
 from app.models.llm_profile import LLMProfile
@@ -46,7 +45,7 @@ from app.services.scan_files import (
     tail_from,
 )
 from app.services.resume import ResumeError, check_resumable
-from app.services.scan_factory import ScanRequestError, check_runner_usable, create_queued_scan
+from app.services.scan_factory import ScanRequestError, check_runner_capacity, check_runner_usable, create_queued_scan
 from app.worker.tasks import scan_run
 
 log = logging.getLogger("oreshnik.scans")
@@ -267,14 +266,12 @@ def continue_scan(
     if busy is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Этот прогон уже продолжается в скане #{busy}")
 
-    active = db.scalar(
-        select(func.count()).select_from(Scan).where(Scan.user_id == user.id, Scan.status.in_(ACTIVE_STATUSES))
-    )
-    if active >= settings.max_active_scans_per_user:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"Уже запущено сканов: {active}. Лимит — {settings.max_active_scans_per_user}; дождитесь завершения или отмените лишние.",
-        )
+    # Same room rules as a new scan, on the runner this one goes back to (and it takes the runner's row lock until the
+    # commit below, so a second request cannot count the same free place).
+    try:
+        check_runner_capacity(db, user, runner, list(scan.targets))
+    except ScanRequestError as exc:
+        raise HTTPException(exc.status_code, exc.detail)
 
     if not in_place:
         child = Scan(

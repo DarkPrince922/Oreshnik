@@ -399,7 +399,7 @@ owner's scan on the admin's key and bill the owner (the API answers 403 for an i
   key); in place that user is always the owner. Mock runs need none.
 - A scan that finished on its own (`succeeded` / `vulns_found`) needs a new instruction; a stopped or failed one can simply resume.
 - At most one active scan per Strix run (409 "уже продолжается в скане #N", also across the two kinds); a parent cannot be deleted
-  while a *copy* still needs it. The per-user active-scan limit applies, and a refused request changes nothing about the scan.
+  while a *copy* still needs it. The runner's capacity rules apply (§17), and a refused request changes nothing about the scan.
 - A scan continued in place that was started by a schedule counts as active, so the schedule's next firing is skipped meanwhile.
 - **Exit code 2 safeguard.** A continued run starts out holding the parent's findings, and argparse also exits with 2. So
   "vulnerabilities found" is only believed if Strix really touched the run (`run.json` changed); otherwise it is a failure.
@@ -442,7 +442,7 @@ plus a 5-field **cron** expression and an IANA **time zone**. Migration `0005_sc
 due schedule the task first *claims* the firing with `UPDATE … WHERE next_run_at = <expected>` — a compare-and-swap, so two beat
 processes or overlapping ticks can never start the same firing twice — and only then starts the scan, as its **owner**, with the
 owner's LLM profile, through the same code as `POST /api/scans` (`services/scan_factory.py`), so every rule of a normal scan
-(targets, filesystem paths admin-only, per-user active-scan limit, profile ownership) applies unchanged.
+(targets, filesystem paths admin-only, the runner's capacity rules §17, profile ownership) applies unchanged.
 
 **What it does when things go wrong** (the outcome is stored on the schedule and shown on its card):
 
@@ -637,7 +637,7 @@ development sandbox, so they run only against stand-ins in the tests; a **real D
 touched); rootless Docker / `DOCKER_HOST` on the host; SSH through jump hosts; SSH agent authentication and keys protected by a passphrase (not supported); keyboard-interactive logins that ask for more than one
 password (a second factor); `sudo` with a password.
 Known limits: Strix's repository clones in `/tmp/strix_repos/<run>` on the host are not removed by the panel; the host's own load is
-not throttled beyond the per-user active-scan limit and the worker's concurrency.
+not throttled beyond the runner's own limits (§17) and the worker's concurrency.
 
 ## 16. Custom-provider model ids, and fetching a provider's model list
 
@@ -683,3 +683,54 @@ total) for `canFetchModels`/`mergeModelOptions`. Verified for real, beyond the m
 making a genuine outbound HTTP call (real `httpx`, real sockets) to a throwaway OpenAI-compatible stand-in server, both
 directly (`curl`) and driven through a real headless browser — opening the LLM-profiles page, picking `custom`, filling
 `base_url`/key, clicking **Загрузить модели**, seeing the datalist fill with both ids above, and saving the profile.
+
+## 17. Per-runner limits: scans per account, targets at once
+
+Two numbers on every runner (`runners.max_scans_per_user`, `runners.max_targets`; migration 0009), set by an administrator
+when the runner is created and editable later. Both are checked in one place, `services/scan_factory.py::check_runner_capacity`,
+which `POST /api/scans`, schedules and `POST /api/scans/{id}/continue` (in place or as a copy) all go through.
+
+| | meaning | default |
+|---|---|---|
+| `max_scans_per_user` | active scans (`queued`, `running`, `cancelling`) one **account** may have **on this runner** | empty = `MAX_ACTIVE_SCANS_PER_USER` (3), read at check time, so changing it needs no edit of any runner |
+| `max_targets` | **distinct targets** (domains / hosts) being scanned on this runner at once, **all accounts together** | empty = no limit; the form prefills 3 for a new SSH host, nothing for a local runner |
+
+Behaviour worth knowing:
+- **Per runner, not per account in total.** The earlier single per-account cap across all runners is gone: with a local runner and an
+  SSH host an account can have up to its number on *each*. `MAX_ACTIVE_SCANS_PER_USER` is now only the default for a runner that has
+  no number of its own. (The worker still decides how many scans *run* at once — `SCAN_CONCURRENCY`; the rest wait as `queued`.)
+- **What counts as one target** (`services/targets.py::target_key`): the host. `https://App.example.com:8443/login`,
+  `app.example.com/x` and `APP.example.com` are one; an IP is its own address; a `git@…` / `git://` repository or a local path is
+  counted as the whole string. A repository served over https looks like a web application and counts as its host, so several
+  repositories on one forge are one target here — the per-account number still bounds how many such scans there can be.
+  `www.example.com` and `example.com` are two hosts. Two accounts scanning the same host share one place.
+- **Queued scans hold their place** (they are active), like they already did for the per-account cap. Places come back as soon as
+  a scan finishes, fails or is cancelled — there is no counter to drift: both numbers are counted from the scans table each time.
+- **Refusals.** Over the per-account number or the target limit: `429` (transient — a schedule is *skipped*, not switched off). A
+  single scan with more distinct targets than the runner can *ever* hold: `422` ("Разбейте скан") — waiting would never help. A refusal
+  says how many places are taken, **never whose targets** (another account's domains are not for you to read).
+- **No race.** The check takes `SELECT … FOR UPDATE` on the runner row and the caller commits straight after, so two simultaneous
+  requests for the last place are handled one after the other (before, the count and the insert were two separate steps and a script
+  could overshoot the per-account number). The lock is per runner: other runners are not slowed down.
+
+What this does **not** do: it does not limit what a scan costs on the host (CPU, memory, a sandbox's processes) — Strix has its own
+`STRIX_SANDBOX_MEM_LIMIT` / `_CPUS` / `_PIDS_LIMIT`, which the panel still does not set — and it does not isolate the sandboxes of
+different scans on one host from each other (they share Docker's default bridge network).
+
+### Checked against the installed Strix (1.7.0) before building it
+Strix has no concurrency or "targets" limit of its own, so this had to live in the panel; and nothing in Strix stands in the way
+of several scans on one host: one sandbox container per run (cached per process by run id, so sub-agents share it), Docker names it
+itself (no name clashes), the label `strix-run-id` is per run, Caido's port is published as a random free host port, the per-run
+directories (`strix_repos/<run>`, `strix_api_specs/<run>`) are keyed by run name, and the only cross-process file lock is for Codex
+subscription tokens, which the panel does not use. A run takes any number of `--target`s into that one sandbox.
+
+### Tests
+Backend: 39 new tests (637 in total) in `tests/test_runner_limits.py` — what counts as a target; the per-account number per runner (own number, panel default,
+other runners and accounts unaffected, places freed by a cancel); the target limit across accounts (same host not counted twice,
+nobody's targets in a refusal, freed by a cancel, a scan that can never fit, per-runner, no limit); continuation in place and as a copy;
+a schedule that does not fit is skipped; **simultaneous requests** (8 for 3 places → exactly 3; 6 hosts for 2 places → exactly 2); and
+setting/clearing the limits through the API. The checks were broken on purpose (no row lock, count ignoring the runner, the runner's
+own number ignored, raw strings instead of hosts, only own scans counted, 429 instead of 422, a refusal naming the busy targets, the
+continue path unchecked, "no limit" not honoured) and a test failed each time. Frontend: 6 new unit tests (85 in total) for the
+limit fields. Browser end-to-end on the real stack: a local runner shows the defaults, an SSH host starts with 3 targets and keeps an
+edited value, `0` is refused with a message, an empty field clears the limit; the refusals were also read off the live API.

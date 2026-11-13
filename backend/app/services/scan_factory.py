@@ -1,9 +1,9 @@
 """Creating a scan from a request — shared by `POST /api/scans` and by schedules.
 
 All the rules live here once: target classification (filesystem paths are admin-only), runner and LLM-profile
-resolution (a profile is personal and mandatory for any runner that really calls a model), and the per-user cap on
-active scans. Errors are raised as `ScanRequestError`, which the API turns into an HTTP response and the scheduler
-turns into a note on the schedule.
+resolution (a profile is personal and mandatory for any runner that really calls a model), and the runner's capacity
+(scans per account, targets at once). Errors are raised as `ScanRequestError`, which the API turns into an HTTP response
+and the scheduler turns into a note on the schedule.
 """
 
 from dataclasses import dataclass
@@ -17,7 +17,7 @@ from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, Scan, ScanMode, ScanStatus
 from app.models.user import Role, User
 from app.services.ssh_runner import is_configured, is_provisioning
-from app.services.targets import TargetKind, classify_all
+from app.services.targets import TargetKind, classify_all, target_key
 
 
 class ScanRequestError(Exception):
@@ -104,15 +104,57 @@ def resolve_request(
     return Resolved(targets=[t for t, _ in classified], runner=runner, profile=profile)
 
 
-def check_active_limit(db: Session, user: User) -> None:
+def effective_scans_per_user(runner: Runner) -> int:
+    """Active scans one account may have on this runner: its own setting, else the panel default."""
+    return runner.max_scans_per_user if runner.max_scans_per_user is not None else settings.max_active_scans_per_user
+
+
+def check_runner_capacity(db: Session, user: User, runner: Runner, targets: list[str]) -> None:
+    """Refuse a scan the runner has no room for: too many of this account's scans on it, or too many distinct targets
+    (domains / hosts) being scanned on it at once, all accounts together.
+
+    Call it right before the scan is stored and commit straight after. It first takes a row lock on the runner, so two
+    requests for the same runner are checked one after the other — otherwise both could count the same free place.
+    The lock is released by the commit (or by the rollback when the request fails).
+
+    Nothing here names another account's targets: a refusal only says how many places are taken.
+    """
+    db.execute(select(Runner.id).where(Runner.id == runner.id).with_for_update())
+
+    limit = effective_scans_per_user(runner)
     active = db.scalar(
-        select(func.count()).select_from(Scan).where(Scan.user_id == user.id, Scan.status.in_(ACTIVE_STATUSES))
+        select(func.count())
+        .select_from(Scan)
+        .where(Scan.user_id == user.id, Scan.runner_id == runner.id, Scan.status.in_(ACTIVE_STATUSES))
     )
-    if active >= settings.max_active_scans_per_user:
+    if active >= limit:
         raise ScanRequestError(
             429,
-            f"Уже запущено сканов: {active}. Лимит — {settings.max_active_scans_per_user}; "
+            f"Уже запущено сканов на раннере «{runner.name}»: {active}. Лимит — {limit}; "
             "дождитесь завершения или отмените лишние.",
+        )
+
+    if runner.max_targets is None:
+        return
+    wanted = {target_key(t) for t in targets}
+    if len(wanted) > runner.max_targets:
+        # Not "later" — this request can never fit, however empty the runner gets.
+        raise ScanRequestError(
+            422,
+            f"В скане целей: {len(wanted)}, а раннер «{runner.name}» сканирует одновременно не больше "
+            f"{runner.max_targets}. Разбейте скан на несколько.",
+        )
+    busy: set[str] = set()
+    for scan_targets in db.scalars(
+        select(Scan.targets).where(Scan.runner_id == runner.id, Scan.status.in_(ACTIVE_STATUSES))
+    ):
+        busy.update(target_key(t) for t in scan_targets)
+    added = len(wanted - busy)
+    if len(busy) + added > runner.max_targets:
+        raise ScanRequestError(
+            429,
+            f"Лимит целей на раннере «{runner.name}»: {runner.max_targets} одновременно (домены и хосты). "
+            f"Сейчас занято {len(busy)}, этот скан добавил бы ещё {added}. Дождитесь, пока другие сканы завершатся.",
         )
 
 
@@ -130,7 +172,7 @@ def create_queued_scan(
 ) -> Scan:
     """Validate, apply the per-user limit and persist a `queued` scan. The caller enqueues it."""
     resolved = resolve_request(db, user, targets=targets, runner_id=runner_id, llm_profile_id=llm_profile_id)
-    check_active_limit(db, user)
+    check_runner_capacity(db, user, resolved.runner, resolved.targets)
     scan = Scan(
         user_id=user.id,
         runner_id=resolved.runner.id,

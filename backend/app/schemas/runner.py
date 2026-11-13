@@ -27,6 +27,11 @@ def _check_password(value: str | None) -> str | None:
     return value
 
 
+# Sanity bounds, not policy: a typo such as 100000 should not silently mean "no limit".
+MAX_SCANS_PER_USER_CAP = 100
+MAX_TARGETS_CAP = 1000
+
+
 class RunnerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     kind: RunnerKind
@@ -35,6 +40,10 @@ class RunnerCreate(BaseModel):
     ssh_user: str | None = Field(default=None, max_length=100)
     ssh_private_key: str | None = None
     ssh_password: str | None = None
+    # Active scans one account may have on this runner (omitted = the panel default, 3 unless configured otherwise).
+    max_scans_per_user: int | None = Field(default=None, ge=1, le=MAX_SCANS_PER_USER_CAP)
+    # Distinct targets (domains / hosts) scanned here at once, all accounts together (omitted = no limit).
+    max_targets: int | None = Field(default=None, ge=1, le=MAX_TARGETS_CAP)
 
     _key = field_validator("ssh_private_key")(_check_private_key)
     _password = field_validator("ssh_password")(_check_password)
@@ -70,6 +79,9 @@ class RunnerUpdate(BaseModel):
     ssh_password: str | None = None
     clear_ssh_key: bool = False
     clear_ssh_password: bool = False
+    # Sent as null they go back to "the panel default" / "no limit"; left out they are not touched.
+    max_scans_per_user: int | None = Field(default=None, ge=1, le=MAX_SCANS_PER_USER_CAP)
+    max_targets: int | None = Field(default=None, ge=1, le=MAX_TARGETS_CAP)
 
     _key = field_validator("ssh_private_key")(_check_private_key)
     _password = field_validator("ssh_password")(_check_password)
@@ -83,6 +95,10 @@ class RunnerOut(BaseModel):
     status_detail: str | None
     last_seen_at: datetime | None
     created_at: datetime
+    # Visible to everyone: it explains why a scan is refused.
+    max_scans_per_user: int | None = None            # as set (None = the panel default)
+    effective_max_scans_per_user: int = 0            # what is actually applied
+    max_targets: int | None = None                   # None = no limit
     # Visible to admins only:
     ssh_host: str | None = None
     ssh_port: int | None = None

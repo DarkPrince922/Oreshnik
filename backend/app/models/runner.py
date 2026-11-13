@@ -44,6 +44,11 @@ class Runner(Base):
     # what the host presented and still has to be confirmed by an administrator (fingerprint comparison).
     ssh_host_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     ssh_host_key_pending: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How much this runner takes on. Both are checked when a scan is created or continued (services/scan_factory.py).
+    # `max_scans_per_user`: active scans one account may have here; NULL = the panel default (MAX_ACTIVE_SCANS_PER_USER).
+    # `max_targets`: distinct targets (domains / hosts) being scanned here at once, all accounts together; NULL = no limit.
+    max_scans_per_user: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_targets: Mapped[int | None] = mapped_column(Integer, nullable=True)
     provision_log: Mapped[str | None] = mapped_column(Text, nullable=True)
     provision_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(

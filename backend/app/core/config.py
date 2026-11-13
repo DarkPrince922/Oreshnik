@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     strix_cancel_grace_seconds: int = 20
     # A running scan whose worker has not heartbeated for this long is marked failed.
     scan_stale_seconds: int = 180
-    # Guard against accidentally burning tokens with many parallel scans.
+    # Guard against accidentally burning tokens with many parallel scans: active (queued + running) scans one account may
+    # have on ONE runner. A runner can set its own number (`runners.max_scans_per_user`); this is the default for the rest.
     max_active_scans_per_user: int = 3
     scan_log_max_bytes: int = 20_000_000
     # Pace of the simulated runner (seconds between lines). Tests set 0.

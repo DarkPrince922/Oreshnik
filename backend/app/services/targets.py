@@ -90,3 +90,33 @@ def classify_all(raw_targets: list[str]) -> list[tuple[str, TargetKind]]:
             seen.add(target)
             out.append((target, kind))
     return out
+
+
+def target_key(target: str) -> str:
+    """What the per-runner "targets at once" limit counts: the host a target points at.
+
+    `https://App.Example.com:8443/login`, `app.example.com` and `app.example.com/x` are one target (one host to
+    be scanned), an IP is its own normalised address, and anything that is not a host to be reached over the
+    network (a `git@host:org/repo` or `git://` repository, a local path) is counted as the whole string.
+
+    A repository served over https (`https://github.com/org/repo`) cannot be told from a web application by its
+    shape, so it counts as its host: several repositories on one forge are one "target" for this limit. The per-account
+    cap still bounds how many such scans there can be.
+    """
+    t = target.strip()
+    if _GIT_SSH_RE.match(t) or t.startswith("git://"):
+        return t
+    if _DOMAIN_RE.match(t) or _HOST_PATH_RE.match(t):
+        return t.split("/", 1)[0].rsplit(":", 1)[0].lower().rstrip(".")
+    try:
+        return str(ipaddress.ip_address(t))
+    except ValueError:
+        pass
+    parsed = urlparse(t)
+    if parsed.scheme in ("http", "https") and parsed.hostname:
+        host = parsed.hostname.rstrip(".")
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            return host
+    return t

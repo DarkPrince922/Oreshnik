@@ -119,6 +119,10 @@ export interface Runner {
   ssh_host_key_pending_fingerprint: string | null;
   ssh_host_key_algorithm: string | null;
   has_provision_log: boolean;
+  /** As set (null = the panel default) and what is applied; `max_targets` null = no limit. */
+  max_scans_per_user: number | null;
+  effective_max_scans_per_user: number;
+  max_targets: number | null;
 }
 
 export interface Health {
@@ -253,6 +257,10 @@ export interface RunnerInput {
   /** Remove a stored key / password (at least one way to log in must remain). */
   clear_ssh_key?: boolean;
   clear_ssh_password?: boolean;
+  /** Active scans one account may have on the runner (null = the panel default). */
+  max_scans_per_user?: number | null;
+  /** Distinct targets (domains / hosts) scanned on the runner at once, all accounts together (null = no limit). */
+  max_targets?: number | null;
 }
 export const listRunners = async () => (await api.get<Runner[]>("/api/runners")).data;
 export const createRunner = async (body: RunnerInput) => (await api.post<Runner>("/api/runners", body)).data;

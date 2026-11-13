@@ -12,6 +12,7 @@ from app.core.db import get_db
 from app.models.runner import Runner, RunnerKind, RunnerStatus
 from app.models.user import Role, User
 from app.schemas.runner import ProvisionLog, RunnerCreate, RunnerOut, RunnerUpdate, TrustHostKey
+from app.services.scan_factory import effective_scans_per_user
 from app.services.ssh import SshError, fingerprint, key_algorithm
 from app.services.ssh_runner import is_provisioning
 from app.worker.tasks import runner_check, runner_provision
@@ -33,6 +34,9 @@ def _out(runner: Runner, viewer: User) -> RunnerOut:
         status_detail=runner.status_detail,
         last_seen_at=runner.last_seen_at,
         created_at=runner.created_at,
+        max_scans_per_user=runner.max_scans_per_user,
+        effective_max_scans_per_user=effective_scans_per_user(runner),
+        max_targets=runner.max_targets,
     )
     if viewer.role == Role.admin:  # connection details are admin-only
         out.ssh_host = runner.ssh_host
@@ -82,6 +86,8 @@ def create_runner(
         ssh_user=body.ssh_user,
         ssh_key_enc=encrypt(body.ssh_private_key) if body.ssh_private_key else None,
         ssh_password_enc=encrypt(body.ssh_password) if body.ssh_password else None,
+        max_scans_per_user=body.max_scans_per_user,
+        max_targets=body.max_targets,
         status=RunnerStatus.offline,
         status_detail="Ещё не проверялся",
     )
@@ -105,6 +111,11 @@ def update_runner(
     runner = _get_or_404(db, runner_id)
     if body.name is not None:
         runner.name = body.name
+    # Limits apply to every kind, and null is a real answer here ("back to the default" / "no limit").
+    if "max_scans_per_user" in body.model_fields_set:
+        runner.max_scans_per_user = body.max_scans_per_user
+    if "max_targets" in body.model_fields_set:
+        runner.max_targets = body.max_targets
     if runner.kind == RunnerKind.ssh:
         if is_provisioning(runner):
             raise HTTPException(status.HTTP_409_CONFLICT, "Идёт установка — дождитесь её окончания")

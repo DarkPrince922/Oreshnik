@@ -19,6 +19,7 @@ import {
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { authLabel, groupFingerprint, hasLogin, shortFingerprint, sshActions } from "../lib/hostKey";
+import { MAX_SCANS_PER_USER_CAP, MAX_TARGETS_CAP, defaultTargetsField, limitsLine, parseLimit } from "../lib/runnerLimits";
 
 const KIND_LABEL: Record<RunnerKind, string> = { mock: "Mock", local: "Локальный", ssh: "SSH" };
 const STATUS: Record<RunnerStatus, { label: string; tone: "ok" | "warn" | "bad" | "muted" }> = {
@@ -38,8 +39,12 @@ interface Form {
   ssh_password: string;
   clear_key: boolean;
   clear_password: boolean;
+  max_scans_per_user: string;
+  max_targets: string;
+  /** Once the administrator has typed in the targets field, switching the kind no longer rewrites it. */
+  targets_touched: boolean;
 }
-const emptyForm: Form = { name: "", kind: "mock", ssh_host: "", ssh_port: "22", ssh_user: "", ssh_private_key: "", ssh_password: "", clear_key: false, clear_password: false };
+const emptyForm: Form = { name: "", kind: "mock", ssh_host: "", ssh_port: "22", ssh_user: "", ssh_private_key: "", ssh_password: "", clear_key: false, clear_password: false, max_scans_per_user: "", max_targets: "", targets_touched: false };
 
 /** What the panel knows about the host's key, and what to do about it. */
 function HostKeyBlock({ runner, busy, onConfirm, onForget }: { runner: Runner; busy: boolean; onConfirm: () => void; onForget: () => void }) {
@@ -286,7 +291,17 @@ export default function Runners() {
   };
   const openEdit = (r: Runner) => {
     setEditing(r);
-    setForm({ ...emptyForm, name: r.name, kind: r.kind, ssh_host: r.ssh_host ?? "", ssh_port: String(r.ssh_port ?? 22), ssh_user: r.ssh_user ?? "" });
+    setForm({
+      ...emptyForm,
+      name: r.name,
+      kind: r.kind,
+      ssh_host: r.ssh_host ?? "",
+      ssh_port: String(r.ssh_port ?? 22),
+      ssh_user: r.ssh_user ?? "",
+      max_scans_per_user: r.max_scans_per_user === null ? "" : String(r.max_scans_per_user),
+      max_targets: r.max_targets === null ? "" : String(r.max_targets),
+      targets_touched: true,
+    });
     setFormError(null);
     setOpen(true);
   };
@@ -299,6 +314,13 @@ export default function Runners() {
       setFormError("Нужен хотя бы один способ входа: приватный ключ или пароль.");
       return;
     }
+    const perUser = parseLimit(form.max_scans_per_user, MAX_SCANS_PER_USER_CAP, "Сканов на аккаунт");
+    const targets = parseLimit(form.max_targets, MAX_TARGETS_CAP, "Целей одновременно");
+    if (!perUser.ok || !targets.ok) {
+      setFormError(!perUser.ok ? perUser.error : !targets.ok ? targets.error : null);
+      return;
+    }
+    const limits = { max_scans_per_user: perUser.value, max_targets: targets.value };
     setBusy(true);
     try {
       const port = Number(form.ssh_port) || 22;
@@ -309,6 +331,7 @@ export default function Runners() {
       if (editing) {
         await updateRunner(editing.id, {
           name: form.name,
+          ...limits,
           ...(ssh
             ? { ssh_host: form.ssh_host, ssh_port: port, ssh_user: form.ssh_user, ...credentials, clear_ssh_key: form.clear_key, clear_ssh_password: form.clear_password }
             : {}),
@@ -317,6 +340,7 @@ export default function Runners() {
         await createRunner({
           name: form.name,
           kind: form.kind,
+          ...limits,
           ...(ssh ? { ssh_host: form.ssh_host, ssh_port: port, ssh_user: form.ssh_user, ...credentials } : {}),
         });
       }
@@ -397,6 +421,7 @@ export default function Runners() {
                     </span>
                   </div>
                   {r.status_detail && <p className="mt-2 text-xs leading-relaxed text-slate-500">{r.status_detail}</p>}
+                  <p className="mt-2 text-[11px] text-slate-500" data-testid="limits">{limitsLine(r)}</p>
 
                   {isAdmin && r.kind === "ssh" && (
                     <HostKeyBlock runner={r} busy={acting === r.id} onConfirm={() => setTrusting(r)} onForget={() => forget(r)} />
@@ -451,7 +476,14 @@ export default function Runners() {
 
           {!editing && (
             <Field label="Тип" hint={{ mock: "Симуляция: токены не тратятся — для отладки панели.", local: "Strix + Docker на сервере панели.", ssh: "Удалённый хост. Панель подключится по SSH (ключом или паролем), попросит сверить отпечаток хоста и сможет установить Docker и Strix." }[form.kind]}>
-              <select className="field" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as RunnerKind })}>
+              <select
+                className="field"
+                value={form.kind}
+                onChange={(e) => {
+                  const kind = e.target.value as RunnerKind;
+                  setForm({ ...form, kind, ...(form.targets_touched ? {} : { max_targets: defaultTargetsField(kind) }) });
+                }}
+              >
                 <option value="mock">Mock (симуляция)</option>
                 <option value="local">Локальный (Strix + Docker)</option>
                 <option value="ssh">SSH-хост</option>
@@ -493,6 +525,15 @@ export default function Runners() {
               )}
             </>
           )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Сканов на аккаунт" hint="Сколько сканов одного пользователя может быть активно (в очереди или идёт) на этом раннере. Пусто — по умолчанию панели (обычно 3).">
+              <input className="field font-mono" inputMode="numeric" value={form.max_scans_per_user} onChange={(e) => setForm({ ...form, max_scans_per_user: e.target.value })} placeholder="3" aria-label="Сканов на аккаунт" />
+            </Field>
+            <Field label="Целей одновременно" hint="Сколько разных доменов и хостов сканируется на раннере сразу, все пользователи вместе. Пусто — без лимита.">
+              <input className="field font-mono" inputMode="numeric" value={form.max_targets} onChange={(e) => setForm({ ...form, max_targets: e.target.value, targets_touched: true })} placeholder="без лимита" aria-label="Целей одновременно" />
+            </Field>
+          </div>
 
           <ErrorNote message={formError} />
           <div className="flex justify-end gap-2 pt-2">
