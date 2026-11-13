@@ -7,6 +7,20 @@ if TYPE_CHECKING:
     from app.services.ssh import SshTarget
 
 
+def strix_privacy_env() -> dict[str, str]:
+    """Environment that keeps the Strix CLI from phoning home, for every runner alike.
+
+    Always passed explicitly (never inherited from the worker's environment) so the panel's settings are the single switch:
+    `STRIX_TELEMETRY` is Strix's own opt-out, `STRIX_NO_UPDATE_CHECK` stops its once-a-day request to PyPI.
+    """
+    from app.core.config import settings
+
+    env = {"STRIX_TELEMETRY": "1" if settings.strix_telemetry else "0"}
+    if not settings.strix_update_check:
+        env["STRIX_NO_UPDATE_CHECK"] = "1"
+    return env
+
+
 @dataclass
 class ScanSpec:
     scan_id: int

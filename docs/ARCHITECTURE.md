@@ -111,6 +111,14 @@ class Runner(Protocol):
 - Secrets (LLM api keys, SSH keys) encrypted with Fernet (`SECRET_ENCRYPTION_KEY`), never returned to UI in plaintext.
 - JWT auth; role checks on every mutating route.
 - Plain HTTP only in dev; put behind a TLS reverse proxy for prod.
+- **Strix does not phone home.** By itself the Strix CLI (1.7.0) reports to PostHog and Scarf (model name, finding severities and CWEs,
+  duration, cost, LLM providers, loaded skills; never targets, instructions or finding texts) and asks PyPI once a day whether a
+  newer version exists. Both are **off by default** in the panel: every runner — local and SSH — passes `STRIX_TELEMETRY=0` and
+  `STRIX_NO_UPDATE_CHECK=1` explicitly, *after* the scan's own variables, so neither the worker's environment nor a scan can switch
+  them back on. Turn them on with the settings `STRIX_TELEMETRY` / `STRIX_UPDATE_CHECK`. Checked with the real Strix through the
+  panel's local runner and a proxy that records the hosts it tries to reach: with the defaults **none**; with both switched on
+  `us.i.posthog.com`, `strix.gateway.scarf.sh` and `pypi.org`. (Not covered: the LLM provider you chose, which is the point of the
+  scan, and the sandbox image pull from GHCR.)
 
 ## 7. Phased build plan
 

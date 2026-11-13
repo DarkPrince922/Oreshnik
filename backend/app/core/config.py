@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     schedule_min_interval_minutes: int = 15
     max_schedules_per_user: int = 20
 
+    # What the Strix CLI is allowed to send out by itself. Both are OFF by default: a pentest tool should not report to anybody
+    # about scans of your systems. Strix's own telemetry (PostHog and Scarf: model name, finding severities and CWEs, duration,
+    # cost, …) and its daily "is there a newer version?" request to PyPI. The panel pins the Strix version on purpose, so the
+    # update notice is of no use to it. Turn either one on only if you want it.
+    strix_telemetry: bool = False
+    strix_update_check: bool = False
+
     # SSH runners
     ssh_connect_timeout_seconds: int = 15
     # How often the worker re-checks that SSH runners are reachable (0 disables the periodic check).
