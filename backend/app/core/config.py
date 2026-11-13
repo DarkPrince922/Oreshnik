@@ -5,6 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER = "CHANGE_ME"
 
+# What the panel's STRIX_API_TYPE may be: "auto" lets the panel decide per profile (see services/llm.py), the others are
+# Strix's own `STRIX_API_TYPE` values and apply to every profile.
+STRIX_API_TYPES = ("auto", "responses", "chat_completions")
+
 # Strix's own accepted values for STRIX_REASONING_EFFORT (strix.config.settings.ReasoningEffort).
 STRIX_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
@@ -71,6 +75,12 @@ class Settings(BaseSettings):
     # and cost; only matters for a model LiteLLM's own catalog marks as reasoning-capable — for a model it doesn't
     # recognise (most "custom" base_url profiles, and some providers) Strix silently ignores this.
     strix_reasoning_effort: str = "high"
+    # Which OpenAI API Strix's agent loop talks to. "auto" (default): a `custom` profile gets chat_completions — an
+    # OpenAI-compatible gateway usually implements only that, and Strix's Responses route sends native "custom" tools
+    # such as the file tools, which such gateways refuse with 400 "This endpoint supports function tools only" — and every other
+    # profile is left to Strix (which picks Responses for models its LiteLLM catalog lists under /v1/responses).
+    # "responses" / "chat_completions" force that route for every profile.
+    strix_api_type: str = "auto"
     # How long Strix waits for the model to answer its one tiny test request before the scan starts (Strix's own
     # LLM_PREFLIGHT_TIMEOUT, 30 s by default). Raise it for a slow gateway or a model that thinks long before its first token;
     # it does not help when the runner cannot reach the endpoint at all.
@@ -78,6 +88,18 @@ class Settings(BaseSettings):
 
     # Операции: how long one host's script may run before it is given up on and marked failed.
     ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
+
+    @field_validator("strix_api_type", mode="before")
+    @classmethod
+    def _normalize_api_type(cls, value: object) -> object:
+        return value.strip().lower() or "auto" if isinstance(value, str) else value
+
+    @field_validator("strix_api_type")
+    @classmethod
+    def _check_api_type(cls, value: str) -> str:
+        if value not in STRIX_API_TYPES:
+            raise ValueError(f"STRIX_API_TYPE must be one of {', '.join(STRIX_API_TYPES)}, got {value!r}")
+        return value
 
     @field_validator("strix_reasoning_effort", mode="before")
     @classmethod

@@ -49,6 +49,22 @@ def key_hint(api_key: str) -> str:
     return "…" + api_key[-4:] if len(api_key) >= 12 else "•••"
 
 
+def strix_api_type(profile: LLMProfile) -> str | None:
+    """Which OpenAI API route Strix should use for this profile (`STRIX_API_TYPE`), or None to leave it to Strix.
+
+    Strix's agent loop picks Responses or chat completions from its LiteLLM catalog by model name. On the Responses route it
+    sends native "custom" tools (its file tools), which a self-hosted or third-party OpenAI-compatible gateway usually
+    does not implement ("This endpoint supports function tools only", HTTP 400). A `custom` profile is by definition such
+    a gateway, so it gets chat completions, where Strix turns every tool into a plain function. The admin setting
+    `STRIX_API_TYPE` overrides this for all profiles.
+    """
+    from app.core.config import settings
+
+    if settings.strix_api_type != "auto":
+        return settings.strix_api_type
+    return "chat_completions" if profile.provider == Provider.custom else None
+
+
 def build_strix_env(profile: LLMProfile) -> dict[str, str]:
     env = {
         "STRIX_LLM": strix_model_id(profile.provider, profile.model),
@@ -56,6 +72,9 @@ def build_strix_env(profile: LLMProfile) -> dict[str, str]:
     }
     if profile.base_url:
         env["LLM_API_BASE"] = profile.base_url
+    api_type = strix_api_type(profile)
+    if api_type:
+        env["STRIX_API_TYPE"] = api_type
     return env
 
 

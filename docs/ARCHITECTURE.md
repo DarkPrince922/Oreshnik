@@ -841,6 +841,20 @@ before touching the host (a sentinel `touch` in the same script never ran); the 
 created a third through the form, and displayed its generated script; and an `operator` account was refused by the
 live API (403), not just by a unit test.
 
+### 18a. `STRIX_API_TYPE`: a custom gateway must not get the Responses route (HTTP 400 "This endpoint supports function tools only")
+
+Seen in a real scan: the pre-scan check passed (it always posts to `/chat/completions`) and the agent loop then failed with
+`openai.BadRequestError: 400 … This endpoint supports function tools only` from `agents/models/openai_responses.py`, i.e. from
+`POST /responses`. Read in `strix-agent` 1.7.0 (not run against the user's gateway): Strix chooses the route in `resolve_api_type` —
+`STRIX_API_TYPE` if set, otherwise **Responses when its LiteLLM catalog lists `/v1/responses` for the model name, chat completions
+for everything else**. On the Responses route it sends its file tools as native `custom`-type tools; on the chat-completions route
+`_custom_tool_as_function_tool` turns every tool into a plain function. A gateway that implements only function tools refuses the former.
+
+The panel never set `STRIX_API_TYPE` (and the runner's environment is a whitelist, so the worker's own value never reached Strix). Now
+`build_strix_env` (`services/llm.py::strix_api_type`) sets it for **both runners**: a `custom` profile gets `chat_completions`; other
+profiles are left to Strix. The admin setting `STRIX_API_TYPE` = `auto` (default) | `responses` | `chat_completions` overrides it for every profile —
+`responses` is for a gateway that really implements the whole Responses API. Tests: `tests/test_api_type.py`.
+
 ## 20. «Агент»: Codex CLI in an isolated container, driven from the panel
 
 A chat with an open-source coding agent ([Codex CLI](https://github.com/openai/codex), Apache-2.0) inside the panel: the operator
