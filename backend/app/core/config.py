@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     # it does not help when the runner cannot reach the endpoint at all.
     llm_preflight_timeout: int = Field(default=30, ge=1, le=600)
 
+    # Операции: how long one host's script may run before it is given up on and marked failed.
+    ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
+
     @field_validator("strix_reasoning_effort", mode="before")
     @classmethod
     def _normalize_reasoning_effort(cls, value: object) -> object:

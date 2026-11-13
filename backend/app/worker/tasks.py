@@ -11,9 +11,12 @@ from app.core.config import settings
 from app.core.db import SessionLocal
 from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
+from app.models.llm_profile import LLMProfile
+from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
 from app.models.scan import Finding, Scan, ScanStatus
 from app.models.schedule import Schedule
+from app.services import ops
 from app.services.activity import ActivityTailer
 from app.services.artifacts import ParsedRun, parse_run_dir, read_live_usage
 from app.services.llm import build_strix_env
@@ -473,3 +476,97 @@ def run_due_schedules() -> int:
             if fire_scheduled(db, schedule_id, lambda scan_id: scan_run.delay(scan_id), now) == "started":
                 started += 1
     return started
+
+
+@celery.task(name="oreshnik.ops_run")
+def ops_run(ops_run_id: int) -> str:
+    """Draft the script, guard it, then run it host by host. Never raises: every outcome is written to the row."""
+    with SessionLocal() as db:
+        run = db.get(OpsRun, ops_run_id)
+        if run is None:
+            return "not_found"
+        profile = db.get(LLMProfile, run.llm_profile_id) if run.llm_profile_id else None
+        hosts = list(db.scalars(select(OpsRunHost).where(OpsRunHost.ops_run_id == ops_run_id).order_by(OpsRunHost.id)))
+        runner_ids = {h.id: h.runner_id for h in hosts}
+        runner_names = [h.runner_name for h in hosts]
+        db.expunge_all()
+
+    if profile is None:
+        _ops_finish(ops_run_id, OpsRunStatus.failed, script_error="LLM-профиль удалён")
+        _ops_fail_all_hosts(ops_run_id, "скрипт не был сгенерирован: LLM-профиль удалён")
+        return "no_profile"
+
+    try:
+        script = ops.draft_script(profile, run.goal, runner_names)
+    except ops.OpsError as exc:
+        _ops_finish(ops_run_id, OpsRunStatus.failed, script_error=str(exc))
+        _ops_fail_all_hosts(ops_run_id, str(exc))
+        return "draft_failed"
+
+    with SessionLocal() as db:
+        db.execute(update(OpsRun).where(OpsRun.id == ops_run_id).values(script=script))
+        db.commit()
+
+    blocked = ops.looks_catastrophic(script)
+    if blocked:
+        _ops_finish(ops_run_id, OpsRunStatus.failed, blocked_reason=blocked)
+        _ops_fail_all_hosts(ops_run_id, f"выполнение остановлено: {blocked}", status=OpsHostStatus.blocked)
+        return "blocked"
+
+    with SessionLocal() as db:
+        db.execute(update(OpsRun).where(OpsRun.id == ops_run_id).values(status=OpsRunStatus.running, started_at=_utcnow()))
+        db.commit()
+
+    for host in hosts:
+        with SessionLocal() as db:
+            cancelled = bool(db.scalar(select(OpsRun.cancel_requested).where(OpsRun.id == ops_run_id)))
+        if cancelled:
+            with SessionLocal() as db:
+                db.execute(
+                    update(OpsRunHost)
+                    .where(OpsRunHost.ops_run_id == ops_run_id, OpsRunHost.status == OpsHostStatus.queued)
+                    .values(status=OpsHostStatus.cancelled)
+                )
+                db.commit()
+            break
+
+        with SessionLocal() as db:
+            db.execute(update(OpsRunHost).where(OpsRunHost.id == host.id).values(status=OpsHostStatus.running, started_at=_utcnow()))
+            db.commit()
+            runner = db.get(Runner, runner_ids.get(host.id)) if runner_ids.get(host.id) else None
+            if runner is not None:
+                db.expunge(runner)  # do not hold the session open for the minutes the script may run
+
+        if runner is None:
+            status, exit_code, output = "unreachable", None, "Раннер удалён"
+        else:
+            status, exit_code, output = ops.run_on_host(runner, script, timeout=settings.ops_host_timeout_seconds)
+
+        with SessionLocal() as db:
+            db.execute(
+                update(OpsRunHost)
+                .where(OpsRunHost.id == host.id)
+                .values(status=OpsHostStatus(status), exit_code=exit_code, output=output, finished_at=_utcnow())
+            )
+            db.commit()
+
+    with SessionLocal() as db:
+        db.execute(update(OpsRun).where(OpsRun.id == ops_run_id).values(status=OpsRunStatus.done, finished_at=_utcnow()))
+        db.commit()
+    return "done"
+
+
+def _ops_finish(ops_run_id: int, status: OpsRunStatus, **fields: object) -> None:
+    with SessionLocal() as db:
+        db.execute(update(OpsRun).where(OpsRun.id == ops_run_id).values(status=status, finished_at=_utcnow(), **fields))
+        db.commit()
+
+
+def _ops_fail_all_hosts(ops_run_id: int, note: str, *, status: OpsHostStatus = OpsHostStatus.failed) -> None:
+    with SessionLocal() as db:
+        db.execute(
+            update(OpsRunHost)
+            .where(OpsRunHost.ops_run_id == ops_run_id, OpsRunHost.status == OpsHostStatus.queued)
+            .values(status=status, output=note, finished_at=_utcnow())
+        )
+        db.commit()

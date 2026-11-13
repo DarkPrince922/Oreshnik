@@ -91,6 +91,16 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    to: "/ops",
+    label: "Операции",
+    roles: ["admin"],
+    icon: icon(
+      <>
+        <path d="M4 17l5-5-5-5M12 19h8" />
+      </>
+    ),
+  },
+  {
     to: "/users",
     label: "Пользователи",
     roles: ["admin"],

@@ -769,3 +769,74 @@ To see what the runner sees, on the runner, with the same body (no `max_tokens` 
 Tests: scan #19's log reproduced exactly (unit and end to end through the worker with a real subprocess), the hint, the setting and
 both runners (a real local subprocess and a real SSH host receive it; a scan's own env cannot override it). Every piece was broken on
 purpose (7 mutations) and a test failed each time.
+
+## 19. «Операции»: a plain-words goal, an LLM-written script, run as root — no approval step
+
+Added at the owner's explicit request and explicit choice, after the trade-off was laid out: an admin describes an
+operational task in plain words ("обнови пакеты и перезапусти nginx"); the panel asks the chosen LLM profile to
+write a POSIX `sh` script for it; the script runs **immediately**, as root over SSH, on every selected runner — with
+**no human review before it runs**. This is categorically different from every other feature in this panel (a scan
+is sandboxed and scoped to declared targets; a schedule and a continuation still go through the same checks as a
+manual scan): there is no sandbox here, no target-scope check, no approval queue. Admin-only (`require_admin`), not
+`operator` — the one role boundary already used for every other irreversible, host-level action (runner CRUD, host
+key trust, provisioning).
+
+### What is still enforced, independent of that choice
+- **The script is never invisible.** It is stored verbatim on the run (`OpsRun.script`) and shown in the UI before,
+  during and after execution — "no approval" does not mean "no audit trail".
+- **A short, high-precision safety guard** (`app/services/ops.py::looks_catastrophic`) refuses a handful of
+  one-liners that have no legitimate "oops, meant to do that" reading on a real host: a fork bomb, `rm -rf /` (and
+  `--no-preserve-root`, any flag spelling/order, via a small token-based check, not a single regex — a regex alone
+  missed `rm -rf --no-preserve-root /`), `mkfs`, `dd`/`>` onto a whole raw disk, `wipefs`. It is **not** a review
+  step: ordinary admin commands (reinstalling a package, restarting a service, `rm -rf` under `/var/log` or `/opt`)
+  are deliberately left alone — false positives on real scripts should be ~zero. When it refuses, **no host is
+  touched at all** (every `OpsRunHost` becomes `blocked`, not attempted).
+- **Each host's outcome is independent and visible on its own** (`OpsRunHost`): one host's SSH failure, script
+  failure or disk-destroying refusal never silently hides another's result, and a refusal never names *whose*
+  targets another account is using (mirrors the wording rule already used for the per-runner target limit, §17).
+
+### Design, reusing what already exists
+- **Targets are the existing SSH runner pool** (the owner's explicit choice over a separate "hosts" list) — same
+  pinned host key, same encrypted credentials, same `check_runner_usable` gate (host configured, key confirmed, not
+  mid-installation) as a scan already requires, checked up front for every selected runner before anything is
+  created.
+- **The LLM call is a new, independent one-shot path** (`app/services/llm.py::chat_once`), not Strix: it hits the
+  profile's provider **natively** (Claude's `/v1/messages`, OpenAI/xAI/`custom`'s `/chat/completions`) with the
+  profile's own id verbatim — never a LiteLLM/Strix routing prefix, confirmed against the real wire format with a
+  logging stub server, same as `strix_model_id` (§16): `claude-sonnet-4-6` and a hypothetical `anthropic/claude-sonnet-4-6`
+  would send identically. A non-streaming request, bounded time (120 s) and response size (500 KB).
+- **Execution reuses the plain SSH primitive** (`SshConnection.run("sh -s", input=script, ...)`, the same `sh -s`
+  stdin convention `services/ssh_runner.py::probe` already uses) — the script travels over stdin, never through a
+  shell-interpolated command line, so no extra quoting layer can corrupt it. One host at a time, in the order
+  submitted; `OpsRun.cancel_requested` is checked **between** hosts (an admin can stop the rest of the fleet; the
+  host already running is not interrupted mid-script) — a cooperative flag, not a hard kill, consistent with every
+  other cancel in this panel.
+- **A deleted runner keeps its audit record**: `OpsRunHost.runner_name` is snapshotted at creation, so the fleet a
+  task touched is still legible after a runner is renamed or removed (`runner_id` goes `NULL`, the name stays).
+- **A gone LLM profile, a drafting failure, or the safety guard all fail the whole run explicitly** (`OpsRun.status
+  = failed`, every still-queued host marked `failed`/`blocked` with a reason) — nothing is left silently "queued"
+  forever.
+
+### What this does not do
+No target-scope restriction (unlike a scan, a task can run on any selected runner's whole filesystem); no resource
+limit on the script itself; no retry of a failed host; no partial-script review (it is all-or-nothing per host); no
+non-admin role can use it at all.
+
+### Tests
+Backend: `tests/test_ops.py` (33 tests) — permissions, validation before anything is created (profile ownership,
+runner kind/readiness, empty goal, dedup, too many runners), the real end-to-end path on an **asyncssh-backed fake
+host** (script drafted once, executed, exit code and merged stdout/stderr captured, a failing script vs. an
+unreachable one, a deleted runner keeps its name), the safety guard (catches every pattern above including
+`--no-preserve-root` with a non-root path, leaves ordinary admin scripts alone, blocks before touching the host — a
+sentinel file proves the script never ran), a missing LLM profile failing the run instead of being silently skipped,
+cancel (refused once a run is over; a worker-level test proves `cancel_requested` is actually honoured between two
+hosts), and `chat_once` sending the bare model id to a mocked endpoint. Ten deliberate mutations of every safeguard
+above, all caught. Frontend: `src/lib/ops.ts` + 6 vitest tests for the pure submit/cancel/label logic.
+
+**Verified for real, end to end, not just in the test suite**: the full live stack (API + a real Celery worker, not
+eager-mode) against a **real OpenSSH server** and an OpenAI-compatible stub endpoint standing in for the LLM — a
+task created through the live API drafted a script from the stub, ran it over a real SSH connection, and returned
+the real host's own `uname -a` and `id -un` output; a second task with a stub that returns `rm -rf /` was blocked
+before touching the host (a sentinel `touch` in the same script never ran); the real browser UI showed both runs,
+created a third through the form, and displayed its generated script; and an `operator` account was refused by the
+live API (403), not just by a unit test.

@@ -80,6 +80,36 @@ class ModelListError(Exception):
     """A human-readable reason the provider's model list could not be fetched."""
 
 
+class _TooLarge(Exception):
+    """Internal signal from `_bounded_http`: the response exceeded its cap. Never escapes this module."""
+
+
+def _bounded_http(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    *,
+    json_body: object | None = None,
+    timeout: float,
+    max_bytes: int,
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[int, bytes]:
+    """One outbound call, bounded in time and in response size (enforced while streaming, not after buffering).
+
+    Raises `httpx` exceptions verbatim and `_TooLarge` on an oversized response; every caller below turns those
+    into its own user-facing error type, so this helper carries no wording of its own.
+    """
+    with httpx.Client(timeout=timeout, follow_redirects=False, transport=transport) as client, client.stream(
+        method, url, headers=headers, json=json_body
+    ) as resp:
+        body = bytearray()
+        for chunk in resp.iter_bytes():
+            body += chunk
+            if len(body) > max_bytes:
+                raise _TooLarge
+        return resp.status_code, bytes(body)
+
+
 def _models_request(provider: Provider, base_url: str | None, api_key: str) -> tuple[str, dict[str, str]]:
     if provider == Provider.custom:
         assert base_url, "custom requires base_url (enforced by the caller)"
@@ -102,28 +132,23 @@ def fetch_provider_models(
     """
     url, headers = _models_request(provider, base_url, api_key)
     try:
-        with httpx.Client(
-            timeout=_MODELS_TIMEOUT_SECONDS, follow_redirects=False, transport=transport
-        ) as client, client.stream("GET", url, headers=headers) as resp:
-            if resp.status_code in (401, 403):
-                raise ModelListError("Провайдер отверг ключ (401/403)")
-            if resp.status_code >= 400:
-                raise ModelListError(f"Провайдер вернул ошибку {resp.status_code}")
-            body = bytearray()
-            for chunk in resp.iter_bytes():
-                body += chunk
-                if len(body) > _MODELS_MAX_BYTES:
-                    raise ModelListError("Ответ провайдера слишком большой")
-    except ModelListError:
-        raise
+        status, raw = _bounded_http(
+            "GET", url, headers, timeout=_MODELS_TIMEOUT_SECONDS, max_bytes=_MODELS_MAX_BYTES, transport=transport
+        )
+    except _TooLarge:
+        raise ModelListError("Ответ провайдера слишком большой") from None
     except httpx.TimeoutException as exc:
         raise ModelListError("Провайдер не ответил за отведённое время") from exc
     except httpx.HTTPError as exc:
         log.warning("model list fetch failed for %s: %s", provider, exc)
         raise ModelListError("Не удалось подключиться к провайдеру") from exc
 
+    if status in (401, 403):
+        raise ModelListError("Провайдер отверг ключ (401/403)")
+    if status >= 400:
+        raise ModelListError(f"Провайдер вернул ошибку {status}")
     try:
-        payload = json.loads(bytes(body))
+        payload = json.loads(raw)
     except ValueError as exc:
         raise ModelListError("Провайдер вернул не JSON") from exc
 
@@ -152,6 +177,104 @@ def _extract_model_ids(payload: object) -> list[str]:
             if isinstance(value, str):
                 ids.append(value)
     return ids
+
+
+# ── one-shot chat completion ("операции": turning a goal into a script) ───
+#
+# This hits the provider's real, native chat endpoint directly — never through Strix/LiteLLM — so `model` is the
+# provider's own id, exactly as stored on the profile: no litellm routing prefix is added or expected here (verified
+# against the real strix-agent 1.7.0 earlier: that prefix never reaches the wire either, see strix_model_id's docstring).
+
+_CHAT_TIMEOUT_SECONDS = 120.0
+_CHAT_MAX_BYTES = 500_000  # a generated script plus the response envelope; anything past this is not one
+
+_CHAT_URL = {
+    Provider.claude: "https://api.anthropic.com/v1/messages",
+    Provider.openai: "https://api.openai.com/v1/chat/completions",
+    Provider.grok: "https://api.x.ai/v1/chat/completions",
+}
+
+
+class LlmCallError(Exception):
+    """A human-readable reason a one-shot LLM call produced no answer."""
+
+
+def chat_once(
+    provider: Provider,
+    base_url: str | None,
+    api_key: str,
+    model: str,
+    *,
+    system: str,
+    user: str,
+    max_tokens: int = 4000,
+    timeout: float = _CHAT_TIMEOUT_SECONDS,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """One non-streaming request; returns the assistant's reply text (never empty — raises instead)."""
+    if provider == Provider.claude:
+        url = _CHAT_URL[provider]
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        body: dict[str, object] = {
+            "model": model,
+            "system": system,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": user}],
+        }
+    else:
+        if provider == Provider.custom:
+            assert base_url, "custom requires base_url (enforced by the caller)"
+            url = f"{base_url}/chat/completions"
+        else:
+            url = _CHAT_URL[provider]
+        headers = {"Authorization": f"Bearer {api_key}"}
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        }
+
+    try:
+        status, raw = _bounded_http(
+            "POST", url, headers, json_body=body, timeout=timeout, max_bytes=_CHAT_MAX_BYTES, transport=transport
+        )
+    except _TooLarge:
+        raise LlmCallError("Ответ модели слишком большой") from None
+    except httpx.TimeoutException as exc:
+        raise LlmCallError("Модель не ответила за отведённое время") from exc
+    except httpx.HTTPError as exc:
+        log.warning("chat_once failed for %s: %s", provider, exc)
+        raise LlmCallError("Не удалось подключиться к провайдеру") from exc
+
+    if status in (401, 403):
+        raise LlmCallError("Провайдер отверг ключ (401/403)")
+    if status >= 400:
+        raise LlmCallError(f"Провайдер вернул ошибку {status}")
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise LlmCallError("Провайдер вернул не JSON") from exc
+
+    text = _extract_chat_text(provider, payload)
+    if not text.strip():
+        raise LlmCallError("Провайдер вернул пустой ответ")
+    return text
+
+
+def _extract_chat_text(provider: Provider, payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    if provider == Provider.claude:
+        blocks = payload.get("content")
+        if not isinstance(blocks, list):
+            return ""
+        return "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return content if isinstance(content, str) else ""
 
 
 PRESETS = [

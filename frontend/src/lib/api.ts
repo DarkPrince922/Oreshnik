@@ -437,3 +437,49 @@ export interface CostSummary {
   top_scans: { id: number; target: string; owner_email: string; status: string; cost: number }[];
 }
 export const getCosts = async (days = 30) => (await api.get<CostSummary>("/api/costs", { params: { days } })).data;
+
+// ── Операции ─────────────────────────────────────────────────────────────
+//
+// A goal in plain words, turned into a shell script by an LLM and run as root over SSH on existing SSH runners —
+// admin-only, no approval step before it runs (see docs/ARCHITECTURE.md for why). What *is* always kept: the exact
+// script, and each host's own output and exit code.
+
+export type OpsRunStatus = "drafting" | "running" | "done" | "failed";
+export type OpsHostStatus = "queued" | "running" | "succeeded" | "failed" | "blocked" | "unreachable" | "cancelled";
+
+export interface OpsRunHost {
+  id: number;
+  runner_id: number | null;
+  runner_name: string;
+  status: OpsHostStatus;
+  exit_code: number | null;
+  output: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface OpsRun {
+  id: number;
+  user_id: number;
+  owner_email: string;
+  name: string;
+  goal: string;
+  llm_profile_id: number | null;
+  llm_profile_name: string | null;
+  status: OpsRunStatus;
+  script: string | null;
+  script_error: string | null;
+  blocked_reason: string | null;
+  cancel_requested: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  hosts: OpsRunHost[];
+}
+
+export const listOpsTargetRunners = async () => (await api.get<{ id: number; name: string }[]>("/api/ops/runners")).data;
+export const listOpsRuns = async () => (await api.get<OpsRun[]>("/api/ops")).data;
+export const getOpsRun = async (id: number) => (await api.get<OpsRun>(`/api/ops/${id}`)).data;
+export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; runner_ids: number[] }) =>
+  (await api.post<OpsRun>("/api/ops", body)).data;
+export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/ops/${id}/cancel`)).data;

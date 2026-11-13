@@ -1,4 +1,5 @@
 from app.models.llm_profile import LLMProfile, Provider
+from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
 from app.models.schedule import Schedule
 from app.models.scan import (
@@ -26,4 +27,8 @@ __all__ = [
     "Schedule",
     "ACTIVE_STATUSES",
     "FINAL_STATUSES",
+    "OpsRun",
+    "OpsRunHost",
+    "OpsRunStatus",
+    "OpsHostStatus",
 ]

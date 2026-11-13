@@ -10,6 +10,7 @@ import Dashboard from "./pages/Dashboard";
 import LLMProfiles from "./pages/LLMProfiles";
 import Login from "./pages/Login";
 import NewScan from "./pages/NewScan";
+import Ops from "./pages/Ops";
 import Runners from "./pages/Runners";
 import Schedules from "./pages/Schedules";
 import ScanDetail from "./pages/ScanDetail";
@@ -66,6 +67,14 @@ export default function App() {
               }
             />
             <Route path="runners" element={<Runners />} />
+            <Route
+              path="ops"
+              element={
+                <ProtectedRoute roles={["admin"]}>
+                  <Ops />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="users"
               element={
