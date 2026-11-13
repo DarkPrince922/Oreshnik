@@ -22,6 +22,7 @@ export function useScanStream(scanId: number, { onStatus }: Options = {}) {
   const bufferRef = useRef<LogBuffer>(new LogBuffer());
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
+  const controls = useRef<{ restart: () => void }>({ restart: () => undefined });
   const [, setVersion] = useState(0);
   const [state, setState] = useState<StreamState>("connecting");
 
@@ -94,6 +95,16 @@ export function useScanStream(scanId: number, { onStatus }: Options = {}) {
       };
     };
 
+    // A scan continued in place goes back to work after the stream has ended: reconnect, keeping what is on screen
+    // (the server replays from where we stopped, so nothing is duplicated).
+    controls.current.restart = () => {
+      if (disposed || (socket && socket.readyState <= WebSocket.OPEN && !ended)) return;
+      ended = false;
+      retries = 0;
+      clearTimeout(retryTimer);
+      connect();
+    };
+
     connect();
     return () => {
       disposed = true;
@@ -103,5 +114,5 @@ export function useScanStream(scanId: number, { onStatus }: Options = {}) {
     };
   }, [scanId]);
 
-  return { buffer: bufferRef.current, state };
+  return { buffer: bufferRef.current, state, restart: () => controls.current.restart() };
 }

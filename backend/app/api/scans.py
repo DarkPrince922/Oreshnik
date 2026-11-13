@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, or_, select, true, update
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ from app.schemas.scan import (
     FindingOut,
     LogPage,
     ReportOut,
+    ResumeEntry,
     ScanContinue,
     ScanCreate,
     ScanList,
@@ -137,6 +138,16 @@ def _out(
         parent_scan_id=scan.parent_scan_id,
         cost_base=scan.cost_base,
         continuations=continuations or [],
+        resume_count=scan.resume_count,
+        elapsed_base=scan.elapsed_base,
+        resume_history=[
+            ResumeEntry(
+                at=entry["at"],
+                instruction=None if viewer.role == Role.viewer else entry.get("instruction"),
+                max_budget=entry.get("max_budget"),
+            )
+            for entry in (scan.resume_history or [])
+        ],
     )
 
 
@@ -187,22 +198,34 @@ def _enqueue(db: Session, scan: Scan, user: User) -> ScanOut:
 
 @router.post("/{scan_id}/continue", response_model=ScanOut, status_code=status.HTTP_201_CREATED)
 def continue_scan(
-    scan_id: int, body: ScanContinue, user: User = Depends(require_operator), db: Session = Depends(get_db)
+    scan_id: int,
+    body: ScanContinue,
+    response: Response,
+    user: User = Depends(require_operator),
+    db: Session = Depends(get_db),
 ) -> ScanOut:
     """Continue a finished (or stopped) scan with new instructions — `strix --resume`.
 
-    Creates a NEW scan that works on a copy of the parent's run: Strix keeps every agent's history and
-    the findings so far, and hands the new instruction to the root agent. The parent stays untouched.
+    By default the scan continues **in place**: the same scan (same id, log, agents and findings) goes back to the
+    queue and Strix picks the run up where it left off; the instruction reaches the root agent. With `as_new_scan`
+    a NEW scan is created on a copy of the run instead, and this one stays exactly as it is.
     """
-    parent = _get_visible(db, user, scan_id)
-    if parent.status not in FINAL_STATUSES:
+    scan = _get_visible(db, user, scan_id)
+    in_place = not body.as_new_scan
+    if in_place and scan.user_id != user.id:
+        # The scan would keep running on somebody else's key and be billed to its owner: refuse. The key is personal.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Чужой скан можно продолжить только как новый скан (на вашем ключе) — отметьте «Создать новый скан».",
+        )
+    if scan.status not in FINAL_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, "Скан ещё выполняется — продолжить можно только завершённый")
     try:
-        check_resumable(parent.id, parent.run_name)
+        check_resumable(scan.id, scan.run_name)
     except ResumeError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
-    runner = parent.runner
+    runner = scan.runner
     if runner is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Раннер этого скана удалён")
     if runner.kind == RunnerKind.ssh:
@@ -210,33 +233,33 @@ def continue_scan(
 
     # A scan that finished on its own has nothing left to do without a new instruction; a stopped or failed
     # one can simply be picked up again.
-    if parent.status in (ScanStatus.succeeded, ScanStatus.vulns_found) and not body.instruction:
+    if scan.status in (ScanStatus.succeeded, ScanStatus.vulns_found) and not body.instruction:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Опишите, что агентам делать дальше")
 
-    # The key is personal: use one of YOUR profiles (the parent's only if it is yours).
+    # The key is personal: use one of YOUR profiles (the scan's own only if it is yours).
     profile: LLMProfile | None = None
     if body.llm_profile_id is not None:
         profile = db.scalar(select(LLMProfile).where(LLMProfile.id == body.llm_profile_id, LLMProfile.user_id == user.id))
         if profile is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "LLM-профиль не найден")
     elif runner.kind != RunnerKind.mock:
-        if parent.llm_profile is not None and parent.llm_profile.user_id == user.id:
-            profile = parent.llm_profile
+        if scan.llm_profile is not None and scan.llm_profile.user_id == user.id:
+            profile = scan.llm_profile
         else:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Выберите свой LLM-профиль")
 
     # Strix compares the budget with the cost of the WHOLE run, so a limit at or below what was already
     # spent would stop the continuation immediately.
-    if body.max_budget is not None and parent.cost is not None and body.max_budget <= parent.cost:
+    if body.max_budget is not None and scan.cost is not None and body.max_budget <= scan.cost:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"Лимит бюджета общий для всего прогона, а уже потрачено ${parent.cost:.2f}. Укажите больше или оставьте пустым.",
+            f"Лимит бюджета общий для всего прогона, а уже потрачено ${scan.cost:.2f}. Укажите больше или оставьте пустым.",
         )
 
     # Strix names the sandbox containers after the run, so one run must never be active twice.
     busy = db.scalar(
         select(Scan.id)
-        .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == parent.run_name, Scan.run_name == parent.run_name))
+        .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == scan.run_name, Scan.run_name == scan.run_name))
         .limit(1)
     )
     if busy is not None:
@@ -251,22 +274,54 @@ def continue_scan(
             f"Уже запущено сканов: {active}. Лимит — {settings.max_active_scans_per_user}; дождитесь завершения или отмените лишние.",
         )
 
-    child = Scan(
-        user_id=user.id,
-        runner_id=runner.id,
-        llm_profile_id=profile.id if profile else None,
-        targets=list(parent.targets),
-        scan_mode=parent.scan_mode,
-        instruction=body.instruction,
-        max_budget=body.max_budget,
-        status=ScanStatus.queued,
-        parent_scan_id=parent.id,
-        resume_run_name=parent.run_name,
-        cost_base=parent.cost or 0.0,
-    )
-    db.add(child)
+    if not in_place:
+        child = Scan(
+            user_id=user.id,
+            runner_id=runner.id,
+            llm_profile_id=profile.id if profile else None,
+            targets=list(scan.targets),
+            scan_mode=scan.scan_mode,
+            instruction=body.instruction,
+            max_budget=body.max_budget,
+            status=ScanStatus.queued,
+            parent_scan_id=scan.id,
+            resume_run_name=scan.run_name,
+            cost_base=scan.cost or 0.0,
+        )
+        db.add(child)
+        db.commit()
+        return _enqueue(db, child, user)
+
+    # In place. The seconds the scan was active so far are banked, because started_at restarts with the next run.
+    now = datetime.now(timezone.utc)
+    ran = (scan.finished_at - scan.started_at).total_seconds() if scan.started_at and scan.finished_at else 0.0
+    history = list(scan.resume_history or []) + [
+        {"at": now.isoformat(), "instruction": body.instruction, "max_budget": body.max_budget}
+    ]
+    # One atomic step from "finished" to "queued": a second click (or a cancel) cannot slip past it.
+    moved = db.execute(
+        update(Scan)
+        .where(Scan.id == scan.id, Scan.status.in_(FINAL_STATUSES))
+        .values(
+            status=ScanStatus.queued,
+            status_detail=None,
+            exit_code=None,
+            started_at=None,
+            finished_at=None,
+            heartbeat_at=None,
+            resume_run_name=scan.run_name,
+            resume_count=Scan.resume_count + 1,
+            elapsed_base=scan.elapsed_base + max(ran, 0.0),
+            resume_history=history,
+            max_budget=body.max_budget,
+            llm_profile_id=profile.id if profile else scan.llm_profile_id,
+        )
+    ).rowcount
     db.commit()
-    return _enqueue(db, child, user)
+    if moved == 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Скан уже продолжается")
+    response.status_code = status.HTTP_200_OK
+    return _enqueue(db, scan, user)
 
 
 @router.get("", response_model=ScanList)

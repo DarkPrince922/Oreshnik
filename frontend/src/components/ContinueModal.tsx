@@ -1,19 +1,36 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { useAuth } from "../lib/auth";
+
 import { continueScan, errorMessage, listProfiles, type LLMProfile, type Scan } from "../lib/api";
-import { budgetProblem, defaultBudget, instructionRequired, parseBudget } from "../lib/continueScan";
+import { budgetProblem, canContinueInPlace, defaultBudget, instructionRequired, parseBudget } from "../lib/continueScan";
 import { formatCost } from "../lib/format";
 import { Button, ErrorNote, Field, Modal } from "./ui";
 
 /**
  * "Продолжить" — `strix --resume` for a finished or stopped scan.
  *
- * It creates a NEW scan: Strix works on a copy of this scan's run (every agent remembers what it did, and the instruction
- * reaches the root agent), so this scan stays exactly as it is.
+ * By default the scan continues IN PLACE: the same scan (same number, log, agents and findings) goes back to work and the
+ * instruction reaches the root agent. Optionally a NEW scan is created on a copy of the run, and this one stays as it is.
  */
-export default function ContinueModal({ scan, open, onClose }: { scan: Scan; open: boolean; onClose: () => void }) {
+export default function ContinueModal({
+  scan,
+  open,
+  onClose,
+  onContinued,
+}: {
+  scan: Scan;
+  open: boolean;
+  onClose: () => void;
+  /** The scan went back to work in place (it is the same scan, updated). */
+  onContinued: (scan: Scan) => void;
+}) {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const inPlaceAllowed = canContinueInPlace(scan, user?.id);
+  const [asNew, setAsNew] = useState(false);
+  const newScan = asNew || !inPlaceAllowed;
   const needsInstruction = instructionRequired(scan);
   const needsProfile = scan.runner_kind !== null && scan.runner_kind !== "mock";
 
@@ -29,7 +46,9 @@ export default function ContinueModal({ scan, open, onClose }: { scan: Scan; ope
     if (!open) return;
     setInstruction("");
     setBudget(defaultBudget(scan));
+    setAsNew(false);
     setError(null);
+    setBusy(false);
     if (!needsProfile) return;
     let alive = true;
     listProfiles()
@@ -56,13 +75,16 @@ export default function ContinueModal({ scan, open, onClose }: { scan: Scan; ope
     setBusy(true);
     setError(null);
     try {
-      const child = await continueScan(scan.id, {
+      const result = await continueScan(scan.id, {
         instruction: instruction.trim() || null,
         max_budget: parseBudget(budget),
         llm_profile_id: needsProfile ? profileId : null,
+        as_new_scan: newScan,
       });
       onClose();
-      navigate(`/scans/${child.id}`);
+      setBusy(false); // the dialog stays mounted on the same page when the scan continues in place
+      if (newScan) navigate(`/scans/${result.id}`);
+      else onContinued(result);
     } catch (err) {
       setError(errorMessage(err));
       setBusy(false);
@@ -72,10 +94,19 @@ export default function ContinueModal({ scan, open, onClose }: { scan: Scan; ope
   return (
     <Modal open={open} onClose={onClose} title={`Продолжить скан #${scan.id}`}>
       <form onSubmit={submit} className="space-y-4">
-        <p className="rounded-lg border border-white/10 bg-white/5 px-3.5 py-3 text-xs leading-relaxed text-slate-400">
-          Strix продолжит этот же прогон: агенты помнят всё, что уже сделали, а ваша инструкция уйдёт корневому агенту. Создаётся{" "}
-          <span className="text-slate-200">новый скан</span>, а этот остаётся без изменений. Находки и стоимость в новом скане
-          накопительные — включают то, что найдено здесь.
+        <p className="rounded-lg border border-white/10 bg-white/5 px-3.5 py-3 text-xs leading-relaxed text-slate-400" data-testid="continue-explainer">
+          Strix продолжит этот же прогон: агенты помнят всё, что уже сделали, а ваша инструкция уйдёт корневому агенту.{" "}
+          {newScan ? (
+            <>
+              Создаётся <span className="text-slate-200">новый скан</span>, а этот остаётся без изменений. Находки и стоимость в
+              новом скане накопительные — включают то, что найдено здесь.
+            </>
+          ) : (
+            <>
+              Скан продолжится <span className="text-slate-200">здесь же</span>: тот же номер, лог и находки, новое дописывается в
+              конец. Стоимость и находки накопительные.
+            </>
+          )}
         </p>
 
         <Field
@@ -95,6 +126,23 @@ export default function ContinueModal({ scan, open, onClose }: { scan: Scan; ope
             required={needsInstruction}
           />
         </Field>
+
+        <label className="flex items-start gap-3 text-xs leading-relaxed text-slate-400">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-[#7c5cff]"
+            checked={newScan}
+            disabled={!inPlaceAllowed}
+            onChange={(e) => setAsNew(e.target.checked)}
+          />
+          <span>
+            <span className="text-slate-200">Создать новый скан</span> вместо продолжения в этом — например, чтобы проверить другое
+            направление и сохранить этот скан как есть.
+            {!inPlaceAllowed && (
+              <span className="mt-1 block text-signal-warn">Это чужой скан: он продолжится как новый скан на вашем ключе.</span>
+            )}
+          </span>
+        </label>
 
         {needsProfile && (
           <Field label="LLM-профиль">

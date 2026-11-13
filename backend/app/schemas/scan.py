@@ -28,6 +28,9 @@ class ScanContinue(BaseModel):
     # Strix's budget limit is cumulative for the whole run, not per continuation.
     max_budget: float | None = Field(default=None, gt=0, le=10000, description="USD, total for the whole run")
     llm_profile_id: int | None = None
+    # By default the scan continues IN PLACE (same scan, same id). With true a new scan is created on a copy of the run
+    # and this one stays exactly as it is.
+    as_new_scan: bool = False
 
     @field_validator("instruction")
     @classmethod
@@ -52,6 +55,12 @@ class FindingBrief(BaseModel):
 class FindingOut(FindingBrief):
     # The full original Strix record. Its text is attacker-influenced — render as plain text.
     data: dict[str, Any]
+
+
+class ResumeEntry(BaseModel):
+    at: datetime
+    instruction: str | None = None  # hidden from viewers, like the scan's own instruction
+    max_budget: float | None = None
 
 
 class ScanOut(BaseModel):
@@ -84,6 +93,9 @@ class ScanOut(BaseModel):
     parent_scan_id: int | None = None
     cost_base: float | None = None  # what the parent had cost; `cost` is cumulative across a resume
     continuations: list[int] = []   # scans that continue this one (visible to the viewer)
+    resume_count: int = 0           # how many times this scan was continued in place
+    elapsed_base: float = 0.0       # seconds it was active before the current run
+    resume_history: list[ResumeEntry] = []
 
 
 class ScanList(BaseModel):

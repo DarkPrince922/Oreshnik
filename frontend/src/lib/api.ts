@@ -126,6 +126,12 @@ export type ScanStatus = "queued" | "running" | "cancelling" | "succeeded" | "vu
 export type ScanMode = "quick" | "standard" | "deep";
 export type Severity = "critical" | "high" | "medium" | "low" | "info" | "unknown";
 
+export interface ResumeEntry {
+  at: string;
+  instruction: string | null;
+  max_budget: number | null;
+}
+
 export interface Scan {
   id: number;
   user_id: number;
@@ -157,6 +163,11 @@ export interface Scan {
   /** What the parent had cost: `cost` is cumulative across a continuation. */
   cost_base: number | null;
   continuations: number[];
+  /** How many times this scan was continued in place (same scan, same id). */
+  resume_count: number;
+  /** Seconds it was active before the current run; started_at restarts on every continuation. */
+  elapsed_base: number;
+  resume_history: ResumeEntry[];
 }
 
 export interface ScanList {
@@ -313,8 +324,10 @@ export interface ContinueInput {
   instruction: string | null;
   max_budget: number | null;
   llm_profile_id: number | null;
+  /** false (default): continue this very scan. true: create a new scan on a copy of the run. */
+  as_new_scan?: boolean;
 }
-/** Continue a finished/stopped scan (`strix --resume`): creates a NEW scan that works on a copy of its run. */
+/** Continue a finished/stopped scan (`strix --resume`): in place by default, or as a NEW scan on a copy of its run. */
 export const continueScan = async (id: number, body: ContinueInput) =>
   (await api.post<Scan>(`/api/scans/${id}/continue`, body)).data;
 

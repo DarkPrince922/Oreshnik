@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { budgetProblem, defaultBudget, instructionRequired, parseBudget } from "./continueScan";
+import { budgetProblem, canContinueInPlace, defaultBudget, instructionRequired, parseBudget } from "./continueScan";
 
 describe("instructionRequired", () => {
   it("is needed after a scan that finished on its own, not after a stopped or failed one", () => {
@@ -38,5 +38,16 @@ describe("defaultBudget / parseBudget", () => {
   it("parses the field", () => {
     expect(parseBudget("")).toBeNull();
     expect(parseBudget("7,5")).toBe(7.5);
+  });
+});
+
+describe("canContinueInPlace", () => {
+  it("is for the owner only: the key is personal, so someone else's scan becomes a new scan", () => {
+    expect(canContinueInPlace({ user_id: 7 }, 7)).toBe(true);
+    expect(canContinueInPlace({ user_id: 7 }, 8)).toBe(false);
+  });
+  it("is false while the current user is unknown", () => {
+    expect(canContinueInPlace({ user_id: 7 }, undefined)).toBe(false);
+    expect(canContinueInPlace({ user_id: 7 }, null)).toBe(false);
   });
 });

@@ -123,7 +123,7 @@ Status legend: *(done)* shipped and tested · *(in progress)* being built · *(p
 - **Phase 3 — UI** *(done)*: dashboard, scan list, new scan, scan detail (live log + findings + report), severity views, SARIF/JSON download. See §11.
   Three things were added to phase 3 **beyond the original plan**, each at the owner's request after seeing a real scan run:
   - *live agent activity* — the "Агенты" tab (commands, messages, sub-agents) with a worker-side tailer and API. See §12.
-  - *continuing a scan with new instructions* (`strix --resume`) — a new scan on a copy of the run, migration 0004. See §13.
+  - *continuing a scan with new instructions* (`strix --resume`) — first as a new scan on a copy of the run (migration 0004), later changed at the owner's request to continue **in the same scan** by default (migration 0006). See §13.
   - *full-width layout* on large screens (UI only).
 - **Phase 4 — Scheduling + cost** *(done)*: see §14.
   - *Scheduling:* recurring scans by cron (with time zone), run-now, overlap protection, safe defaults for real (paid) runners.
@@ -334,26 +334,58 @@ uses — for scans that are *finished or stopped* (verified against strix-agent 
 | the budget limit is compared with the **whole** run's cost (`recomputed_budget_flags`: `cost >= max_budget` → stop) | a limit at or below what was already spent stops the continuation at once → refused up front |
 | sandbox containers are named after the run; repo clones live in `/tmp/strix_repos/<run>` | one run must never be active twice |
 
-**Model.** A continuation is a **new scan** (`POST /api/scans/{id}/continue`, columns `parent_scan_id`, `resume_run_name`,
-`cost_base`). The parent's run directory is **copied** into the new scan's own working directory (`services/resume.py`, symlinks
-copied as links, never followed), so the parent keeps its results exactly as they were, and one scan can be continued in several
-directions. `cost - cost_base` is what the continuation itself cost.
+**Two ways, one endpoint** (`POST /api/scans/{id}/continue`):
+
+- **In place (default, requested by the owner).** The *same* scan — same id, log, agent feed, findings — goes back to the queue, and
+  Strix picks the run up again from the scan's own directory. No new scan appears: a scan stopped as #10 and continued is still #10.
+- **As a new scan** (`as_new_scan: true`, the "Создать новый скан" box). A new scan on a **copy** of the run (`services/resume.py`,
+  symlinks copied as links, never followed): the original stays exactly as it was, and one scan can be continued in several
+  directions. Columns `parent_scan_id`, `resume_run_name`, `cost_base` (migration 0004); `cost - cost_base` is what the new scan cost.
+
+An admin continuing **someone else's** scan always gets the second kind: the key is personal, so continuing in place would run the
+owner's scan on the admin's key and bill the owner (the API answers 403 for an in-place attempt).
+
+**How an in-place continuation works** (migration `0006`: `resume_count`, `elapsed_base`, `resume_history`):
+
+| Part | Behaviour |
+|---|---|
+| Queueing | one atomic `UPDATE … WHERE status IN (finished)` takes the scan from finished to `queued`; a second click or a competing request loses with 409 and writes nothing. It resets `started_at`/`finished_at`/`exit_code`/`status_detail`, bumps `resume_count`, appends `{at, instruction, max_budget}` to `resume_history`, and replaces `max_budget` (the new limit is for the whole run) |
+| Instruction | the worker passes Strix only the instruction **of this resume** (none if the user just picked the scan up again) — never the original one a second time; the original stays in `instruction` |
+| Log | appended to the same `oreshnik.log` after a marker line "Продолжение скана (раз: N)"; the WebSocket replays from where the browser stopped, so the page keeps what it has and nothing is duplicated |
+| Agent feed | `ActivityTailer.continue_in_place` skips what is already in `agents.db`, **continues the sequence numbers** after the existing `activity.jsonl` (the API and the browser address events by `seq`), and labels the new instruction as the user's |
+| Findings and cost | read back from the run at the end (cumulative, like Strix). They are replaced **only if the run directory could really be read**; if it vanished or cannot be parsed the scan fails but keeps its findings, cost and run name |
+| Time | `started_at` restarts with each run, so the seconds of the earlier runs are banked in `elapsed_base` and the duration shown is *active* time — the hours the scan sat finished do not count |
 
 **Rules.**
 - Only finished scans (succeeded / vulns_found / failed / cancelled) that still have their run files can be continued; admin or the
-  owning operator, never a viewer. The child belongs to whoever started it and needs **that** user's LLM profile (an admin does not
-  inherit an operator's key). Mock runs need none.
+  owning operator, never a viewer. The scan needs **the continuing user's own** LLM profile (an admin does not inherit an operator's
+  key); in place that user is always the owner. Mock runs need none.
 - A scan that finished on its own (`succeeded` / `vulns_found`) needs a new instruction; a stopped or failed one can simply resume.
-- At most one active scan per Strix run (409 "уже продолжается в скане #N"); the parent cannot be deleted while a continuation
-  still needs it. The per-user active-scan limit applies.
+- At most one active scan per Strix run (409 "уже продолжается в скане #N", also across the two kinds); a parent cannot be deleted
+  while a *copy* still needs it. The per-user active-scan limit applies, and a refused request changes nothing about the scan.
+- A scan continued in place that was started by a schedule counts as active, so the schedule's next firing is skipped meanwhile.
 - **Exit code 2 safeguard.** A continued run starts out holding the parent's findings, and argparse also exits with 2. So
   "vulnerabilities found" is only believed if Strix really touched the run (`run.json` changed); otherwise it is a failure.
-- The activity feed of a continuation **starts after the parent's history** (`ActivityTailer.skip_existing`): you see the injected
-  instruction first, labelled "Инструкция пользователя", then what the agents did about it; the roster still lists every agent.
+- The activity feed of a **copy** starts after the parent's history (`ActivityTailer.skip_existing`); an in-place continuation simply
+  carries on the same feed. Either way you see the injected instruction first, labelled "Инструкция пользователя", then what the
+  agents did about it; the roster still lists every agent.
 
-**UI.** A "Продолжить…" button on finished scans (owner/admin): a dialog explaining that a new scan is created, the instruction
-(required or optional as above), LLM profile (real runners), and a *total* budget limit with the amount already spent. The new scan
-links back to its parent ("↻ Продолжение скана #N"), the parent lists its continuations, and the scan list marks them ("↻ из #N").
+**UI.** A "Продолжить…" button on finished scans (owner/admin): a dialog explaining what will happen, the instruction (required or
+optional as above), LLM profile (real runners), a *total* budget limit with the amount already spent, and a box "Создать новый
+скан" (ticked and locked for somebody else's scan). In place, the page stays where it is: the status turns to running, the live log
+reconnects, the agents tab opens, the header says "↻ Продолжен в этом же скане: N раз", and the Параметры tab lists every
+continuation (time, what was asked, the limit). While a continued scan runs, its previous findings and report stay visible with a
+note, and are replaced when it finishes. Viewers see that a scan was continued but not what was asked. The scan list marks it
+"↻ продолжен ×N"; a copy shows "↻ из #N" and links back to its parent.
+
+**Accounting note.** Spend is booked on the day a scan last finished (§14), so a scan stopped yesterday and continued today moves
+its whole cost to today. Money is never counted twice (an in-place scan has no `cost_base`; a copy counts only its own part).
+
+**Tests.** 37 backend tests for the in-place flow (same id, no new row, log/feed continuity, banked time, atomic queueing — including a
+competitor winning at the last instant —, instruction handling, budget, profile, ownership, viewer redaction, cancel and resume
+again, broker down, unreadable run keeps the results, schedules, cost accounting), each safeguard broken on purpose to see a test
+fail; 63 frontend unit tests; a 34-check browser scenario on a real stack (the browser found a bug: the dialog stayed blocked after
+the first in-place submit because the page no longer navigated away).
 
 **Not verified:** a real `--resume` of a **completed** run on a machine with Docker and an LLM. The argument handling was checked
 against the real CLI, the resume code path was read, and the whole flow was exercised end to end with a fake `strix` that reproduces
@@ -422,7 +454,8 @@ limit (§13). The dashboard shows a warning when an active scan among the latest
 ### Cost accounting («Расходы», `GET /api/costs?days=1..365&user_id=`)
 - A scan's **own cost** is `greatest(cost − cost_base, 0)`: a continuation's `cost` is cumulative in Strix, so only its own part is
   booked and money is never counted twice.
-- It is booked on the UTC date of `coalesce(finished_at, started_at, created_at)` (so a scan that is still running already counts).
+- It is booked on the UTC date of `coalesce(finished_at, started_at, created_at)` (so a scan that is still running already counts). A scan
+  continued in place (§13) is booked on the day it last finished — its earlier spend moves with it.
 - Response: today / last 7 days / month-to-date / the chosen window / all time, what the *currently running* scans have cost so
   far, tokens, a gap-free per-day series, per-user totals, and the ten most expensive scans.
 - Operators see **only their own** spend (`user_id` is ignored for them); admins see everyone and may filter; viewers get 403.

@@ -16,7 +16,7 @@ from app.models.schedule import Schedule
 from app.services.activity import ActivityTailer
 from app.services.artifacts import ParsedRun, parse_run_dir, read_live_usage
 from app.services.llm import build_strix_env
-from app.services.resume import ResumeError, stage_run
+from app.services.resume import ResumeError, check_resumable, stage_run
 from app.services.runner_health import check_runner
 from app.services.scan_files import LogWriter, find_run_dir, scan_dir
 from app.services.scan_outcome import decide
@@ -69,6 +69,8 @@ class _Snapshot:
     env_error: str | None
     parent_scan_id: int | None = None
     resume_run: str | None = None
+    # Continuing THIS scan (not a copy of another): which time it is, counting from 1; 0 for a first run or a fork.
+    resume_count: int = 0
 
 
 def _claim(scan_id: int) -> _Snapshot | None:
@@ -90,18 +92,25 @@ def _claim(scan_id: int) -> _Snapshot | None:
                 env = build_strix_env(scan.llm_profile)  # decrypts the key; only lives in this process
             except Exception as exc:
                 env_error = f"Не удалось подготовить LLM-профиль ({exc.__class__.__name__})"
+        # The original instruction was handed to the agents when the scan first started; a resume carries only what
+        # was asked for THIS time (nothing, if the user just picked the scan up again).
+        instruction = scan.instruction
+        if scan.resume_count > 0:
+            history = scan.resume_history or []
+            instruction = (history[-1].get("instruction") if history else None) or None
         return _Snapshot(
             scan_id=scan.id,
             runner_kind=scan.runner.kind if scan.runner else None,
             targets=list(scan.targets),
             scan_mode=scan.scan_mode.value,
-            instruction=scan.instruction,
+            instruction=instruction,
             max_budget=scan.max_budget,
             has_profile=scan.llm_profile is not None,
             env=env,
             env_error=env_error,
             parent_scan_id=scan.parent_scan_id,
             resume_run=scan.resume_run_name,
+            resume_count=scan.resume_count,
         )
 
 
@@ -153,7 +162,10 @@ def _finalize(scan_id: int, status: ScanStatus, detail: str | None, result: RunR
         scan = db.get(Scan, scan_id)
         if scan is None:
             return
-        db.execute(delete(Finding).where(Finding.scan_id == scan_id))
+        # Only replace the findings when the run directory was really read: a scan that is continued in place already
+        # holds its results, and a run that could not be parsed must not wipe them.
+        if parsed.run_name is not None:
+            db.execute(delete(Finding).where(Finding.scan_id == scan_id))
         for f in parsed.findings:
             db.add(
                 Finding(
@@ -174,10 +186,11 @@ def _finalize(scan_id: int, status: ScanStatus, detail: str | None, result: RunR
         scan.status = status
         scan.status_detail = detail
         scan.exit_code = result.exit_code
-        scan.run_name = parsed.run_name
-        scan.run_status = parsed.run_status
-        scan.cost = parsed.cost
-        scan.total_tokens = parsed.total_tokens
+        scan.run_name = parsed.run_name or scan.run_name
+        scan.run_status = parsed.run_status if parsed.run_name is not None else scan.run_status
+        # cumulative across resumes: keep what is known if the final numbers could not be read
+        scan.cost = parsed.cost if parsed.cost is not None else scan.cost
+        scan.total_tokens = parsed.total_tokens if parsed.total_tokens is not None else scan.total_tokens
         scan.finished_at = _utcnow()
         db.commit()
 
@@ -210,9 +223,20 @@ def scan_run(scan_id: int) -> str:
             if not snap.has_profile:
                 raise _Preflight("Для реального запуска нужен LLM-профиль (не выбран или удалён)")
 
-        if snap.resume_run:
-            # A continuation: give Strix the parent's run directory (a copy) and start the activity feed after
-            # the history that is already in it.
+        if snap.resume_run and snap.resume_count > 0:
+            # Continuing THIS scan: its own run directory is already here, nothing to copy. The log and the activity
+            # feed carry on after what they already hold.
+            try:
+                check_resumable(scan_id, snap.resume_run)
+            except ResumeError as exc:
+                raise _Preflight(str(exc))
+            run_dir = work_dir / "strix_runs" / snap.resume_run
+            writer.write(f"[oreshnik] ── Продолжение скана (раз: {snap.resume_count}): прогон {snap.resume_run} ──")
+            tailer.continue_in_place(run_dir)
+            run_json_before = (run_dir / "run.json").stat().st_mtime_ns
+        elif snap.resume_run:
+            # A continuation as a NEW scan: give Strix the parent's run directory (a copy) and start the activity feed
+            # after the history that is already in it.
             if snap.parent_scan_id is None:
                 raise _Preflight("Родительский скан был удалён — продолжить нельзя")
             try:

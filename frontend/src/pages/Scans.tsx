@@ -37,6 +37,7 @@ function Row({ scan, showOwner }: { scan: Scan; showOwner: boolean }) {
           <span className="mt-0.5 block truncate text-xs text-slate-500">
             {MODE_META[scan.scan_mode].label} · {scan.runner_name ?? "раннер удалён"}
             {scan.parent_scan_id !== null && ` · ↻ из #${scan.parent_scan_id}`}
+            {scan.resume_count > 0 && ` · ↻ продолжен ×${scan.resume_count}`}
             {scan.schedule_id !== null && ` · ⏱ ${scan.schedule_name ?? `расписание #${scan.schedule_id}`}`}
             {showOwner && ` · ${scan.owner_email}`}
           </span>

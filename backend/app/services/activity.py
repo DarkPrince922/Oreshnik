@@ -399,6 +399,28 @@ class ActivityTailer:
             except sqlite3.Error as exc:
                 log.warning("could not skip existing agent history: %s", exc)
 
+    def continue_in_place(self, run_dir: Path) -> None:
+        """For a scan that is continued in place: its feed already holds the earlier runs, and everything in agents.db so
+        far has been copied into it, so carry on after both — sequence numbers continue (the API and the browser
+        address events by them) and nothing is written twice."""
+        self.skip_existing(run_dir)
+        path = activity_path(self.scan_id)
+        if not path.is_file():
+            return
+        self._bytes = path.stat().st_size
+        last = None
+        try:
+            with path.open("rb") as fh:
+                for raw in fh:
+                    if raw.strip():
+                        last = raw
+            if last is not None:
+                self._seq = int(json.loads(last)["seq"]) + 1
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning("could not continue the activity feed of scan %s: %s", self.scan_id, exc)
+            self._seq = sum(1 for _ in path.open("rb"))  # the line count is a fine fallback: seq counts lines
+        self._capped = self._seq >= MAX_EVENTS or self._bytes >= MAX_FILE_BYTES
+
     # -- thread control
     def start(self) -> None:
         self._thread = threading.Thread(target=self._loop, name=f"activity-{self.scan_id}", daemon=True)

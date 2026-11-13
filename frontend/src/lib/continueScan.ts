@@ -1,5 +1,12 @@
 import type { Scan } from "./api";
 
+/**
+ * A scan continues in place (same scan, same id) only for its owner. The key is personal: an admin continuing somebody
+ * else's scan would run it on their own key but bill the owner, so for them it always becomes a new scan.
+ */
+export const canContinueInPlace = (scan: Pick<Scan, "user_id">, userId: number | null | undefined): boolean =>
+  userId !== null && userId !== undefined && scan.user_id === userId;
+
 /** A scan that finished on its own has nothing left to do without a new instruction; a stopped or failed one can just be picked up again. */
 export const instructionRequired = (scan: Pick<Scan, "status">): boolean =>
   scan.status === "succeeded" || scan.status === "vulns_found";

@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -82,6 +82,12 @@ class Scan(Base):
     )
     resume_run_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     cost_base: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Continuing the SAME scan (`strix --resume` on its own run): how many times that happened, the seconds it was
+    # active before the current run (started_at restarts on every resume), and what each resume asked for.
+    resume_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    elapsed_base: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    resume_history: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

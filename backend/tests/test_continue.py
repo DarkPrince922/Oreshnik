@@ -26,6 +26,8 @@ def create(client, headers, **body):
 
 
 def cont(client, headers, sid, **body):
+    """These tests cover continuing as a NEW scan on a copy of the run (`as_new_scan`); in-place is in test_resume_in_place."""
+    body.setdefault("as_new_scan", True)
     return client.post(f"/api/scans/{sid}/continue", headers=headers, json=body)
 
 

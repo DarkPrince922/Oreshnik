@@ -23,7 +23,7 @@ import {
   type Scan,
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { formatCost, formatDateTime, formatDuration, formatTokens, scanDuration } from "../lib/format";
+import { formatCost, formatDateTime, formatDuration, formatTokens, scanDuration, timesRu } from "../lib/format";
 import { useScanActivity } from "../lib/useScanActivity";
 import { useScanStream } from "../lib/useScanStream";
 
@@ -73,7 +73,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const [findings, setFindings] = useState<Finding[] | null>(null);
   const [report, setReport] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState<"cancel" | "delete" | ExportFormat | null>(null);
-  const [continuing, setContinuing] = useState(false);
+  const [continueOpen, setContinueOpen] = useState(false);
   const tabChosen = useRef(false);
   const scanRef = useRef<Scan | null>(null);
   scanRef.current = scan;
@@ -87,7 +87,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
     }
   }, [scanId]);
 
-  const { buffer, state } = useScanStream(scanId, {
+  const { buffer, state, restart } = useScanStream(scanId, {
     onStatus: (status) => {
       if (scanRef.current?.status !== status) void reload();
     },
@@ -106,11 +106,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
     return () => clearInterval(id);
   }, [active, reload]);
 
-  // Results exist once the scan is over.
+  // Results exist once the scan is over — and, for a scan that is being continued, from its earlier runs.
   const finished = scan !== null && !active;
+  const continuing = scan !== null && active && scan.resume_count > 0;
   const findingsKey = scan ? `${scan.status}:${scan.findings_total}` : "";
   useEffect(() => {
-    if (!finished) return;
+    if (!finished && !continuing) return;
     let alive = true;
     listFindings(scanId).then((f) => alive && setFindings(f)).catch((e) => alive && setError(errorMessage(e)));
     getReport(scanId).then((r) => alive && setReport(r)).catch(() => alive && setReport(null));
@@ -118,7 +119,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [finished, scanId, findingsKey]);
+  }, [finished, continuing, scanId, findingsKey]);
 
   // Raw agent transcripts are not shown to viewers (the API refuses them too).
   const canSeeAgents = !hasRole("viewer");
@@ -139,6 +140,14 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const duration = useMemo(() => (scan ? scanDuration(scan, now) : null), [scan, now]);
 
   const canModify = scan !== null && (hasRole("admin") || (hasRole("operator") && scan.user_id === user?.id));
+
+  // The scan went back to work in place: show it as running, reconnect the live log, and open the agents' feed.
+  const onContinued = (next: Scan) => {
+    setScan(next);
+    setError(null);
+    restart();
+    setTab(canSeeAgents ? "agents" : "log");
+  };
 
   const run = async (kind: "cancel" | "delete" | ExportFormat, fn: () => Promise<unknown>) => {
     setBusy(kind);
@@ -176,7 +185,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
     { id: "log", label: "Лог" },
     { id: "findings", label: "Находки", count: scan.findings_total },
     { id: "report", label: "Отчёт" },
-    ...(scan.instruction || scan.max_budget ? [{ id: "params" as Tab, label: "Параметры" }] : []),
+    ...(scan.instruction || scan.max_budget || scan.resume_count > 0 ? [{ id: "params" as Tab, label: "Параметры" }] : []),
   ];
 
   const detailTone =
@@ -199,6 +208,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
               <p className="mt-2 text-xs text-slate-500" data-testid="schedule-origin">
                 ⏱ Запущен по расписанию{" "}
                 <Link to={`/scans?schedule=${scan.schedule_id}`} className="text-accent-soft hover:underline">«{scan.schedule_name ?? `#${scan.schedule_id}`}»</Link>
+              </p>
+            )}
+            {scan.resume_count > 0 && (
+              <p className="mt-2 text-xs text-slate-500" data-testid="resume-count">
+                ↻ Продолжен в этом же скане: {timesRu(scan.resume_count)}
+                <span className="text-slate-600"> · находки и стоимость накопительные</span>
               </p>
             )}
             {(scan.parent_scan_id !== null || scan.continuations.length > 0) && (
@@ -240,7 +255,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
               <Button variant="danger" loading={busy === "cancel"} onClick={onCancel}>Остановить</Button>
             )}
             {canModify && finished && scan.run_name && scan.runner_name && (
-              <Button variant="primary" onClick={() => setContinuing(true)} title="Продолжить этот прогон с новой инструкцией (новый скан)">
+              <Button variant="primary" onClick={() => setContinueOpen(true)} title="Продолжить этот прогон с новой инструкцией (новый скан)">
                 Продолжить…
               </Button>
             )}
@@ -289,7 +304,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
       </Card>
 
       <ErrorNote message={error} />
-      {scan.run_name && <ContinueModal scan={scan} open={continuing} onClose={() => setContinuing(false)} />}
+      {scan.run_name && <ContinueModal scan={scan} open={continueOpen} onClose={() => setContinueOpen(false)} onContinued={onContinued} />}
 
       <div className="mb-5 mt-8 flex gap-1 border-b border-white/10">
         {tabs.map((t) => (
@@ -308,20 +323,27 @@ function ScanDetailView({ scanId }: { scanId: number }) {
       {tab === "log" && <LogViewer buffer={buffer} state={state} active={active} />}
 
       {tab === "findings" && (
-        active ? (
+        active && !continuing ? (
           <EmptyState title="Находки появятся после завершения" text="Strix печатает их в лог по ходу работы; в таблицу они сохраняются, когда скан закончен." />
         ) : findings === null ? (
           <div className="flex justify-center py-16"><Spinner className="h-6 w-6" /></div>
         ) : findings.length === 0 ? (
           <EmptyState title="Находок нет" text="Скан завершился без находок. Это не доказательство, что цель безопасна: проверено только то, что успел охватить скан." />
         ) : (
-          <FindingsPanel scanId={scanId} findings={findings} />
+          <>
+            {continuing && (
+              <p className="mb-4 rounded-lg border border-white/10 bg-white/5 px-3.5 py-2.5 text-xs text-slate-400" data-testid="stale-note">
+                Показаны находки до продолжения. Список обновится, когда скан закончится.
+              </p>
+            )}
+            <FindingsPanel scanId={scanId} findings={findings} />
+          </>
         )
       )}
 
       {tab === "report" && (
         <Card className="p-6 sm:p-8">
-          {active ? (
+          {active && !continuing ? (
             <p className="text-sm text-slate-500">Отчёт формируется в конце скана.</p>
           ) : report === undefined ? (
             <div className="flex justify-center py-10"><Spinner /></div>
@@ -329,6 +351,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
             <p className="text-sm text-slate-500">Отчёта нет — Strix не успел его записать.</p>
           ) : (
             <Suspense fallback={<div className="flex justify-center py-10"><Spinner /></div>}>
+              {continuing && <p className="mx-auto mb-4 max-w-4xl text-xs text-slate-500">Отчёт предыдущего запуска; обновится, когда скан закончится.</p>}
               <div className="mx-auto max-w-4xl"><SafeMarkdown>{report}</SafeMarkdown></div>
             </Suspense>
           )}
@@ -346,6 +369,29 @@ function ScanDetailView({ scanId }: { scanId: number }) {
             <div>
               <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Инструкция</h3>
               <p className="whitespace-pre-wrap text-sm text-slate-300 [overflow-wrap:anywhere]">{scan.instruction}</p>
+            </div>
+          )}
+          {scan.resume_history.length > 0 && (
+            <div data-testid="resume-history">
+              <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Продолжения</h3>
+              <ol className="space-y-3">
+                {scan.resume_history.map((h, i) => (
+                  <li key={h.at + i} className="rounded-lg border border-white/10 bg-white/[0.03] px-3.5 py-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-x-3 text-xs text-slate-500">
+                      <span className="font-mono text-slate-400">#{i + 1}</span>
+                      <span>{formatDateTime(h.at)}</span>
+                      {h.max_budget !== null && <span>лимит всего прогона ${h.max_budget}</span>}
+                    </div>
+                    <p className="mt-1.5 whitespace-pre-wrap text-slate-300 [overflow-wrap:anywhere]">
+                      {h.instruction ?? (
+                        <span className="text-slate-500">
+                          {canSeeAgents ? "без новой инструкции — продолжено с того же места" : "инструкция скрыта"}
+                        </span>
+                      )}
+                    </p>
+                  </li>
+                ))}
+              </ol>
             </div>
           )}
         </Card>

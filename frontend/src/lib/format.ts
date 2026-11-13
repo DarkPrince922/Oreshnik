@@ -10,11 +10,15 @@ export function formatDuration(ms: number): string {
   return `${s} с`;
 }
 
-/** Wall-clock run time; ticks while the scan is still running (pass the current time). */
-export function scanDuration(scan: Pick<Scan, "started_at" | "finished_at">, now: number): number | null {
-  if (!scan.started_at) return null;
+/**
+ * Time the scan was active, in ms; ticks while it is running (pass the current time). A scan continued in place restarts
+ * its clock with every run, so the time of the earlier runs (`elapsed_base`) is added and the pauses in between are not.
+ */
+export function scanDuration(scan: Pick<Scan, "started_at" | "finished_at"> & { elapsed_base?: number }, now: number): number | null {
+  const before = Math.max(0, (scan.elapsed_base ?? 0) * 1000);
+  if (!scan.started_at) return before > 0 ? before : null;
   const end = scan.finished_at ? new Date(scan.finished_at).getTime() : now;
-  return end - new Date(scan.started_at).getTime();
+  return before + Math.max(0, end - new Date(scan.started_at).getTime());
 }
 
 export function formatCost(cost: number | null): string {
@@ -33,4 +37,11 @@ export function targetsLabel(targets: string[]): { first: string; more: number }
 
 export function formatDateTime(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "medium" }) : "—";
+}
+
+/** "1 раз", "2 раза", "5 раз", "21 раз", "22 раза", "11 раз". */
+export function timesRu(n: number): string {
+  const last = n % 10;
+  const lastTwo = n % 100;
+  return last >= 2 && last <= 4 && !(lastTwo >= 12 && lastTwo <= 14) ? `${n} раза` : `${n} раз`;
 }
