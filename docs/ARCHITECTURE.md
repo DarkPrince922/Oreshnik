@@ -751,10 +751,20 @@ What the panel does about it:
   like the privacy and reasoning settings: explicitly, after the scan's own variables, for both runners.
 
 Worth knowing: "Загрузить модели" runs on the **panel's** host and a scan runs on the **runner's** (a different machine for SSH runners), so a
-model list that loads says nothing about whether the runner can reach the endpoint. From the runner:
-`curl -sS -m 120 -o /dev/null -w "%{http_code} connect=%{time_connect}s first_byte=%{time_starttransfer}s\n" <BASE_URL>/chat/completions
--H "Authorization: Bearer <KEY>" -H "Content-Type: application/json" -d '{"model":"<MODEL>","messages":[{"role":"user","content":"Reply with just OK"}],"max_tokens":16}'`
-— no connection or `000` = the route is blocked; `4xx`/`5xx` = the gateway; `200` with a first byte over 30 s = a slow model (raise the setting).
+model list that loads says nothing about whether the runner can reach the endpoint.
+
+**What the preflight actually sends** (the real `strix-agent` 1.7.0 run against a local endpoint that logs requests, for `STRIX_LLM`
+= `kimi-k3.1-pro`, `openai/kimi-k3.1-pro`, `openai/openai/gpt-oss-20b` and `openai/customprovider/mymodel`): `POST <LLM_API_BASE>/chat/completions`,
+non-streaming, with a body of exactly `{"messages": [system "You are a helpful assistant.", user "Reply with just 'OK'."], "model": "<id>"}` —
+no `max_tokens`, no `stream`, no reasoning parameters. The `model` field is the id **without** Strix's route prefix: `openai/kimi-k3.1-pro` and
+plain `kimi-k3.1-pro` produce identical requests, so the "openai/…" in the failure message and in "Для Strix: …" is Strix's internal name and
+never reaches the provider (the form's hint now says both: «Для Strix: openai/X · провайдеру уйдёт: X»). Two consequences: a model id is not the
+cause of a preflight timeout, and a thinking model with no `max_tokens` cap, asked non-streaming, may take longer than 30 s to answer even "OK".
+
+To see what the runner sees, on the runner, with the same body (no `max_tokens` — a cap would make a thinking model look fast):
+`curl -sS -m 180 -o /dev/null -w "%{http_code} connect=%{time_connect}s first_byte=%{time_starttransfer}s total=%{time_total}s\n" <BASE_URL>/chat/completions
+-H "Authorization: Bearer <KEY>" -H "Content-Type: application/json" -d '{"model":"<MODEL>","messages":[{"role":"user","content":"Reply with just OK"}]}'`
+— no connection or `000` = the route is blocked; `4xx`/`5xx` = the gateway; `200` with a total over 30 s = a slow model (raise the setting).
 
 Tests: scan #19's log reproduced exactly (unit and end to end through the worker with a real subprocess), the hint, the setting and
 both runners (a real local subprocess and a real SSH host receive it; a scan's own env cannot override it). Every piece was broken on

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canFetchModels, mergeModelOptions } from "./llmProfile";
+import { canFetchModels, mergeModelOptions, modelHint, requestedModelId, strixModelId } from "./llmProfile";
 
 describe("canFetchModels", () => {
   it("needs base_url for custom, never for the fixed providers", () => {
@@ -40,5 +40,33 @@ describe("mergeModelOptions", () => {
     expect(mergeModelOptions([], ["x"])).toEqual(["x"]);
     expect(mergeModelOptions(["x"], [])).toEqual(["x"]);
     expect(mergeModelOptions([], [])).toEqual([]);
+  });
+});
+
+describe("strixModelId / requestedModelId", () => {
+  it("for custom, always adds openai/ and sends the typed id untouched — whatever it looks like", () => {
+    for (const typed of ["kimi-k3.1-pro", "customprovider/mymodel", "openai/gpt-oss-20b", "a/b/c"]) {
+      expect(strixModelId("custom", typed)).toBe(`openai/${typed}`);
+      expect(requestedModelId("custom", typed)).toBe(typed);
+    }
+  });
+
+  it("for the fixed providers, does not prefix twice, and the provider is asked for the bare id", () => {
+    expect(strixModelId("claude", "claude-sonnet-4-6")).toBe("anthropic/claude-sonnet-4-6");
+    expect(strixModelId("claude", "anthropic/claude-sonnet-4-6")).toBe("anthropic/claude-sonnet-4-6");
+    expect(requestedModelId("claude", "anthropic/claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+    expect(strixModelId("grok", "grok-4")).toBe("xai/grok-4");
+    expect(requestedModelId("openai", "gpt-5.4")).toBe("gpt-5.4");
+  });
+});
+
+describe("modelHint", () => {
+  it("says what Strix is given AND what the provider receives, so a prefix is not mistaken for what is sent", () => {
+    expect(modelHint("custom", "kimi-k3.1-pro")).toBe("Для Strix: openai/kimi-k3.1-pro · провайдеру уйдёт: kimi-k3.1-pro");
+  });
+
+  it("has no hint for an empty field", () => {
+    expect(modelHint("custom", "")).toBeUndefined();
+    expect(modelHint("custom", "   ")).toBeUndefined();
   });
 });

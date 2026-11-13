@@ -15,7 +15,7 @@ import {
   type Provider,
   type ProviderPreset,
 } from "../lib/api";
-import { canFetchModels as computeCanFetchModels, mergeModelOptions } from "../lib/llmProfile";
+import { canFetchModels as computeCanFetchModels, mergeModelOptions, modelHint } from "../lib/llmProfile";
 
 interface Form {
   name: string;
@@ -252,7 +252,7 @@ export default function LLMProfiles() {
             <input className="field font-mono" type="password" autoComplete="off" value={form.api_key} onChange={(e) => { setForm({ ...form, api_key: e.target.value }); resetFetchedModels(); }} placeholder={editing ? "••••••••" : "sk-…"} required={!editing} />
           </Field>
 
-          <Field label="Модель" hint={form.model ? `Для Strix: ${form.provider === "custom" ? "openai" : form.provider === "claude" ? "anthropic" : form.provider === "grok" ? "xai" : "openai"}/${form.model}` : undefined}>
+          <Field label="Модель" hint={modelHint(form.provider, form.model)}>
             <input className="field font-mono" list="model-suggestions" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder={preset?.model_placeholder} required maxLength={200} />
             <datalist id="model-suggestions">
               {mergeModelOptions(preset?.suggestions ?? [], fetchedModels).map((s) => <option key={s} value={s} />)}
