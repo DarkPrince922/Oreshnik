@@ -82,3 +82,43 @@ def test_last_line_skips_borders_and_blank_lines_so_failure_messages_are_useful(
         w.write(line)
     w.close()
     assert w.last_line == "Make sure Docker is running."
+
+
+# The log of scan #19, as Strix printed it: a bordered box, wrapped at the terminal width.
+_PREFLIGHT_BOX = [
+    "╭─ STRIX ──────────────────────────────────────────────────────╮",
+    "│                                                              │",
+    "│  LLM CONNECTION FAILED                                       │",
+    "│                                                              │",
+    "│  Could not establish connection to the language model.       │",
+    "│  Please check your configuration and try again.              │",
+    "│                                                              │",
+    "│  Error: openai/kimi-k3.1-pro did not answer within 30s       │",
+    "│  (LLM_PREFLIGHT_TIMEOUT). Check LLM_API_BASE and that the endpoint is │",
+    "│  reachable.                                                  │",
+    "│                                                              │",
+    "╰──────────────────────────────────────────────────────────────╯",
+    "",
+    "",
+]
+
+
+def test_the_failure_message_is_the_last_paragraph_not_its_wrapped_tail(tmp_path):
+    w = LogWriter(5)
+    for line in _PREFLIGHT_BOX:
+        w.write(line)
+    w.close()
+    assert w.last_line == "reachable."  # what the status used to show on its own
+    assert w.last_message == (
+        "Error: openai/kimi-k3.1-pro did not answer within 30s "
+        "(LLM_PREFLIGHT_TIMEOUT). Check LLM_API_BASE and that the endpoint is reachable."
+    )
+
+
+def test_a_new_paragraph_replaces_the_message_and_a_long_one_is_cut_to_its_last_lines():
+    w = LogWriter(6)
+    for line in ["first paragraph", "", *[f"traceback line {i}" for i in range(9)], "ValueError: the real reason"]:
+        w.write(line)
+    w.close()
+    assert w.last_message.endswith("ValueError: the real reason")
+    assert w.last_message.count("traceback line") == 4 and "first paragraph" not in w.last_message  # last 5 lines only

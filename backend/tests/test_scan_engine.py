@@ -310,3 +310,13 @@ def test_a_scan_without_agent_data_just_has_no_activity(local_strix):
     scan = make_scan(user.id, runner.id, profile_id=make_profile(user.id).id, instruction="fail")
     assert scan_run(scan.id) == "failed"
     assert not activity_path(scan.id).exists()
+
+
+def test_a_model_that_never_answers_ends_the_scan_with_the_whole_reason_in_its_status(local_strix):
+    """The status of scan #19 used to read "Strix завершился с кодом 1: reachable." — the tail of a wrapped line."""
+    user, runner = make_user("a@example.com"), make_runner(RunnerKind.local)
+    scan = make_scan(user.id, runner.id, profile_id=make_profile(user.id).id, instruction="llm_preflight_timeout")
+    assert scan_run(scan.id) == "failed"
+    detail = load_scan(scan.id).status_detail
+    assert "did not answer within 30s (LLM_PREFLIGHT_TIMEOUT)" in detail and "endpoint is reachable." in detail
+    assert "Проверьте, что до Base URL профиля достаёт именно раннер" in detail

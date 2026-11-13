@@ -734,3 +734,28 @@ own number ignored, raw strings instead of hosts, only own scans counted, 429 in
 continue path unchecked, "no limit" not honoured) and a test failed each time. Frontend: 6 new unit tests (85 in total) for the
 limit fields. Browser end-to-end on the real stack: a local runner shows the defaults, an SSH host starts with 3 targets and keeps an
 edited value, `0` is refused with a message, an empty field clears the limit; the refusals were also read off the live API.
+
+## 18. A model that does not answer: the preflight, its message and its timeout
+
+Before a scan starts Strix sends the model one tiny request ("Reply with just 'OK'", `interface/scan_setup.py::preflight_request`) and
+gives up after `LLM_PREFLIGHT_TIMEOUT` seconds (30 by default). Its message names the model and the variable, and says nothing about *why* —
+the SDK retries 429/5xx/network errors with back-off inside that window, so repeated gateway errors, a blocked route and a slow first token
+all end as "did not answer within 30s".
+
+What the panel does about it:
+- **The status line shows the whole reason.** Strix prints failures in a bordered box wrapped at the terminal width, so the last *line* is
+  often a tail (scan #19 read "Strix завершился с кодом 1: reachable."). `LogWriter` now also keeps the last *paragraph* (lines between blank
+  lines / box borders, at most 5), and the worker uses that for the status. For this one failure the status adds what to check: that the
+  **runner** (not only the panel) reaches the profile's Base URL, and the timeout setting.
+- **`LLM_PREFLIGHT_TIMEOUT`** is a panel setting (`.env`, 1-600, default 30 = Strix's own, so nothing changes until it is set), passed to Strix
+  like the privacy and reasoning settings: explicitly, after the scan's own variables, for both runners.
+
+Worth knowing: "Загрузить модели" runs on the **panel's** host and a scan runs on the **runner's** (a different machine for SSH runners), so a
+model list that loads says nothing about whether the runner can reach the endpoint. From the runner:
+`curl -sS -m 120 -o /dev/null -w "%{http_code} connect=%{time_connect}s first_byte=%{time_starttransfer}s\n" <BASE_URL>/chat/completions
+-H "Authorization: Bearer <KEY>" -H "Content-Type: application/json" -d '{"model":"<MODEL>","messages":[{"role":"user","content":"Reply with just OK"}],"max_tokens":16}'`
+— no connection or `000` = the route is blocked; `4xx`/`5xx` = the gateway; `200` with a first byte over 30 s = a slow model (raise the setting).
+
+Tests: scan #19's log reproduced exactly (unit and end to end through the worker with a real subprocess), the hint, the setting and
+both runners (a real local subprocess and a real SSH host receive it; a scan's own env cannot override it). Every piece was broken on
+purpose (7 mutations) and a test failed each time.

@@ -60,3 +60,19 @@ def test_inherited_findings_do_not_count_when_the_continued_run_was_never_touche
     assert decide(result, parsed, None, 180, "strix: error: x", results_are_fresh=False)[0] == ScanStatus.failed
     assert decide(result, parsed, None, 180, "", results_are_fresh=True)[0] == ScanStatus.vulns_found
     assert decide(result, parsed, None, 180)[0] == ScanStatus.vulns_found  # fresh by default
+
+
+def test_a_model_that_does_not_answer_the_preflight_says_so_and_what_to_try():
+    message = (
+        "Error: openai/kimi-k3.1-pro did not answer within 30s (LLM_PREFLIGHT_TIMEOUT). "
+        "Check LLM_API_BASE and that the endpoint is reachable."
+    )
+    status, detail = decide(RunResult(exit_code=1), ParsedRun(), None, 180, message)
+    assert status == ScanStatus.failed
+    assert "did not answer within 30s" in detail and "reachable." in detail  # the whole reason, not its tail
+    assert "раннер" in detail and "LLM_PREFLIGHT_TIMEOUT" in detail  # and where to look
+
+
+def test_other_failures_get_no_such_hint():
+    _, detail = decide(RunResult(exit_code=1), ParsedRun(), None, 180, "Make sure Docker is running.")
+    assert detail == "Strix завершился с кодом 1: Make sure Docker is running."

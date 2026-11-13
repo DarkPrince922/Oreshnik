@@ -5,7 +5,7 @@ The behaviour is chosen by the content of the file passed via --instruction-file
 (exactly the way a user's instruction reaches the real CLI):
 
     ok_clean | ok_findings | fail | argerror | no_artifacts | slow | ignore_sigint | spawn_child
-    | secret_echo | ansi | live_agents | live_agents_slow
+    | llm_preflight_timeout | secret_echo | ansi | live_agents | live_agents_slow
 """
 import json
 import os
@@ -109,6 +109,24 @@ if mode == "ok_findings":
     sys.exit(2)
 if mode == "fail":
     print("DOCKER NOT AVAILABLE", flush=True)
+    sys.exit(1)
+if mode == "llm_preflight_timeout":
+    # what the real CLI printed for scan #19: a bordered box wrapped at the terminal width
+    for line in (
+        "╭─ STRIX ──────────────────────────────────────────────────────╮",
+        "│                                                              │",
+        "│  LLM CONNECTION FAILED                                       │",
+        "│                                                              │",
+        "│  Could not establish connection to the language model.       │",
+        "│                                                              │",
+        "│  Error: openai/kimi-k3.1-pro did not answer within 30s       │",
+        "│  (LLM_PREFLIGHT_TIMEOUT). Check LLM_API_BASE and that the endpoint is │",
+        "│  reachable.                                                  │",
+        "│                                                              │",
+        "╰──────────────────────────────────────────────────────────────╯",
+        "",
+    ):
+        print(line, flush=True)
     sys.exit(1)
 if mode == "argerror":
     print("strix: error: Invalid target", flush=True)

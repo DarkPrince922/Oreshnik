@@ -72,6 +72,10 @@ def clean_line(line: str) -> str:
     return line
 
 
+# How many lines of the last paragraph the failure message of a scan may carry.
+MESSAGE_LINES = 5
+
+
 class LogWriter:
     """Appends cleaned, redacted lines to the scan's log file (flushed per line)."""
 
@@ -85,6 +89,10 @@ class LogWriter:
         self._truncated = False
         self.lines = 0
         self.last_line = ""
+        # The last paragraph of meaningful lines (blank lines and box borders end one), a few lines at most. Strix prints its
+        # failures in a bordered box wrapped at the terminal width, so the last *line* is often a tail like "reachable."
+        self.last_message = ""
+        self._paragraph: list[str] = []
 
     def add_secrets(self, secrets: list[str]) -> None:
         self._secrets += [s for s in secrets if s and len(s) >= 6]
@@ -105,6 +113,10 @@ class LogWriter:
         meaningful = _BOX_RE.sub(" ", line).strip()
         if re.search(r"\w{3}", meaningful):  # skip blank lines and pure borders
             self.last_line = meaningful
+            self._paragraph = (self._paragraph + [meaningful])[-MESSAGE_LINES:]
+            self.last_message = " ".join(self._paragraph)
+        else:
+            self._paragraph = []
 
     def close(self) -> None:
         self._fh.close()

@@ -48,5 +48,13 @@ def decide(
 
     detail = f"Strix завершился с кодом {code}"
     if last_line:
-        detail += f": {last_line[:300]}"
+        detail += f": {last_line[:400]}"
+    if "LLM_PREFLIGHT_TIMEOUT" in last_line:
+        # Strix's one test request to the model got no answer in time. The panel and the runner are different machines:
+        # a Base URL the panel can reach (the model list loads) may still be out of reach, or too slow, from the runner.
+        detail += (
+            " — модель не ответила на проверочный запрос. Проверьте, что до Base URL профиля достаёт именно раннер "
+            "(не только панель) и что модель отвечает быстро; медленной модели можно дать больше времени "
+            "настройкой LLM_PREFLIGHT_TIMEOUT."
+        )
     return ScanStatus.failed, detail

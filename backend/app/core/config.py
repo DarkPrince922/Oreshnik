@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER = "CHANGE_ME"
@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # and cost; only matters for a model LiteLLM's own catalog marks as reasoning-capable — for a model it doesn't
     # recognise (most "custom" base_url profiles, and some providers) Strix silently ignores this.
     strix_reasoning_effort: str = "high"
+    # How long Strix waits for the model to answer its one tiny test request before the scan starts (Strix's own
+    # LLM_PREFLIGHT_TIMEOUT, 30 s by default). Raise it for a slow gateway or a model that thinks long before its first token;
+    # it does not help when the runner cannot reach the endpoint at all.
+    llm_preflight_timeout: int = Field(default=30, ge=1, le=600)
 
     @field_validator("strix_reasoning_effort", mode="before")
     @classmethod

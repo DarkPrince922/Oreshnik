@@ -386,7 +386,7 @@ def scan_run(scan_id: int) -> str:
             writer.write(f"[oreshnik] {early_error}")
         for warning in parsed.warnings:
             writer.write(f"[oreshnik] {warning}")
-        last_line = writer.last_line
+        last_line = writer.last_message or writer.last_line
         writer.close()
 
     # A continued run starts out holding the parent's findings; only trust them as THIS run's result if

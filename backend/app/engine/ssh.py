@@ -25,7 +25,7 @@ import time
 from collections.abc import Callable
 
 from app.core.config import settings
-from app.engine.base import RunResult, ScanSpec, strix_privacy_env, strix_reasoning_env
+from app.engine.base import RunResult, ScanSpec, strix_llm_timeout_env, strix_privacy_env, strix_reasoning_env
 from app.engine.local import strix_argv
 from app.services.resume import RUN_NAME_RE
 from app.services.scan_files import INSTRUCTION_NAME
@@ -77,7 +77,7 @@ def build_script(spec: ScanSpec, argv: list[str], scan_remote_dir: str) -> str:
             raise SshError(SshErrorKind.other, "Недопустимое имя переменной окружения")
         lines.append(f"export {key}={q(value)}")
     # after the scan's own variables: they cannot switch these back on, or override the panel's own tuning
-    for key, value in (strix_privacy_env() | strix_reasoning_env()).items():
+    for key, value in (strix_privacy_env() | strix_reasoning_env() | strix_llm_timeout_env()).items():
         lines.append(f"export {key}={q(value)}")
     lines += [
         "echo $$ > .pid",  # this shell becomes Strix (exec) and is the session leader: .pid is the process group to signal

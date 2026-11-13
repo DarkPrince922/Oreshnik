@@ -32,6 +32,13 @@ def strix_reasoning_env() -> dict[str, str]:
     return {"STRIX_REASONING_EFFORT": settings.strix_reasoning_effort}
 
 
+def strix_llm_timeout_env() -> dict[str, str]:
+    """How long Strix waits for its pre-scan test request to the model (`LLM_PREFLIGHT_TIMEOUT`), for every runner alike."""
+    from app.core.config import settings
+
+    return {"LLM_PREFLIGHT_TIMEOUT": str(settings.llm_preflight_timeout)}
+
+
 @dataclass
 class ScanSpec:
     scan_id: int
