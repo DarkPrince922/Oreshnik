@@ -27,7 +27,7 @@ FastAPI · Postgres · Celery + Redis (queue + beat scheduler) · React/Vite/TS/
 
 ## Status
 
-Early development — phases 0–4 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI, live agent activity, continuing a scan with new instructions, cron schedules, live scan cost and cost accounting). SSH runners are next. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
+Early development — phases 0–5 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI, live agent activity, continuing a scan with new instructions in the same scan, cron schedules, live scan cost and cost accounting, SSH runners with a pinned host key and one-click installation of Docker and Strix). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
 design and the phased build plan.
 
 ## Quick start (dev)

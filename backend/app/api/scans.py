@@ -46,7 +46,7 @@ from app.services.scan_files import (
     tail_from,
 )
 from app.services.resume import ResumeError, check_resumable
-from app.services.scan_factory import ScanRequestError, create_queued_scan
+from app.services.scan_factory import ScanRequestError, check_runner_usable, create_queued_scan
 from app.worker.tasks import scan_run
 
 log = logging.getLogger("oreshnik.scans")
@@ -228,8 +228,10 @@ def continue_scan(
     runner = scan.runner
     if runner is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Раннер этого скана удалён")
-    if runner.kind == RunnerKind.ssh:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "SSH-раннеры пока не поддерживаются")
+    try:
+        check_runner_usable(runner)
+    except ScanRequestError as exc:
+        raise HTTPException(exc.status_code, exc.detail)
 
     # A scan that finished on its own has nothing left to do without a new instruction; a stopped or failed
     # one can simply be picked up again.

@@ -129,10 +129,13 @@ def test_runner_deleted_before_start():
     assert "Раннер был удалён" in log_text(scan.id)  # also visible in the live log
 
 
-def test_ssh_runner_is_not_supported_yet():
+def test_an_ssh_runner_that_was_never_set_up_fails_cleanly_before_anything_is_sent():
+    """A bare runner row (no host, key or confirmed host key) is not "unsupported" any more — it is simply not configured."""
     user, runner = make_user("a@example.com"), make_runner(RunnerKind.ssh)
-    scan = make_scan(user.id, runner.id)
-    assert scan_run(scan.id) == "failed" and "пока не поддерживаются" in load_scan(scan.id).status_detail
+    scan = make_scan(user.id, runner.id, profile_id=make_profile(user.id).id)
+    assert scan_run(scan.id) == "failed"
+    detail = load_scan(scan.id).status_detail
+    assert "хост, пользователь или ключ" in detail and "пока не поддерживаются" not in detail and "SshError" not in detail
 
 
 def test_real_runner_without_profile_fails_cleanly(local_strix):

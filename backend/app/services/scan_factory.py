@@ -16,6 +16,7 @@ from app.models.llm_profile import LLMProfile
 from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, Scan, ScanMode, ScanStatus
 from app.models.user import Role, User
+from app.services.ssh_runner import is_provisioning
 from app.services.targets import TargetKind, classify_all
 
 
@@ -38,6 +39,18 @@ class Resolved:
     targets: list[str]
     runner: Runner
     profile: LLMProfile | None
+
+
+def check_runner_usable(runner: Runner) -> None:
+    """Refuse what can never work, before a scan is created (so a schedule is switched off with a reason instead of
+    producing a failed scan every night)."""
+    if runner.kind == RunnerKind.ssh:
+        if not (runner.ssh_host and runner.ssh_user and runner.ssh_key_enc):
+            raise ScanRequestError(422, "SSH-раннер не настроен: нужны хост, пользователь и ключ")
+        if is_provisioning(runner):
+            raise ScanRequestError(409, "На раннере идёт установка — дождитесь её окончания")
+        if not runner.ssh_host_key:
+            raise ScanRequestError(422, "Ключ хоста SSH-раннера не подтверждён — подтвердите отпечаток на странице «Раннеры»")
 
 
 def resolve_request(
@@ -72,8 +85,13 @@ def resolve_request(
         runner = db.scalar(select(Runner).where(Runner.kind == wanted).order_by(Runner.id))
         if runner is None:
             raise ScanRequestError(422, "Нет доступного раннера — создайте его в разделе «Раннеры»")
-    if runner.kind == RunnerKind.ssh:
-        raise ScanRequestError(422, "SSH-раннеры пока не поддерживаются")
+    check_runner_usable(runner)
+    if runner.kind == RunnerKind.ssh and any(kind == TargetKind.path for _, kind in classified):
+        raise ScanRequestError(
+            422,
+            "Локальный путь нельзя сканировать на SSH-раннере: он указывал бы на файловую систему самого раннера, "
+            "а не панели. Используйте URL, домен, IP или git-репозиторий.",
+        )
 
     profile: LLMProfile | None = None
     if llm_profile_id is not None:

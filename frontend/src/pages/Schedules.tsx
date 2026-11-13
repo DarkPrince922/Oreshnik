@@ -207,8 +207,8 @@ function ScheduleForm({
           <select className="field" value={runnerId ?? ""} onChange={(e) => setRunnerId(e.target.value ? Number(e.target.value) : null)} required aria-label="Раннер">
             <option value="" disabled>— выберите —</option>
             {runners.map((r) => (
-              <option key={r.id} value={r.id} disabled={r.kind === "ssh"}>
-                {r.name} · {KIND_LABEL[r.kind]}{r.kind === "ssh" ? " (скоро)" : ""}
+              <option key={r.id} value={r.id}>
+                {r.name} · {KIND_LABEL[r.kind]}{r.status !== "online" ? ` · ${r.status}` : ""}
               </option>
             ))}
           </select>

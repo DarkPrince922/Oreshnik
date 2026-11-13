@@ -129,11 +129,11 @@ Status legend: *(done)* shipped and tested · *(in progress)* being built · *(p
   - *Scheduling:* recurring scans by cron (with time zone), run-now, overlap protection, safe defaults for real (paid) runners.
   - *Live cost:* the spend of a running scan from `run.json` (Strix rewrites it after every model cycle) and a budget bar with warnings.
   - *Cost accounting:* spend by user, day and scan, counting only what each scan itself cost (continuations are cumulative in Strix).
-- **Phase 5 — SSH runners** *(planned)*: panel connects over SSH, installs Docker + Strix, health-checks the host, runs the scan remotely and fetches `strix_runs/<run>`; the `ssh` runner kind already exists in the data model and UI ("скоро").
+- **Phase 5 — SSH runners** *(done)*: the panel connects over SSH with a **pinned host key** (confirmed by fingerprint), health-checks the host, installs Docker + Strix when asked, runs scans remotely (live log, cost and agent feed mirrored, cancel of the whole process group, results fetched back) and cleans up. See §15.
 
 **Deferred by decision** (not part of any phase unless the owner asks): target allow-list / ownership checks (decision #10), audit log (#7), notifications outside the panel (#6), automatic retention/pruning of run directories.
 
-**Open technical debt:** `Dockerfile.worker` and the compose wiring have never been built or run (no Docker daemon in the dev environment); no real LLM-backed scan has been verified end to end through the panel; sending messages to a *running* headless scan is impossible in Strix 1.7.0 (only the interactive TUI can), so "continue" works on finished or stopped scans only.
+**Open technical debt:** `Dockerfile.worker` and the compose wiring have never been built or run (no Docker daemon in the dev environment, and none on any host the SSH runner was tried against); no real LLM-backed scan has been verified end to end through the panel; sending messages to a *running* headless scan is impossible in Strix 1.7.0 (only the interactive TUI can), so "continue" works on finished or stopped scans only.
 
 ## 8. UI direction
 
@@ -165,8 +165,8 @@ Strict **black**, but "alive": dark glass panels, smooth transitions, micro-inte
   `grok→xai/<model>`, `custom→openai/<model>` + `LLM_API_BASE` (custom requires a base URL). The Phase 2 scan engine calls this
   right before launching Strix.
 - **Runner checks run on the Celery worker**, not in the API, because the worker is where scans run (`local` = strix CLI +
-  docker.sock present). If the worker doesn't answer within 15 s the runner is marked offline. `ssh` runners are stored but can't be
-  checked until Phase 5.
+  docker.sock present). If the worker doesn't answer within 15 s (60 s for SSH hosts, which have to be reached) the runner is marked
+  offline. `ssh` runners are checked over a real connection with a pinned host key (§15).
 - **Startup safety:** outside `ORESHNIK_ENV=dev` the API refuses to start with placeholder/weak `SECRET_ENCRYPTION_KEY` / `JWT_SECRET`.
 
 ### Tests
@@ -421,7 +421,7 @@ simulated one (or the other way round). Editing it requires picking a runner aga
 
 **Safe defaults for real (paid) runners**: a `max_budget` is **mandatory**, and the schedule may not fire more often than every
 `SCHEDULE_MIN_INTERVAL_MINUTES` (15). The simulated runner is exempt from both. Other limits: 20 schedules per user
-(`MAX_SCHEDULES_PER_USER`), unique name per user, SSH runners refused until phase 5.
+(`MAX_SCHEDULES_PER_USER`), unique name per user; SSH runners work for schedules like any other real runner (§15).
 
 **Time zones and DST.** The expression is evaluated on the *wall clock* of the schedule's zone, then converted to UTC, so "03:00
 Europe/Berlin" stays 03:00 local across DST changes: a time skipped by spring-forward fires once (at the first valid instant), and a
@@ -483,3 +483,101 @@ including a schedule that beat really fired into a scan, plus the earlier suites
 - Schedules are not evaluated while **beat** is not running; compose runs exactly one beat (a second one would be harmless thanks to
   the claim, merely redundant).
 - The DST edge above; precision is the 30 s beat tick; no calendar exclusions (holidays) and no per-schedule retention of old scans.
+
+## 15. SSH runners (phase 5)
+
+An SSH runner moves **only Strix itself** to another machine. Everything the panel builds on stays where it was: the scan's directory
+under `STRIX_RUNS_DIR` is still the source of truth, the log is still `oreshnik.log`, results are still read from
+`scan-<id>/strix_runs/<name>/`, and the live cost, the agent feed, the budget bar, cancel, schedules, cost accounting and
+"Продолжить" work unchanged. Migration `0007` adds `ssh_host_key`, `ssh_host_key_pending`, `provision_log`, `provision_started_at`;
+the host, port, user and the (Fernet-encrypted) private key were already in the model.
+
+### Trust: the host key is pinned, never learned silently
+- **First contact looks, it does not log in.** The first check fetches the host's public key (no credentials are sent — the host
+  sees a handshake and nothing else) and stores it as *pending*. The card shows the fingerprint; the administrator compares it with
+  `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` **on the server** and confirms in a dialog (a box "я сверил(а)" must be ticked).
+  The fingerprint is sent back with the confirmation; if the host presented another key in the meantime, nothing is pinned.
+  Checked on a real OpenSSH server: the fingerprint the panel shows is identical to `ssh-keygen -lf`'s.
+- **Every connection is checked against the pinned key** (`known_hosts=([trusted], [], [])`). A different key is an *error*, never a
+  prompt and never an automatic update: the panel stops **before any credential is sent**, shows both fingerprints, and offers no
+  "trust" button — only an explicit "Сбросить старый ключ", after which the new key goes through the same confirmation. Changing the
+  host or port forgets the pinned key as well.
+- Key authentication only: no passwords, no SSH agent, none of the panel host's `~/.ssh/config`. The private key is never part of an
+  error message or a log, and operators/viewers never see connection details or fingerprints.
+
+### Is the host ready?
+One script over SSH (`ssh_runner.probe`) reports OS, user, root/sudo, Docker (present, and usable by this user), Strix on the
+non-interactive `PATH` (`~/.local/bin` is added: SSH sessions do not read the profile), python3, setsid, curl, uv and free space. The
+verdict is a status plus a reason a person can act on ("нет Strix — нажмите «Установить»", "доступ к Docker — добавьте
+пользователя в группу docker…"). `online` means: Docker usable, Strix, python3 and setsid present. Statuses: `error` for a rejected
+key or a changed host key (needs attention), `offline` for unreachable or incomplete. A periodic task re-checks every trusted host
+(`SSH_CHECK_INTERVAL_SECONDS`, default 120) so "online" is never a week-old fact; hosts that are not confirmed are not contacted.
+
+### Running a scan (`engine/ssh.py`)
+1. Connect (key pinned), stop and remove whatever an earlier attempt left in `~/oreshnik/scan-<id>`, create it.
+2. For a continuation, **upload the run directory** — the panel's copy is the master, so the remote copy is disposable.
+3. Start Strix as `setsid -w sh -s`, with the script and the LLM environment on **stdin**. The command line (visible to every user of
+   the host through `ps`) holds no secrets and neither does the remote disk. Every dynamic word (targets, run name, values) is
+   shell-quoted; a hostile target arrives at Strix exactly as typed (tested with `$(…)`, backticks and quotes).
+4. Stream the output into the scan log (redacted like a local scan). Meanwhile a mirror thread copies `run.json`, `vulnerabilities.json`
+   and the agent roster every 2 s, and a **consistent snapshot** of the agents' SQLite database (the host's python3 takes it with
+   the backup API — the live database is in WAL mode, so copying the file alone would give a stale or torn picture). That is what
+   keeps the live cost, the agent feed and the budget bar working for remote scans.
+5. **Cancel and time limit** act on Strix's whole process group: SIGINT, then SIGTERM, then SIGKILL (`STRIX_CANCEL_GRACE_SECONDS`
+   apart). Checked on a real sshd with a Strix that ignores SIGINT and one that spawns an immortal child: nothing is left behind.
+6. At the end: remove the scan's sandbox containers (by label), **fetch the run directory** and delete the remote directory. The fetch
+   treats the host as untrusted: names are validated, symlinks and special files are skipped, and the size/number of files are capped
+   (`SSH_FETCH_MAX_MB` 500, `SSH_FETCH_MAX_FILES` 20000). If fetching fails the remote directory is **kept**, the log says where it is
+   and the scan fails with the reason — nothing is lost silently.
+7. **A lost connection loses the run:** Strix is stopped on the host over a fresh connection (best effort) and the scan fails with
+   "Потеряно соединение…" — the same outcome as a worker dying under a local scan. If the *worker* is lost, the reaper does the same
+   cleanup on the host (`cleanup_remote`).
+
+Only administrators create or edit runners, so only they can make the panel connect to an address; operators and viewers see
+status only. Rules: creating a scan (or a schedule firing) on a host whose key is not confirmed, or that is being installed, is refused up front
+(a schedule is then switched off with that reason); **local filesystem paths are refused on an SSH runner** (they would point at the
+runner's disk, not the panel's); real runners still need an LLM profile, and the profile's key is sent to the host, into the Strix
+process environment — choose hosts you trust with it. "Strix touched `run.json`" is now judged by content (hash), not file time: a
+run fetched back from a host is a new file even when nothing changed, and that would have made a startup error (exit code 2) look
+like "vulnerabilities found".
+
+### Installing what is missing (`services/provision.py`)
+"Установить" (admin, confirmed hosts only) looks at the host first and builds a **plan** of only the missing steps, then runs them one
+by one, each in a fresh login (so a new `docker` group membership applies to the next step), streaming everything into a log the UI
+polls. A failing step stops the installation; nothing is retried behind the user's back.
+
+| Step | How | Needs root |
+|---|---|---|
+| Docker | official `get.docker.com` script, downloaded first and then run (never `curl \| sh` as root); service enabled; user added to `docker` | yes |
+| python3, util-linux (`setsid`) | apt | yes |
+| uv, then Strix | uv installer; `uv tool install --python 3.12 --force strix-agent==<STRIX_VERSION>` for the user | no |
+| sandbox image | `docker pull <STRIX_SANDBOX_IMAGE>` (large; otherwise the first scan waits for it) | no |
+
+System packages are installed only on Debian/Ubuntu and only with root or passwordless sudo; otherwise the panel says exactly what is
+missing and what to do. Versions are pinned to what the panel was verified against (`STRIX_VERSION=1.7.0`) and quoted, so a hostile
+value cannot become a command. One installation at a time; an installation lost with its worker stops blocking the runner after
+90 minutes; the log is cleaned of terminal escapes and capped at 200 kB.
+
+### Tests
+**Backend: 117 new tests (540 in total)** — 36 for the SSH layer, 18 for host-key trust and checks, 33 for scans on a host, 30 for
+installation — run against a **real SSH server** (asyncssh, no external binary) playing a hermetic remote machine with a fake
+`strix`/`docker` on it: the whole scan path, secrets (never in a command line or on the remote disk, redacted in the log and the
+feed), cancel of the process group with and without SIGINT, connection loss, host key changes, fetch limits and symlinks, live
+mirroring of a WAL database, continuation in place and as a copy, leftovers of an earlier attempt, the reaper, schedules. Every
+safeguard was **broken on purpose** (38 mutations: key in the command line, group not signalled, quoting removed, host key not pinned,
+symlinks followed, no size cap, remote deletion unrestricted, unconfirmed hosts accepted, one-click trust of a changed key, no
+cleanup after a lost connection, freshness by file time, …) and a test failed each time. Frontend: 6 new unit tests (69 in total) for the host key states and fingerprints. Browser end-to-end against a **real OpenSSH `sshd`**:
+37 checks (see below); the earlier browser suites (77, 28, 65, 34 checks) were rerun as regression.
+
+### Verified for real, and what is not
+Verified against a real `sshd` (OpenSSH, as a non-root user): the fingerprint equals `ssh-keygen -lf`; pinned-key login; the probe;
+SFTP; exec exit codes and separate stderr; scans through the UI with cancel (SIGINT ignored, child process), live log/feed/cost,
+continuation in place; a changed host key blocks scans before any login; and the **real Strix installer step** — `uv tool install
+--python 3.12 --force strix-agent==1.7.0` run from the UI through SSH installed a working `strix 1.7.0` into `~/.local/bin`.
+
+**Not verified:** the Docker installer (`get.docker.com`) and the uv installer script — those hosts are not reachable from the
+development sandbox, so they run only against stand-ins in the tests; a **real Docker daemon** on a remote host (sandbox containers,
+`docker pull` of the image) — none is available here; a **real LLM-backed scan** on a host; non-Debian systems (by design not
+touched); rootless Docker / `DOCKER_HOST` on the host; SSH through jump hosts; password or agent authentication (not supported).
+Known limits: Strix's repository clones in `/tmp/strix_repos/<run>` on the host are not removed by the panel; the host's own load is
+not throttled beyond the per-user active-scan limit and the worker's concurrency.

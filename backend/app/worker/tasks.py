@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -18,6 +19,10 @@ from app.services.artifacts import ParsedRun, parse_run_dir, read_live_usage
 from app.services.llm import build_strix_env
 from app.services.resume import ResumeError, check_resumable, stage_run
 from app.services.runner_health import check_runner
+from app.services.ssh import SshError, SshTarget
+from app.services.ssh_runner import check_ssh_runner, is_provisioning, target_for
+from app.services import provision
+from app.engine.ssh import cleanup_remote
 from app.services.scan_files import LogWriter, find_run_dir, scan_dir
 from app.services.scan_outcome import decide
 from app.services.schedule import fire_scheduled, next_fire
@@ -30,7 +35,33 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _run_json_token(path: Path) -> str:
+    """What run.json looked like, to tell later whether Strix really wrote to it. Content, not modification time: a run
+    fetched back from a remote host is a new file even when nothing in it changed."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 # ── runner health ────────────────────────────────────────────────────────
+
+
+def _check_and_store(db, runner: Runner) -> dict:
+    if runner.kind == RunnerKind.ssh:
+        if is_provisioning(runner):  # the installation owns the status until it ends
+            return {"status": runner.status.value, "detail": runner.status_detail}
+        result = check_ssh_runner(runner)
+        status, detail = result.status, result.detail
+        if result.pending_host_key is not None:
+            runner.ssh_host_key_pending = result.pending_host_key
+        elif result.status == RunnerStatus.online:
+            runner.ssh_host_key_pending = None
+    else:
+        status, detail = check_runner(runner)
+    runner.status = status
+    runner.status_detail = detail
+    if status == RunnerStatus.online:
+        runner.last_seen_at = _utcnow()
+    db.commit()
+    return {"status": status.value, "detail": detail}
 
 
 @celery.task(name="oreshnik.runner_check")
@@ -40,13 +71,62 @@ def runner_check(runner_id: int) -> dict:
         runner = db.get(Runner, runner_id)
         if runner is None:
             return {"status": "error", "detail": "runner not found"}
-        status, detail = check_runner(runner)
-        runner.status = status
-        runner.status_detail = detail
-        if status == RunnerStatus.online:
-            runner.last_seen_at = _utcnow()
-        db.commit()
-        return {"status": status.value, "detail": detail}
+        return _check_and_store(db, runner)
+
+
+@celery.task(name="oreshnik.runner_provision")
+def runner_provision(runner_id: int) -> dict:
+    """Install what an SSH runner is missing (Docker, Strix, …), logging every step into the runner's `provision_log`."""
+
+    def save(text: str) -> None:
+        with SessionLocal() as db:
+            db.execute(update(Runner).where(Runner.id == runner_id).values(provision_log=text))
+            db.commit()
+
+    buffer = provision.LogBuffer(save)
+    with SessionLocal() as db:
+        runner = db.get(Runner, runner_id)
+        if runner is None or runner.kind != RunnerKind.ssh:
+            return {"status": "error", "detail": "runner not found"}
+        db.expunge(runner)  # do not hold a transaction open for the minutes the installation takes
+    try:
+        outcome = provision.run_provision(runner, buffer, provision.default_commands())
+        status, detail = outcome.status, outcome.detail
+    except Exception:
+        log.exception("provisioning of runner %s crashed", runner_id)
+        buffer("✗ Внутренняя ошибка установки")
+        status, detail = RunnerStatus.error, "Установка прервана: внутренняя ошибка"
+    buffer.flush()
+    with SessionLocal() as db:
+        row = db.get(Runner, runner_id)
+        if row is not None:
+            row.status, row.status_detail = status, detail
+            row.provision_started_at = None
+            if status == RunnerStatus.online:
+                row.last_seen_at = _utcnow()
+            db.commit()
+    return {"status": status.value, "detail": detail}
+
+
+@celery.task(name="oreshnik.check_ssh_runners")
+def check_ssh_runners() -> int:
+    """Periodic: keep the status of the SSH runners honest ("online" must not be a week-old fact). Hosts whose key is not
+    confirmed yet are left alone — nobody asked for them to be contacted beyond the first look."""
+    with SessionLocal() as db:
+        ids = db.scalars(
+            select(Runner.id).where(Runner.kind == RunnerKind.ssh, Runner.ssh_host_key.is_not(None)).order_by(Runner.id)
+        ).all()
+    done = 0
+    for runner_id in ids:
+        try:
+            with SessionLocal() as db:
+                runner = db.get(Runner, runner_id)
+                if runner is not None:
+                    _check_and_store(db, runner)
+                    done += 1
+        except Exception:
+            log.exception("periodic check of runner %s failed", runner_id)
+    return done
 
 
 # ── scan execution ───────────────────────────────────────────────────────
@@ -69,6 +149,9 @@ class _Snapshot:
     env_error: str | None
     parent_scan_id: int | None = None
     resume_run: str | None = None
+    # Where an SSH scan runs (the key is decrypted here, in the worker process only), or why that could not be prepared.
+    ssh: SshTarget | None = None
+    ssh_error: str | None = None
     # Continuing THIS scan (not a copy of another): which time it is, counting from 1; 0 for a first run or a fork.
     resume_count: int = 0
 
@@ -87,6 +170,15 @@ def _claim(scan_id: int) -> _Snapshot | None:
         scan = db.get(Scan, scan_id)
         env: dict[str, str] = {}
         env_error = None
+        ssh_target: SshTarget | None = None
+        ssh_error = None
+        if scan.runner is not None and scan.runner.kind == RunnerKind.ssh:
+            try:
+                ssh_target = target_for(scan.runner)
+            except SshError as exc:
+                ssh_error = exc.message
+            except Exception as exc:
+                ssh_error = f"Не удалось подготовить SSH-подключение ({exc.__class__.__name__})"
         if scan.llm_profile is not None:
             try:
                 env = build_strix_env(scan.llm_profile)  # decrypts the key; only lives in this process
@@ -111,6 +203,8 @@ def _claim(scan_id: int) -> _Snapshot | None:
             parent_scan_id=scan.parent_scan_id,
             resume_run=scan.resume_run_name,
             resume_count=scan.resume_count,
+            ssh=ssh_target,
+            ssh_error=ssh_error,
         )
 
 
@@ -209,7 +303,7 @@ def scan_run(scan_id: int) -> str:
     result = RunResult()
     early_error: str | None = None
     parsed = ParsedRun()
-    run_json_before: int | None = None
+    run_json_before: str | None = None
     try:
         if snap.runner_kind is None:
             raise _Preflight("Раннер был удалён до запуска скана")
@@ -222,6 +316,11 @@ def scan_run(scan_id: int) -> str:
                 raise _Preflight(snap.env_error)
             if not snap.has_profile:
                 raise _Preflight("Для реального запуска нужен LLM-профиль (не выбран или удалён)")
+        if snap.runner_kind == RunnerKind.ssh:
+            if snap.ssh_error:
+                raise _Preflight(snap.ssh_error)
+            if snap.ssh is None or not snap.ssh.host_key:
+                raise _Preflight("Ключ хоста раннера не подтверждён — подтвердите отпечаток на странице «Раннеры»")
 
         if snap.resume_run and snap.resume_count > 0:
             # Continuing THIS scan: its own run directory is already here, nothing to copy. The log and the activity
@@ -233,7 +332,7 @@ def scan_run(scan_id: int) -> str:
             run_dir = work_dir / "strix_runs" / snap.resume_run
             writer.write(f"[oreshnik] ── Продолжение скана (раз: {snap.resume_count}): прогон {snap.resume_run} ──")
             tailer.continue_in_place(run_dir)
-            run_json_before = (run_dir / "run.json").stat().st_mtime_ns
+            run_json_before = _run_json_token(run_dir / "run.json")
         elif snap.resume_run:
             # A continuation as a NEW scan: give Strix the parent's run directory (a copy) and start the activity feed
             # after the history that is already in it.
@@ -245,7 +344,7 @@ def scan_run(scan_id: int) -> str:
                 raise _Preflight(str(exc))
             writer.write(f"[oreshnik] Продолжение скана #{snap.parent_scan_id}: прогон {snap.resume_run} скопирован в рабочую папку")
             tailer.skip_existing(staged)
-            run_json_before = (staged / "run.json").stat().st_mtime_ns
+            run_json_before = _run_json_token(staged / "run.json")
 
         timeout = settings.scan_timeout_minutes * 60 if settings.scan_timeout_minutes > 0 else None
         spec = ScanSpec(
@@ -259,6 +358,7 @@ def scan_run(scan_id: int) -> str:
             timeout_seconds=timeout,
             resume_run=snap.resume_run,
             env=snap.env,
+            ssh=snap.ssh,
         )
         tailer.start()
         result = engine.run(spec, writer.write, _CancelProbe(scan_id))
@@ -286,7 +386,7 @@ def scan_run(scan_id: int) -> str:
     if run_json_before is not None:
         current = find_run_dir(work_dir)
         try:
-            results_are_fresh = current is not None and (current / "run.json").stat().st_mtime_ns != run_json_before
+            results_are_fresh = current is not None and _run_json_token(current / "run.json") != run_json_before
         except OSError:
             results_are_fresh = False
 
@@ -300,6 +400,7 @@ def reap_stale_scans() -> int:
     """Fail scans whose worker vanished (no heartbeat), and remove their leftover sandboxes."""
     cutoff = _utcnow() - timedelta(seconds=settings.scan_stale_seconds)
     reaped: list[int] = []
+    remote_cleanups: list[tuple[int, SshTarget]] = []
     with SessionLocal() as db:
         stale = db.scalars(
             select(Scan).where(
@@ -308,6 +409,11 @@ def reap_stale_scans() -> int:
             )
         ).all()
         for scan in stale:
+            if scan.runner is not None and scan.runner.kind == RunnerKind.ssh:
+                try:
+                    remote_cleanups.append((scan.id, target_for(scan.runner)))
+                except Exception:
+                    log.warning("scan %s: cannot prepare remote cleanup", scan.id)
             was_cancelling = scan.status == ScanStatus.cancelling
             scan.status = ScanStatus.cancelled if was_cancelling else ScanStatus.failed
             scan.status_detail = (
@@ -319,6 +425,8 @@ def reap_stale_scans() -> int:
     for scan_id in reaped:
         log.warning("reaped stale scan %s", scan_id)
         cleanup_containers(run_label(scan_id))
+    for scan_id, target in remote_cleanups:  # the worker that ran these is gone: Strix may still be running on the host
+        cleanup_remote(target, scan_id, run_label(scan_id))
     return len(reaped)
 
 

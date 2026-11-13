@@ -181,3 +181,38 @@ def make_schedule(user_id: int, runner_id: int | None, *, name: str = "nightly",
 def load_schedule(schedule_id: int) -> Schedule:
     with SessionLocal() as db:
         return db.get(Schedule, schedule_id)
+
+
+@pytest.fixture
+def fake_host(tmp_path):
+    """A real SSH server (asyncssh) that plays a remote machine with Docker and Strix installed."""
+    from tests.ssh_server import FakeHost
+
+    host = FakeHost(tmp_path / "remote-home").start()
+    host.install_tools()
+    yield host
+    host.stop()
+
+
+def make_ssh_runner(host, name: str = "remote", *, trusted: bool = False, status=None):
+    """An SSH runner row pointing at a FakeHost (the private key is stored encrypted, like the API does)."""
+    from app.core.crypto import encrypt
+    from app.models.runner import Runner, RunnerKind, RunnerStatus
+
+    with SessionLocal() as db:
+        runner = Runner(
+            name=name, kind=RunnerKind.ssh, status=status or RunnerStatus.offline, status_detail="Ещё не проверялся",
+            ssh_host="127.0.0.1", ssh_port=host.port, ssh_user=host.user, ssh_key_enc=encrypt(host.client_key_pem),
+            ssh_host_key=host.host_key_line if trusted else None,
+        )
+        db.add(runner)
+        db.commit()
+        db.refresh(runner)
+        return runner
+
+
+def load_runner(runner_id: int):
+    from app.models.runner import Runner
+
+    with SessionLocal() as db:
+        return db.get(Runner, runner_id)

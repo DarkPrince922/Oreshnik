@@ -113,6 +113,11 @@ export interface Runner {
   ssh_port: number | null;
   ssh_user: string | null;
   has_ssh_key: boolean;
+  /** The pinned host key (every connection is checked against it) and a key still waiting for confirmation. */
+  ssh_host_key_fingerprint: string | null;
+  ssh_host_key_pending_fingerprint: string | null;
+  ssh_host_key_algorithm: string | null;
+  has_provision_log: boolean;
 }
 
 export interface Health {
@@ -242,7 +247,17 @@ export const updateRunner = async (id: number, body: RunnerInput) =>
   (await api.patch<Runner>(`/api/runners/${id}`, body)).data;
 export const deleteRunner = (id: number) => api.delete(`/api/runners/${id}`);
 export const checkRunner = async (id: number) =>
-  (await api.post<Runner>(`/api/runners/${id}/check`, null, { timeout: 30000 })).data;
+  (await api.post<Runner>(`/api/runners/${id}/check`, null, { timeout: 70000 })).data;
+/** The fingerprint is sent back so a key that changed meanwhile is never pinned by a stale click. */
+export const trustHostKey = async (id: number, fingerprint: string) =>
+  (await api.post<Runner>(`/api/runners/${id}/trust-host-key`, { fingerprint }, { timeout: 70000 })).data;
+export const forgetHostKey = async (id: number) => (await api.post<Runner>(`/api/runners/${id}/forget-host-key`)).data;
+export const provisionRunner = async (id: number) => (await api.post<Runner>(`/api/runners/${id}/provision`, null, { timeout: 30000 })).data;
+export interface ProvisionLog {
+  running: boolean;
+  log: string;
+}
+export const getProvisionLog = async (id: number) => (await api.get<ProvisionLog>(`/api/runners/${id}/provision-log`)).data;
 
 // ── Scans ────────────────────────────────────────────────────────────────
 

@@ -136,11 +136,11 @@ export default function NewScan() {
 
         <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
           <Card className="space-y-5 p-6">
-            <Field label="Раннер" hint={runner ? { mock: "Симуляция: токены не тратятся.", local: "Настоящий Strix с Docker на сервере панели.", ssh: "" }[runner.kind] : undefined}>
+            <Field label="Раннер" hint={runner ? { mock: "Симуляция: токены не тратятся.", local: "Настоящий Strix с Docker на сервере панели.", ssh: "Strix запустится на удалённом хосте. Ключ LLM передаётся туда в окружение процесса Strix; результаты возвращаются в панель." }[runner.kind] : undefined}>
               <select className="field" value={runnerId ?? ""} onChange={(e) => setRunnerId(Number(e.target.value))} required>
                 {runners.map((r) => (
-                  <option key={r.id} value={r.id} disabled={r.kind === "ssh"}>
-                    {r.name} · {KIND_LABEL[r.kind]}{r.kind === "ssh" ? " (скоро)" : r.status !== "online" ? ` · ${r.status}` : ""}
+                  <option key={r.id} value={r.id}>
+                    {r.name} · {KIND_LABEL[r.kind]}{r.status !== "online" ? ` · ${r.status}` : ""}
                   </option>
                 ))}
               </select>

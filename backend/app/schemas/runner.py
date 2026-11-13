@@ -73,3 +73,18 @@ class RunnerOut(BaseModel):
     ssh_port: int | None = None
     ssh_user: str | None = None
     has_ssh_key: bool = False
+    ssh_host_key_fingerprint: str | None = None          # the pinned host key
+    ssh_host_key_pending_fingerprint: str | None = None  # a key waiting for confirmation
+    ssh_host_key_algorithm: str | None = None
+    has_provision_log: bool = False
+
+
+class TrustHostKey(BaseModel):
+    """The fingerprint the administrator compared — it must be the one the panel is currently holding as pending."""
+
+    fingerprint: str = Field(min_length=10, max_length=120)
+
+
+class ProvisionLog(BaseModel):
+    running: bool
+    log: str

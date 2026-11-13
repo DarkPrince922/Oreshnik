@@ -5,7 +5,7 @@ The behaviour is chosen by the content of the file passed via --instruction-file
 (exactly the way a user's instruction reaches the real CLI):
 
     ok_clean | ok_findings | fail | argerror | no_artifacts | slow | ignore_sigint | spawn_child
-    | secret_echo | ansi
+    | secret_echo | ansi | live_agents | live_agents_slow
 """
 import json
 import os
@@ -134,6 +134,32 @@ if mode == "ansi":
     print("\x1b[31mred\x1b[0m text", flush=True)
     print("progress 10%\rprogress 50%\rprogress 100%", flush=True)
     write_run("completed")
+    sys.exit(0)
+
+if mode in ("live_agents", "live_agents_slow"):
+    # Like the real thing: the agents' database is in WAL mode and stays OPEN while the scan runs, so the newest rows live
+    # only in the -wal file. Copying agents.db alone would show an old (or torn) picture.
+    import sqlite3
+    state = run_dir / ".state"
+    state.mkdir(parents=True, exist_ok=True)
+    write_run("running", cost=0.0)
+    (state / "agents.json").write_text(json.dumps({
+        "statuses": {"root": "running"}, "names": {"root": "Root"}, "parent_of": {"root": None}, "errors": {}}))
+    conn = sqlite3.connect(state / "agents.db", isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""CREATE TABLE IF NOT EXISTS agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+        message_data TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);""")
+    conn.execute("INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)", ("root", json.dumps({"role": "user", "content": "scan the target"})))
+    for i in range(1, 7):
+        conn.execute("INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)",
+                     ("root", json.dumps({"role": "assistant", "content": [{"type": "output_text", "text": f"live step {i}"}]})))
+        write_run("running", cost=round(0.05 * i, 2))
+        print(f"live step {i}", flush=True)
+        time.sleep(1.5 if mode.endswith("_slow") else 0.5)
+    (state / "agents.json").write_text(json.dumps({
+        "statuses": {"root": "completed"}, "names": {"root": "Root"}, "parent_of": {"root": None}, "errors": {}}))
+    write_run("completed", cost=0.3)
+    conn.close()
     sys.exit(0)
 
 # long-running modes -------------------------------------------------------

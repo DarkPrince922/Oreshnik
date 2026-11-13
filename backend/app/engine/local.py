@@ -46,6 +46,22 @@ _PASSTHROUGH = (
 )
 
 
+def strix_argv(spec: ScanSpec, strix_bin: str) -> list[str]:
+    """The Strix command line for a scan (shared by the local and the SSH runner, so both always agree)."""
+    # `--opt=value` form: a value starting with "-" can never be parsed as an option.
+    argv = [strix_bin, "-n", "-m", spec.scan_mode]
+    if spec.resume_run:
+        # Strix refuses --resume together with --target: the targets come from the run being continued.
+        argv.append(f"--resume={spec.resume_run}")
+    else:
+        argv += [f"--target={t}" for t in spec.targets]
+    if spec.instruction:
+        argv.append(f"--instruction-file={INSTRUCTION_NAME}")
+    if spec.max_budget:
+        argv.append(f"--max-budget={spec.max_budget:g}")
+    return argv
+
+
 class LocalRunner:
     def __init__(self, strix_bin: str | None = None):
         self.strix_bin = strix_bin or settings.strix_bin
@@ -53,18 +69,7 @@ class LocalRunner:
     # ── command construction (pure; unit-tested) ─────────────────────────
 
     def build_argv(self, spec: ScanSpec) -> list[str]:
-        # `--opt=value` form: a value starting with "-" can never be parsed as an option.
-        argv = [self.strix_bin, "-n", "-m", spec.scan_mode]
-        if spec.resume_run:
-            # Strix refuses --resume together with --target: the targets come from the run being continued.
-            argv.append(f"--resume={spec.resume_run}")
-        else:
-            argv += [f"--target={t}" for t in spec.targets]
-        if spec.instruction:
-            argv.append(f"--instruction-file={INSTRUCTION_NAME}")
-        if spec.max_budget:
-            argv.append(f"--max-budget={spec.max_budget:g}")
-        return argv
+        return strix_argv(spec, self.strix_bin)
 
     def build_env(self, spec: ScanSpec) -> dict[str, str]:
         env = {k: os.environ[k] for k in _PASSTHROUGH if k in os.environ}

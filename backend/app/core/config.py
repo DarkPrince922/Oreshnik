@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     schedule_min_interval_minutes: int = 15
     max_schedules_per_user: int = 20
 
+    # SSH runners
+    ssh_connect_timeout_seconds: int = 15
+    # How often the worker re-checks that SSH runners are reachable (0 disables the periodic check).
+    ssh_check_interval_seconds: int = 120
+    # While a remote scan runs, its run files are mirrored to the panel this often (live cost, agent feed).
+    ssh_sync_interval_seconds: float = 2.0
+    # Upper bounds for what is fetched from a remote run directory (a hostile or broken host must not fill the disk).
+    ssh_fetch_max_mb: int = 500
+    ssh_fetch_max_files: int = 20000
+    # What the panel installs on a remote host. The panel was verified against this Strix version.
+    strix_version: str = "1.7.0"
+    strix_sandbox_image: str = "ghcr.io/usestrix/strix-sandbox:1.3.0"
+
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 

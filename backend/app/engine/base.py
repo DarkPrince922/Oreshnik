@@ -1,7 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from app.services.ssh import SshTarget
 
 
 @dataclass
@@ -18,6 +21,8 @@ class ScanSpec:
     resume_run: str | None = None
     # Secret environment for the run (STRIX_LLM / LLM_API_KEY / LLM_API_BASE). Never logged.
     env: dict[str, str] = field(default_factory=dict, repr=False)
+    # Where to run, for the SSH runner (decrypted key inside: never log or serialise it).
+    ssh: "SshTarget | None" = field(default=None, repr=False)
 
 
 @dataclass

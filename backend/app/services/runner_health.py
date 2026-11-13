@@ -29,5 +29,8 @@ def check_runner(runner: Runner) -> tuple[RunnerStatus, str]:
             return RunnerStatus.offline, "Не найдено: " + ", ".join(missing)
         return RunnerStatus.online, "strix и docker доступны"
 
-    # RunnerKind.ssh — provisioning and connectivity land in Phase 5.
-    return RunnerStatus.offline, "SSH-раннеры появятся в фазе 5"
+    # RunnerKind.ssh — a real connection: host key, login, Docker, Strix.
+    from app.services.ssh_runner import check_ssh_runner
+
+    result = check_ssh_runner(runner)
+    return result.status, result.detail

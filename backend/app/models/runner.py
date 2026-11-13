@@ -38,6 +38,12 @@ class Runner(Base):
     ssh_port: Mapped[int] = mapped_column(Integer, default=22)
     ssh_user: Mapped[str | None] = mapped_column(String(100), nullable=True)
     ssh_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # OpenSSH public key lines. `ssh_host_key` is pinned: every connection is checked against it. `ssh_host_key_pending` is
+    # what the host presented and still has to be confirmed by an administrator (fingerprint comparison).
+    ssh_host_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ssh_host_key_pending: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provision_log: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provision_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

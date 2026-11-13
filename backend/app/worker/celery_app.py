@@ -23,6 +23,11 @@ celery.conf.update(
     beat_schedule={
         "reap-stale-scans": {"task": "oreshnik.reap_stale_scans", "schedule": 60.0},
         "run-due-schedules": {"task": "oreshnik.run_due_schedules", "schedule": 30.0},
+        **(
+            {"check-ssh-runners": {"task": "oreshnik.check_ssh_runners", "schedule": float(settings.ssh_check_interval_seconds)}}
+            if settings.ssh_check_interval_seconds > 0
+            else {}
+        ),
     },
 )
 
