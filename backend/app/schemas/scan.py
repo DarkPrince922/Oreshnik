@@ -14,6 +14,8 @@ class ScanCreate(BaseModel):
     max_budget: float | None = Field(default=None, gt=0, le=10000, description="USD, passed as --max-budget")
     runner_id: int | None = None
     llm_profile_id: int | None = None
+    # One of the chosen profile's models; empty = the profile's own default model.
+    llm_model: str | None = Field(default=None, max_length=200)
 
     @field_validator("instruction")
     @classmethod
@@ -28,6 +30,7 @@ class ScanContinue(BaseModel):
     # Strix's budget limit is cumulative for the whole run, not per continuation.
     max_budget: float | None = Field(default=None, gt=0, le=10000, description="USD, total for the whole run")
     llm_profile_id: int | None = None
+    llm_model: str | None = Field(default=None, max_length=200)
     # By default the scan continues IN PLACE (same scan, same id). With true a new scan is created on a copy of the run
     # and this one stays exactly as it is.
     as_new_scan: bool = False
@@ -72,6 +75,7 @@ class ScanOut(BaseModel):
     runner_kind: str | None = None
     llm_profile_id: int | None
     llm_profile_name: str | None
+    llm_model: str | None  # the model the scan runs with: the one chosen, else the profile's default
     targets: list[str]
     scan_mode: ScanMode
     instruction: str | None  # hidden from viewers: it may contain test credentials

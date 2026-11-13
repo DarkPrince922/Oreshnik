@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import ModelSelect from "../components/ModelSelect";
 import { MODE_META } from "../components/scan";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, PageHeader, Spinner, Switch, rise, stagger } from "../components/ui";
 import {
@@ -21,6 +22,7 @@ import {
   type Schedule,
   type SchedulePreview,
 } from "../lib/api";
+import { defaultChoice, modelToSend, resolveChoice, type Choice } from "../lib/modelChoice";
 import { useAuth } from "../lib/auth";
 import { CRON_PRESETS, browserZone, budgetRequired, describeCron, formatWhen, normalizeCronInput, relativeIn, zoneOptions } from "../lib/schedule";
 import { parseTargets } from "../lib/targets";
@@ -61,7 +63,10 @@ function ScheduleForm({
   const [runnerId, setRunnerId] = useState<number | null>(
     schedule ? schedule.runner_id : (runners.find((r) => r.status === "online" && r.kind !== "ssh") ?? runners.find((r) => r.kind !== "ssh"))?.id ?? null
   );
-  const [profileId, setProfileId] = useState<number | null>(schedule ? schedule.llm_profile_id : profiles[0]?.id ?? null);
+  const [choice, setChoice] = useState<Choice | null>(
+    schedule ? (schedule.llm_profile_id !== null ? resolveChoice(profiles, schedule.llm_profile_id, schedule.llm_model) : null) : defaultChoice(profiles)
+  );
+  const profileId = choice?.profileId ?? null;
   const [budget, setBudget] = useState(schedule?.max_budget ? String(schedule.max_budget) : "");
   const [instruction, setInstruction] = useState(schedule?.instruction ?? "");
   const [enabled, setEnabled] = useState(schedule?.enabled ?? true);
@@ -125,6 +130,7 @@ function ScheduleForm({
       max_budget: budgetValue,
       runner_id: runner.id,
       llm_profile_id: needsProfile || profileId !== null ? profileId : null,
+      llm_model: modelToSend(profiles, choice),
     };
     try {
       if (schedule) await updateSchedule(schedule.id, body);
@@ -213,11 +219,8 @@ function ScheduleForm({
             ))}
           </select>
         </Field>
-        <Field label={needsProfile ? "LLM-профиль" : "LLM-профиль (для mock не нужен)"}>
-          <select className="field" value={profileId ?? ""} onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : null)} required={needsProfile} aria-label="LLM-профиль">
-            {!needsProfile && <option value="">— не использовать —</option>}
-            {profiles.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.strix_model}</option>)}
-          </select>
+        <Field label={needsProfile ? "Модель" : "Модель (для mock не нужна)"}>
+          <ModelSelect profiles={profiles} value={choice} onChange={setChoice} required={needsProfile} noneLabel={needsProfile ? undefined : "— не использовать —"} label="Модель" />
         </Field>
       </div>
 
@@ -354,7 +357,7 @@ function ScheduleCard({
           <div>
             <dt className="text-[11px] uppercase tracking-wider text-slate-600">Раннер</dt>
             <dd className="mt-1 text-slate-200">{schedule.runner_name ?? <span className="text-signal-warn">удалён</span>}</dd>
-            <dd className="mt-0.5 text-slate-500">{schedule.llm_profile_name ?? "без LLM-профиля"}</dd>
+            <dd className="mt-0.5 text-slate-500">{schedule.llm_profile_name ? `${schedule.llm_profile_name} · ${schedule.llm_model ?? "—"}` : "без LLM-профиля"}</dd>
           </div>
           <div>
             <dt className="text-[11px] uppercase tracking-wider text-slate-600">Бюджет запуска</dt>

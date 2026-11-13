@@ -149,6 +149,7 @@ def start(db: Session, schedule: Schedule, enqueue: Callable[[int], None], now: 
         max_budget=schedule.max_budget,
         runner_id=schedule.runner_id,
         llm_profile_id=schedule.llm_profile_id,
+        llm_model=schedule.llm_model,
         schedule_id=schedule.id,
     )
     try:

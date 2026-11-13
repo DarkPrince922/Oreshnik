@@ -86,6 +86,8 @@ export interface LLMProfile {
   provider: Provider;
   model: string;
   base_url: string | null;
+  /** Every model the provider served when «Загрузить модели» last ran: what a scan can pick from (plus `model`, the default). */
+  models: string[];
   api_key_hint: string;
   strix_model: string;
   created_at: string;
@@ -151,6 +153,8 @@ export interface Scan {
   runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  /** The model the scan runs with: the one chosen, else the profile's default. */
+  llm_model: string | null;
   targets: string[];
   scan_mode: ScanMode;
   instruction: string | null;
@@ -232,17 +236,20 @@ export const fetchModels = async (body: {
   base_url: string | null;
   api_key?: string;
   profile_id?: number;
-}) => (await api.post<{ models: string[] }>("/api/llm-profiles/models", body)).data.models;
+}) => (await api.post<{ models: string[]; saved: boolean }>("/api/llm-profiles/models", body)).data;
+/** Ask the provider again, with the profile's stored key, and keep the whole list. */
+export const refreshProfileModels = async (id: number) => (await api.post<LLMProfile>(`/api/llm-profiles/${id}/refresh-models`)).data;
 export const createProfile = async (body: {
   name: string;
   provider: Provider;
   model: string;
   base_url: string | null;
   api_key: string;
+  models?: string[];
 }) => (await api.post<LLMProfile>("/api/llm-profiles", body)).data;
 export const updateProfile = async (
   id: number,
-  body: { name: string; provider: Provider; model: string; base_url: string | null; api_key?: string }
+  body: { name: string; provider: Provider; model: string; base_url: string | null; api_key?: string; models?: string[] }
 ) => (await api.patch<LLMProfile>(`/api/llm-profiles/${id}`, body)).data;
 export const deleteProfile = (id: number) => api.delete(`/api/llm-profiles/${id}`);
 
@@ -289,6 +296,8 @@ export interface ScanCreateInput {
   max_budget: number | null;
   runner_id: number | null;
   llm_profile_id: number | null;
+  /** One of the profile's models; null = the profile's own default. */
+  llm_model?: string | null;
 }
 export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
 export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; limit?: number; offset?: number } = {}) =>
@@ -360,6 +369,7 @@ export interface ContinueInput {
   instruction: string | null;
   max_budget: number | null;
   llm_profile_id: number | null;
+  llm_model?: string | null;
   /** false (default): continue this very scan. true: create a new scan on a copy of the run. */
   as_new_scan?: boolean;
 }
@@ -386,6 +396,7 @@ export interface Schedule {
   runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  llm_model: string | null;
   next_run_at: string | null;
   next_runs: string[];
   last_run_at: string | null;
@@ -407,6 +418,7 @@ export interface ScheduleInput {
   max_budget: number | null;
   runner_id: number | null;
   llm_profile_id: number | null;
+  llm_model?: string | null;
 }
 
 export interface SchedulePreview {

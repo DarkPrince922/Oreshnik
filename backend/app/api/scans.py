@@ -16,6 +16,7 @@ from app.api.deps import get_current_user, require_operator
 from app.core.db import SessionLocal, get_db
 from app.core.security import decode_access_token
 from app.models.llm_profile import LLMProfile
+from app.services.llm import profile_models
 from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, FINAL_STATUSES, Finding, Scan, ScanStatus
 from app.models.schedule import Schedule
@@ -116,6 +117,7 @@ def _out(
         runner_kind=scan.runner.kind.value if scan.runner else None,
         llm_profile_id=scan.llm_profile_id,
         llm_profile_name=scan.llm_profile.name if scan.llm_profile else None,
+        llm_model=scan.llm_model or (scan.llm_profile.model if scan.llm_profile else None),
         targets=scan.targets,
         scan_mode=scan.scan_mode,
         instruction=None if viewer.role == Role.viewer else scan.instruction,
@@ -174,6 +176,7 @@ def create_scan(
             max_budget=body.max_budget,
             runner_id=body.runner_id,
             llm_profile_id=body.llm_profile_id,
+            llm_model=body.llm_model or None,
         )
     except ScanRequestError as exc:
         raise HTTPException(exc.status_code, exc.detail)
@@ -249,6 +252,20 @@ def continue_scan(
         else:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Выберите свой LLM-профиль")
 
+    # The model: what the scan had, unless it moves to another profile or the user picks one. Always one of the profile's own.
+    model = scan.llm_model if profile is None or profile.id == scan.llm_profile_id else None
+    if body.llm_model:
+        if profile is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Модель выбирается вместе с LLM-профилем")
+        if body.llm_model not in profile_models(profile):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Модели «{body.llm_model}» нет в профиле «{profile.name}»: загрузите список моделей в разделе «LLM-профили»",
+            )
+        model = body.llm_model
+    elif profile is None or (model is not None and model not in profile_models(profile)):
+        model = None
+
     # Strix compares the budget with the cost of the WHOLE run, so a limit at or below what was already
     # spent would stop the continuation immediately.
     if body.max_budget is not None and scan.cost is not None and body.max_budget <= scan.cost:
@@ -278,6 +295,7 @@ def continue_scan(
             user_id=user.id,
             runner_id=runner.id,
             llm_profile_id=profile.id if profile else None,
+            llm_model=model,
             targets=list(scan.targets),
             scan_mode=scan.scan_mode,
             instruction=body.instruction,
@@ -314,6 +332,7 @@ def continue_scan(
             resume_history=history,
             max_budget=body.max_budget,
             llm_profile_id=profile.id if profile else scan.llm_profile_id,
+            llm_model=model,
         )
     ).rowcount
     db.commit()

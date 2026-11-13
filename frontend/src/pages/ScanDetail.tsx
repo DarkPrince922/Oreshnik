@@ -362,6 +362,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
         <Card className="space-y-5 p-6">
           <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
             <Stat label="LLM-профиль" value={scan.llm_profile_name ?? "—"} />
+            {scan.llm_model && <Stat label="Модель" value={scan.llm_model} />}
             <Stat label="Лимит бюджета" value={scan.max_budget ? `$${scan.max_budget}` : "не задан"} />
             <Stat label="Создан" value={formatDateTime(scan.created_at)} />
           </dl>

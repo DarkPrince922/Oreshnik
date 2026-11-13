@@ -979,3 +979,25 @@ change up by refreshing, invalid and unknown rows ignored, a broken database; th
 the limit without restart, lowering does not kill, cancelling still holds its place, finished ones do not, cancelled is skipped, re-scheduled in a real
 worker). Frontend: `src/lib/settingsForm.test.ts` (11). **Not run:** the Celery signal hooks and the autoscaling worker themselves (no broker or Docker
 in the environment where this was written) — after updating, change «Сканов одновременно» with scans queued and watch them start.
+
+## 22. Saved model lists, and choosing any model of any provider for a scan
+
+A profile used to hold one model; «Загрузить модели» only suggested ids while typing it. Now the list **is kept** and a scan picks from all of it.
+
+- **Storage.** `llm_profiles.models` (JSON list, migration 0013) holds what the provider served at the last load (at most 1000 ids, trimmed, no repeats,
+  each ≤ 200 characters). `model` stays the profile's default and is always selectable, first, even if it is not in the list (`services/llm.py::profile_models`).
+- **Loading.** `POST /api/llm-profiles/models` with `profile_id` and neither a typed key nor a changed endpoint uses the stored ones **and stores the list at once**
+  (`saved: true`) — it is not lost if the form is closed without «Сохранить». A list loaded with a typed key or another endpoint is only handed back; the form sends it
+  with «Сохранить» (`models` on create/update). An untouched form sends no list, so editing a profile and retyping its key cannot wipe what it already has.
+  `POST /api/llm-profiles/{id}/refresh-models` (the card's «Обновить модели») asks again with the stored key and replaces the list.
+- **Choosing.** `ScanCreate`, `ScanContinue` and schedules take `llm_model` next to `llm_profile_id` (`scans.llm_model`, `schedules.llm_model`; null = follow the profile's default).
+  The server checks the model is one of that profile's (default included) — otherwise `422` with a hint to load the list — and that a model comes with a profile. `ScanOut.llm_model`
+  is what the scan runs with (the chosen one, else the profile's default). The worker passes it to `build_strix_env(profile, model)` → `STRIX_LLM`, with the provider's usual prefix.
+- **The page.** One select, «Модель», lists every model of every profile the user has, grouped by profile («DeepSeek Flash · свой endpoint»), the profile's default marked; a search box
+  appears once there are more than 12. The same control is in «Новый скан», the schedule form and «Продолжить». It sends no `llm_model` for a profile's own default, so such a scan keeps following the profile.
+- **Continuing / schedules.** A continuation keeps the scan's model unless a model or another profile is chosen; a model that has left the profile's list (the provider stopped serving it and the list was refreshed)
+  falls back to the profile's default. Changing a schedule's profile without choosing a model means that profile's default. A schedule whose pinned model is later removed from the list is refused when it fires, with the reason
+  (the usual skipped-with-reason), rather than silently running something else.
+- **Not covered:** the «Агент» (Codex) and «Операции» still use the profile's default model.
+
+Tests: `tests/test_llm_models.py` (24: list cleaning and storage, load/refresh, choosing for scans of different providers, refusals, what Strix is given, continuing, schedules), `src/lib/modelChoice.test.ts` (14).

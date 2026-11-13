@@ -205,7 +205,7 @@ def _claim(scan_id: int) -> "_Snapshot | str | None":
                 ssh_error = f"Не удалось подготовить SSH-подключение ({exc.__class__.__name__})"
         if scan.llm_profile is not None:
             try:
-                env = build_strix_env(scan.llm_profile)  # decrypts the key; only lives in this process
+                env = build_strix_env(scan.llm_profile, scan.llm_model)  # decrypts the key; only lives in this process
             except Exception as exc:
                 env_error = f"Не удалось подготовить LLM-профиль ({exc.__class__.__name__})"
         # The original instruction was handed to the agents when the scan first started; a resume carries only what

@@ -65,9 +65,38 @@ def strix_api_type(profile: LLMProfile) -> str | None:
     return "chat_completions" if profile.provider == Provider.custom else None
 
 
-def build_strix_env(profile: LLMProfile) -> dict[str, str]:
+MAX_SAVED_MODELS = 1000
+
+
+def profile_models(profile: LLMProfile) -> list[str]:
+    """Every model a scan may pick on this profile: its own default first, then the saved list; no repeats."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in [profile.model, *(profile.models or [])]:
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def clean_model_list(names: list[str] | None) -> list[str]:
+    """A model list as it is stored: trimmed, without blanks or repeats, each id and the whole list bounded."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in names or []:
+        name = name.strip() if isinstance(name, str) else ""
+        if name and len(name) <= 200 and name not in seen:
+            seen.add(name)
+            out.append(name)
+        if len(out) >= MAX_SAVED_MODELS:
+            break
+    return out
+
+
+def build_strix_env(profile: LLMProfile, model: str | None = None) -> dict[str, str]:
+    """The environment Strix needs for `profile`; `model` (one of the profile's models) replaces the profile's default."""
     env = {
-        "STRIX_LLM": strix_model_id(profile.provider, profile.model),
+        "STRIX_LLM": strix_model_id(profile.provider, model or profile.model),
         "LLM_API_KEY": decrypt(profile.api_key_enc),
     }
     if profile.base_url:

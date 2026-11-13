@@ -4,7 +4,9 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { MODE_META } from "../components/scan";
 import { Button, Card, ErrorNote, Field, PageHeader, Spinner } from "../components/ui";
+import ModelSelect from "../components/ModelSelect";
 import { createScan, errorMessage, listProfiles, listRunners, type LLMProfile, type Runner, type ScanMode } from "../lib/api";
+import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAuth } from "../lib/auth";
 import { parseTargets } from "../lib/targets";
 
@@ -28,7 +30,8 @@ export default function NewScan() {
   const [targetsText, setTargetsText] = useState("");
   const [mode, setMode] = useState<ScanMode>("quick");
   const [runnerId, setRunnerId] = useState<number | null>(null);
-  const [profileId, setProfileId] = useState<number | null>(null);
+  const [choice, setChoice] = useState<Choice | null>(null);
+  const profileId = choice?.profileId ?? null;
   const [budget, setBudget] = useState("");
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +46,7 @@ export default function NewScan() {
         setProfiles(p);
         const preferred = r.find((x) => x.status === "online" && x.kind !== "ssh") ?? r.find((x) => x.kind !== "ssh");
         setRunnerId(preferred?.id ?? null);
-        setProfileId(p[0]?.id ?? null);
+        setChoice(defaultChoice(p));
       })
       .catch((e) => alive && setLoadError(errorMessage(e)));
     return () => {
@@ -71,6 +74,7 @@ export default function NewScan() {
         max_budget: budgetValue,
         runner_id: runner.id,
         llm_profile_id: needsProfile || profileId !== null ? profileId : null,
+        llm_model: modelToSend(profiles ?? [], choice),
       });
       navigate(`/scans/${scan.id}`);
     } catch (err) {
@@ -151,11 +155,11 @@ export default function NewScan() {
               </p>
             )}
 
-            <Field label={needsProfile ? "LLM-профиль" : "LLM-профиль (для mock не нужен)"}>
-              <select className="field" value={profileId ?? ""} onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : null)} required={needsProfile}>
-                {!needsProfile && <option value="">— не использовать —</option>}
-                {profiles.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.strix_model}</option>)}
-              </select>
+            <Field
+              label={needsProfile ? "Модель" : "Модель (для mock не нужна)"}
+              hint="Любая модель любого вашего профиля. Список пополняется кнопкой «Загрузить модели» в разделе «LLM-профили»."
+            >
+              <ModelSelect profiles={profiles} value={choice} onChange={setChoice} required={needsProfile} noneLabel={needsProfile ? undefined : "— не использовать —"} label="Модель" />
             </Field>
             {needsProfile && profiles.length === 0 && (
               <p className="text-xs text-signal-warn">Нет ни одного профиля. <Link to="/llm" className="underline">Добавьте ключ</Link>.</p>
