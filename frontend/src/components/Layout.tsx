@@ -147,13 +147,13 @@ export default function Layout() {
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1 px-5 py-8 md:px-10 md:py-10">
+      <main className="min-w-0 flex-1 px-5 py-8 md:px-8 md:py-10 xl:px-10 2xl:px-12">
         <motion.div
           key={location.pathname}
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-          className="mx-auto max-w-5xl"
+          className="w-full"
         >
           <Outlet />
         </motion.div>

@@ -127,7 +127,7 @@ export default function LLMProfiles() {
       )}
 
       {profiles && profiles.length > 0 && (
-        <motion.div variants={stagger} initial="hidden" animate="show" className="grid gap-4 md:grid-cols-2">
+        <motion.div variants={stagger} initial="hidden" animate="show" className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(22rem,1fr))] [&>*]:max-w-[44rem]">
           {profiles.map((p) => (
             <motion.div key={p.id} variants={rise}>
               <Card className="flex h-full flex-col p-5 transition-colors hover:border-accent/30">

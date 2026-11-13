@@ -83,7 +83,7 @@ export default function NewScan() {
   if (!runners || !profiles) return <div className="flex justify-center py-20"><Spinner className="h-6 w-6" /></div>;
 
   return (
-    <>
+    <div className="w-full">
       <PageHeader title="Новый скан" subtitle="Тестируйте только системы, которыми владеете или на которые есть письменное разрешение." />
       <form onSubmit={submit} className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="space-y-6">
@@ -176,6 +176,6 @@ export default function NewScan() {
           </Card>
         </aside>
       </form>
-    </>
+    </div>
   );
 }

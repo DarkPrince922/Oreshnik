@@ -53,7 +53,7 @@ function Detail({ finding }: { finding: FindingDetail }) {
   const locations = codeLocations(d.code_locations);
 
   return (
-    <div className="space-y-5 border-t border-white/5 px-5 pb-5 pt-4">
+    <div className="max-w-5xl space-y-5 border-t border-white/5 px-5 pb-5 pt-4">
       <div className="flex flex-wrap gap-1.5">
         <Meta label="CWE" value={finding.cwe} />
         <Meta label="CVE" value={finding.cve} />

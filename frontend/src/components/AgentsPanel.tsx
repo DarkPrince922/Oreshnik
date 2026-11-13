@@ -228,14 +228,14 @@ export default function AgentsPanel({ events, agents, loaded, error, active }: P
   ];
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[17rem_minmax(0,1fr)]">
+    <div className="grid gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
       <aside className="lg:sticky lg:top-4 lg:self-start">
         <div className="glass rounded-2xl p-3">
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Агенты · {agents.length}</h3>
             {selected && <button onClick={() => setSelected(null)} className="text-[11px] text-accent-soft hover:underline">Все</button>}
           </div>
-          <ul className="max-h-[26rem] space-y-0.5 overflow-y-auto">
+          <ul className="max-h-[calc(100vh-26rem)] min-h-[10rem] space-y-0.5 overflow-y-auto">
             {tree.map((n) => <TreeRow key={n.agent.id} node={n} agents={agents} counts={counts} selected={selected} onSelect={setSelected} />)}
           </ul>
         </div>
@@ -252,7 +252,7 @@ export default function AgentsPanel({ events, agents, loaded, error, active }: P
         </div>
         <ErrorNote message={error} />
         <div className="relative">
-          <div ref={boxRef} onScroll={onScroll} className="h-[34rem] max-h-[70vh] space-y-2.5 overflow-y-auto rounded-2xl border border-white/10 bg-ink-950/60 p-3">
+          <div ref={boxRef} onScroll={onScroll} className="h-[calc(100vh-29rem)] min-h-[32rem] max-h-[64rem] space-y-2.5 overflow-y-auto rounded-2xl border border-white/10 bg-ink-950/60 p-3">
             {hidden > 0 && (
               <button onClick={() => setExtra((n) => n + WINDOW)} className="mx-auto block rounded-full border border-white/10 px-4 py-1.5 text-xs text-accent-soft hover:bg-white/5">
                 Показать более ранние ({hidden})

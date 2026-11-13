@@ -281,7 +281,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
             <p className="text-sm text-slate-500">Отчёта нет — Strix не успел его записать.</p>
           ) : (
             <Suspense fallback={<div className="flex justify-center py-10"><Spinner /></div>}>
-              <SafeMarkdown>{report}</SafeMarkdown>
+              <div className="mx-auto max-w-4xl"><SafeMarkdown>{report}</SafeMarkdown></div>
             </Suspense>
           )}
         </Card>

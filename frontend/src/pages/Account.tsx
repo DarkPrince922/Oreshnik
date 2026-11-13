@@ -36,7 +36,7 @@ export default function Account() {
   };
 
   return (
-    <>
+    <div className="w-full">
       <PageHeader title="Аккаунт" subtitle="Ваши данные и безопасность" />
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -67,6 +67,6 @@ export default function Account() {
           </form>
         </Card>
       </div>
-    </>
+    </div>
   );
 }

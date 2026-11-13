@@ -92,7 +92,7 @@ export default function LogViewer({ buffer, state, active }: { buffer: LogBuffer
       </div>
 
       <div className="relative">
-        <div ref={boxRef} onScroll={onScroll} className="h-[28rem] max-h-[65vh] overflow-auto px-2 py-3 font-mono text-xs leading-5">
+        <div ref={boxRef} onScroll={onScroll} className="h-[calc(100vh-29rem)] min-h-[28rem] max-h-[64rem] overflow-auto px-2 py-3 font-mono text-xs leading-5">
           {shown.length === 0 ? (
             <div className="px-3 py-2 text-slate-600">
               {state === "ended" ? "Лог пуст" : active ? "Ожидание вывода" : "Вывода нет"}

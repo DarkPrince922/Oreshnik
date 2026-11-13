@@ -299,3 +299,10 @@ recon phase 60 commands long, `MOCK:fail`/cancel leave agents `failed`/`stopped`
 
 **Not verified:** a real multi-agent scan. Real Strix uses more tools than the mock (browser, proxy/Caido, notes, coverage, …); they are
 shown generically (tool name + the first meaningful argument) and may need nicer rendering once seen on real data.
+
+### Layout on wide screens
+The page content uses the full width next to the sidebar (no centred max-width column): measured at 1366/1920/2560 px, the gap
+between the sidebar and the content and between the content and the right edge is just the page padding (40–48 px); before, a
+1024 px column left 320 px (1920) / 640 px (2560) empty on each side. Cards (LLM profiles, runners) share the row evenly and are
+capped at 44 rem each; reading-width content keeps a sensible measure (report 56 rem, finding text 64 rem). The log and the
+agent feed are sized from the viewport height (`100vh − 29rem`, at least 28–32 rem) so a large monitor shows more of the process.
