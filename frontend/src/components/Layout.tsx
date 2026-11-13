@@ -91,6 +91,17 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    to: "/agent",
+    label: "Агент",
+    roles: ["admin", "operator"],
+    icon: icon(
+      <>
+        <rect x="4" y="5" width="16" height="12" rx="2.5" />
+        <path d="M8 21h8M12 17v4M9 11h.01M15 11h.01" />
+      </>
+    ),
+  },
+  {
     to: "/ops",
     label: "Операции",
     roles: ["admin"],

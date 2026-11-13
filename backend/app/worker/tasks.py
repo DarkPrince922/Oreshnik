@@ -570,3 +570,42 @@ def _ops_fail_all_hosts(ops_run_id: int, note: str, *, status: OpsHostStatus = O
             .values(status=status, output=note, finished_at=_utcnow())
         )
         db.commit()
+
+
+# ── Агент ────────────────────────────────────────────────────────────────
+
+
+@celery.task(name="oreshnik.agent_turn")
+def agent_turn(session_id: int, prompt: str) -> None:
+    """One message to the agent: stream the isolated container's events into the session's history."""
+    from app.services import agent as agent_service
+
+    agent_service.run_turn(SessionLocal, session_id, prompt)
+
+
+@celery.task(name="oreshnik.reap_stale_agent_turns")
+def reap_stale_agent_turns() -> int:
+    """A turn whose worker vanished (no event for `agent_stale_seconds`) is given up on, so the chat is usable again."""
+    from app.models.agent import AgentSession, AgentSessionStatus
+    from app.services import agent as agent_service
+
+    cutoff = _utcnow() - timedelta(seconds=settings.agent_stale_seconds)
+    reaped: list[str] = []
+    with SessionLocal() as db:
+        stale = db.scalars(
+            select(AgentSession).where(
+                AgentSession.status == AgentSessionStatus.running,
+                func.coalesce(AgentSession.heartbeat_at, AgentSession.updated_at) < cutoff,
+            )
+        ).all()
+        for session in stale:
+            message = "Воркер потерян: ход прерван"
+            agent_service.append_event(db, session.id, "turn.error", {"message": message})
+            session.status = AgentSessionStatus.idle
+            session.last_error = message
+            session.cancel_requested = False
+            reaped.append(session.key)
+        db.commit()
+    for key in reaped:
+        agent_service.stop_turn(key)
+    return len(reaped)

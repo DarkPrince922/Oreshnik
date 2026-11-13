@@ -840,3 +840,81 @@ the real host's own `uname -a` and `id -un` output; a second task with a stub th
 before touching the host (a sentinel `touch` in the same script never ran); the real browser UI showed both runs,
 created a third through the form, and displayed its generated script; and an `operator` account was refused by the
 live API (403), not just by a unit test.
+
+## 20. «Агент»: Codex CLI in an isolated container, driven from the panel
+
+A chat with an open-source coding agent ([Codex CLI](https://github.com/openai/codex), Apache-2.0) inside the panel: the operator
+writes a task in plain words and sees every command, file edit and answer as a feed of steps, can add messages and stop it.
+(Claude Code is not open source, so it is not an option; goose, opencode and Kimi CLI were considered — Codex was chosen.)
+
+```
+Browser ──REST + WS──> FastAPI ──> Celery (queue `agent`) ──HTTP, token──> agentd (container `agent`) ──> codex exec --json
+                         │                │                                   own volume, own network, no secrets
+                      Postgres  <── events stored one by one ──┘
+```
+
+### Why a separate container (the decision that shapes everything)
+
+Codex is started with `--dangerously-bypass-approvals-and-sandbox`: the agent runs any command it likes, with no confirmation.
+Codex's own sandbox (bubblewrap) cannot run inside a container, so **the container is the sandbox**. `agent` therefore gets:
+no `docker.sock`, no `.env` (only `AGENT_TOKEN`), no route to Postgres and Redis (its own network `agentnet`; only the backend and
+`agent-worker` are on both), a read-only root filesystem, no capabilities, `no-new-privileges`, a pid and memory limit, and a non-root user.
+What it *can* do: write in its volume (`/data/agent/<session key>/work`), reach the internet (the model API, `git`, `pip`…).
+The worker running the panel's own code never executes what the agent produces.
+
+- The model's API key travels in the body of each turn (`panel → agent` over the internal network, not TLS) into the environment
+  of the Codex process only; it is never written to disk by agentd. The key is also **redacted from every stored event** should the
+  agent print it, and from agentd's stderr tail. Codex's own shell policy already hides variables named `*KEY*` from the commands.
+- agentd authenticates every request with `AGENT_TOKEN` (constant-time compare; an empty token refuses everything).
+  `AGENT_TOKEN` empty in the panel = the feature is off (`503`, nothing is sent anywhere).
+- Session keys, thread ids and model names are validated against strict patterns before they reach a path or an argv, the prompt is
+  passed after `--`, and `base_url` is written with TOML-safe quoting — none of the user's strings can become an option or a config key.
+
+### Turns, threads and history
+
+A *session* has a Codex thread id (`thread.started`). Every message is one *turn*: the first is `codex exec`, later ones
+`codex exec resume <thread>` — Codex carries the conversation itself (checked: the second request to the model contained the first
+turn's items). The session's `CODEX_HOME` and working directory live in the container's volume, so a thread survives a restart of agentd.
+`agent_events` stores what Codex printed (long strings cut at 20 000 characters, at most 20 000 events per session) plus the panel's own
+`user`, `turn.error`, `turn.stopped`. One turn at a time per session: the claim is a single conditional `UPDATE … WHERE status='idle'`.
+
+- **Live view** — `WS /api/agent/sessions/{id}/ws` (first frame `{token, from}`) replays from a sequence number and then tails the table;
+  a reconnect resumes from the next unseen event. Unlike a scan the socket stays open between turns.
+- **Stop** — `SIGINT` to the agent's process group, `SIGKILL` after a grace period. The same happens when the worker hangs up mid-turn
+  or a turn exceeds `AGENT_TURN_TIMEOUT_SECONDS` (default 30 minutes).
+- **Liveness** — a command that prints nothing for minutes must not look like a lost worker: agentd sends `agentd.ping` every 15 s and the
+  worker moves the session's heartbeat; `reap_stale_agent_turns` (beat, every minute) only ends a turn that stopped beating
+  for `AGENT_STALE_SECONDS` (300) and stops its process.
+- Turns run on their own Celery queue (`agent`, service `agent-worker`, `AGENT_CONCURRENCY`) so long chats cannot occupy scan slots.
+
+### Who can use it
+
+Admin and operator; viewers cannot. Sessions are private to their owner (an admin does not see other people's): the agent works with the
+owner's LLM key and its history may contain anything the owner pasted. Profiles: OpenAI, Grok (xAI has a Responses API) and custom
+(an OpenAI-compatible endpoint **that implements the Responses API**). **Claude profiles are refused with an explanation**: Codex speaks only the
+Responses API (`wire_api = "responses"`), and Anthropic's native API is a different protocol.
+
+### Checked against the real Codex (0.169.0) — and what was not
+
+Run for real against a fake Responses endpoint: provider and model via `-c model_providers.<id>={…}`, the key read from the env var named in
+`env_key` and sent as `Authorization: Bearer`, JSONL events (`thread.started`, `item.completed` with `agent_message` / `error`, `turn.started`,
+`turn.completed` with usage, `turn.failed`), `exec resume <thread_id>`, and that **`CODEX_HOME` must exist** (agentd creates it).
+**Not run:** a real model, and Codex with `--dangerously-bypass-approvals-and-sandbox` (blocked in the environment this was built in); the
+exact shape of `command_execution` / `file_change` items comes from Codex's documented JSONL format, and the page keeps any item it does not
+recognise as a generic step instead of dropping it. **Not built or run:** the `agent` image and the compose changes (no Docker daemon
+there) — try `docker compose up --build`, check `GET /api/agent/health` in the panel, and send one message.
+
+### Limits
+
+The agent can do anything inside its container, including reading what you paste into the chat and using the model key it was given
+for that turn; it cannot reach the panel's data. It has no access to your hosts unless you hand it SSH keys in the chat. There is no
+per-session spending limit besides the turn time limit (Codex reports token counts, not cost, so the budget bar of scans does not apply).
+The container's volume grows with the sessions' working directories: deleting a session removes its directory.
+
+### Tests
+
+`backend/tests/test_agent.py` (28): the API (roles, ownership, disabled without a token, Claude profile refused, one turn at a time,
+history order and `resume`, what Codex is given — argv, key, no panel secrets —, failed and stopped turns, redaction, truncation, an unreachable
+container, the stale-turn reaper, delete, WebSocket replay/resume/auth) against `tests/fake_codex.py` through the real agentd app; a real uvicorn
+for the tests that need streaming (stop; a silent long command stays alive); agentd on its own (token, unsafe identifiers, timeout, TOML quoting).
+Frontend: `src/lib/agentModel.test.ts` — how events become the feed.

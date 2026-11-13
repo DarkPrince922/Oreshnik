@@ -10,6 +10,7 @@ import Dashboard from "./pages/Dashboard";
 import LLMProfiles from "./pages/LLMProfiles";
 import Login from "./pages/Login";
 import NewScan from "./pages/NewScan";
+import Agent from "./pages/Agent";
 import Ops from "./pages/Ops";
 import Runners from "./pages/Runners";
 import Schedules from "./pages/Schedules";
@@ -67,6 +68,14 @@ export default function App() {
               }
             />
             <Route path="runners" element={<Runners />} />
+            <Route
+              path="agent"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Agent />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="ops"
               element={

@@ -483,3 +483,44 @@ export const getOpsRun = async (id: number) => (await api.get<OpsRun>(`/api/ops/
 export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; runner_ids: number[] }) =>
   (await api.post<OpsRun>("/api/ops", body)).data;
 export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/ops/${id}/cancel`)).data;
+
+// ── Агент ────────────────────────────────────────────────────────────────
+//
+// A chat with Codex CLI that runs in the isolated agent container (see backend/app/api/agent.py). Each message is one
+// "turn"; everything the agent does comes back as an ordered list of events, live over a WebSocket.
+
+export type AgentSessionStatus = "idle" | "running";
+
+export interface AgentSession {
+  id: number;
+  title: string;
+  llm_profile_id: number | null;
+  llm_profile_name: string | null;
+  status: AgentSessionStatus;
+  turn_count: number;
+  last_error: string | null;
+  cancel_requested: boolean;
+  event_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One stored event: `kind` is "user" (the operator's message), "turn.error"/"turn.stopped" (the panel's own notes) or
+ * what Codex emitted (thread.started, item.started/updated/completed, turn.completed, turn.failed, error). */
+export interface AgentEvent {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+}
+
+export const getAgentHealth = async () => (await api.get<{ ok: boolean; detail: string }>("/api/agent/health")).data;
+export const listAgentSessions = async () => (await api.get<AgentSession[]>("/api/agent/sessions")).data;
+export const createAgentSession = async (body: { title: string; llm_profile_id: number }) =>
+  (await api.post<AgentSession>("/api/agent/sessions", body)).data;
+export const getAgentSession = async (id: number) => (await api.get<AgentSession>(`/api/agent/sessions/${id}`)).data;
+export const deleteAgentSession = async (id: number) => {
+  await api.delete(`/api/agent/sessions/${id}`);
+};
+export const sendAgentMessage = async (id: number, text: string) =>
+  (await api.post<AgentSession>(`/api/agent/sessions/${id}/messages`, { text })).data;
+export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`/api/agent/sessions/${id}/stop`)).data;

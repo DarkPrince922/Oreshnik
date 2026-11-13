@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     strix_version: str = "1.7.0"
     strix_sandbox_image: str = "ghcr.io/usestrix/strix-sandbox:1.3.0"
 
+    # Agent («Агент»): Codex CLI in its own container (agentd/). The token must be the same on both sides; empty = feature off.
+    agent_url: str = "http://agent:8100"
+    agent_token: str = ""
+    # Wall-clock limit of ONE turn (one message to the agent).
+    agent_turn_timeout_seconds: int = Field(default=1800, ge=10, le=24 * 3600)
+    max_agent_sessions_per_user: int = 20
+    # A turn whose worker has not stored an event for this long is given up on.
+    agent_stale_seconds: int = Field(default=300, ge=30)
+
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
