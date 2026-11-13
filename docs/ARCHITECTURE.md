@@ -172,6 +172,17 @@ Strict **black**, but "alive": dark glass panels, smooth transitions, micro-inte
 - **LLM → Strix mapping** (`app/services/llm.py::build_strix_env`): `claude→anthropic/<model>`, `openai→openai/<model>`,
   `grok→xai/<model>`, `custom→openai/<model>` + `LLM_API_BASE` (custom requires a base URL). The Phase 2 scan engine calls this
   right before launching Strix.
+- **Reasoning effort** (`STRIX_REASONING_EFFORT`, `engine/base.py::strix_reasoning_env`, applied like the privacy env above —
+  explicit, after the scan's own variables, same for both runners): how hard each model call thinks before answering
+  (none…max; Strix's own default is `high`, which is this setting's default too, so leaving it alone changes nothing).
+  Checked against the real `strix-agent` 1.7.0: it only has an effect for a model LiteLLM's own catalog marks
+  `supports_reasoning` for — true for the Claude and GPT-5 presets above, **false today for `xai/grok-4` and for a
+  "custom" `base_url` model** (LiteLLM's catalog doesn't know them), so the setting silently does nothing for those
+  profiles. Strix never sends a `max_tokens`/output-length cap or a context-window size to the model API itself; both
+  exist only inside its own history-compaction bookkeeping (`context_window()`/`output_limit()` in `llm/context_budget.py`,
+  again from LiteLLM's catalog, falling back to `STRIX_CONTEXT_FALLBACK_TOKENS` — Strix's own env var, 200 000 by
+  default, not currently set by the panel — for a model LiteLLM doesn't recognise), and a real provider "context window
+  exceeded" error still forces a compaction retry regardless of that estimate.
 - **Runner checks run on the Celery worker**, not in the API, because the worker is where scans run (`local` = strix CLI +
   docker.sock present). If the worker doesn't answer within 15 s (60 s for SSH hosts, which have to be reached) the runner is marked
   offline. `ssh` runners are checked over a real connection with a pinned host key (§15).

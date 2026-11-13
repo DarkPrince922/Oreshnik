@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 
 from app.core.config import settings
-from app.engine.base import RunResult, ScanSpec, strix_privacy_env
+from app.engine.base import RunResult, ScanSpec, strix_privacy_env, strix_reasoning_env
 from app.engine.docker_cleanup import cleanup_containers
 from app.services.scan_files import INSTRUCTION_NAME
 
@@ -84,7 +84,9 @@ class LocalRunner:
             }
         )
         env.update(spec.env)
-        env.update(strix_privacy_env())  # last: nothing may switch the privacy settings back on behind the panel's back
+        # last: nothing may switch these back on, or override the panel's own tuning, behind the panel's back
+        env.update(strix_privacy_env())
+        env.update(strix_reasoning_env())
         return env
 
     # ── execution ────────────────────────────────────────────────────────

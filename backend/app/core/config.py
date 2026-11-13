@@ -1,8 +1,12 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER = "CHANGE_ME"
+
+# Strix's own accepted values for STRIX_REASONING_EFFORT (strix.config.settings.ReasoningEffort).
+STRIX_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 class Settings(BaseSettings):
@@ -61,6 +65,25 @@ class Settings(BaseSettings):
     # update notice is of no use to it. Turn either one on only if you want it.
     strix_telemetry: bool = False
     strix_update_check: bool = False
+    # How hard each model call thinks before answering: none|minimal|low|medium|high|xhigh|max. "high" is Strix's own
+    # default (unset is the same as "high"), so the default here changes nothing. Lower trades thoroughness for speed
+    # and cost; only matters for a model LiteLLM's own catalog marks as reasoning-capable — for a model it doesn't
+    # recognise (most "custom" base_url profiles, and some providers) Strix silently ignores this.
+    strix_reasoning_effort: str = "high"
+
+    @field_validator("strix_reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("strix_reasoning_effort")
+    @classmethod
+    def _check_reasoning_effort(cls, value: str) -> str:
+        if value not in STRIX_REASONING_EFFORTS:
+            raise ValueError(
+                f"STRIX_REASONING_EFFORT must be one of {', '.join(STRIX_REASONING_EFFORTS)}, got {value!r}"
+            )
+        return value
 
     # SSH runners
     ssh_connect_timeout_seconds: int = 15

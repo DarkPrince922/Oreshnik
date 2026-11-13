@@ -21,6 +21,17 @@ def strix_privacy_env() -> dict[str, str]:
     return env
 
 
+def strix_reasoning_env() -> dict[str, str]:
+    """How hard Strix's model thinks per call (`STRIX_REASONING_EFFORT`), for every runner alike.
+
+    Always passed explicitly, after the scan's own environment, so the admin setting is the one that actually applies
+    regardless of what a scan's own `env` happens to carry.
+    """
+    from app.core.config import settings
+
+    return {"STRIX_REASONING_EFFORT": settings.strix_reasoning_effort}
+
+
 @dataclass
 class ScanSpec:
     scan_id: int
