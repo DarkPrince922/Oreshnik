@@ -10,7 +10,13 @@ from app.core.config import settings
 
 
 def _fernet() -> Fernet:
-    return Fernet(settings.secret_encryption_key.encode())
+    try:
+        return Fernet(settings.secret_encryption_key.encode())
+    except ValueError as exc:
+        raise RuntimeError(
+            "SECRET_ENCRYPTION_KEY is not a valid Fernet key. Generate one with: "
+            'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
+        ) from exc
 
 
 def encrypt(value: str) -> str:

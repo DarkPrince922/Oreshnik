@@ -1,21 +1,29 @@
 """Password hashing and JWT helpers. Auth routes land in Phase 1."""
 
+import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 
 from app.core.config import settings
 
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _prehash(password: str) -> bytes:
+    # bcrypt rejects inputs > 72 bytes; a SHA-256 pre-hash keeps any length safe.
+    return base64.b64encode(hashlib.sha256(password.encode()).digest())
 
 
 def hash_password(password: str) -> str:
-    return _pwd.hash(password)
+    return bcrypt.hashpw(_prehash(password), bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return _pwd.verify(password, hashed)
+    try:
+        return bcrypt.checkpw(_prehash(password), hashed.encode())
+    except ValueError:
+        return False
 
 
 def create_access_token(subject: str, extra: dict | None = None) -> str:
