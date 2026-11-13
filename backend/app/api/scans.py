@@ -1,0 +1,399 @@
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Literal
+
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
+from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy import func, select, true, update
+from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
+
+from app.api.deps import get_current_user, require_operator
+from app.core.config import settings
+from app.core.db import SessionLocal, get_db
+from app.core.security import decode_access_token
+from app.models.llm_profile import LLMProfile
+from app.models.runner import Runner, RunnerKind
+from app.models.scan import ACTIVE_STATUSES, FINAL_STATUSES, Finding, Scan, ScanStatus
+from app.models.user import Role, User
+from app.schemas.scan import (
+    FindingBrief,
+    FindingOut,
+    LogPage,
+    ReportOut,
+    ScanCreate,
+    ScanList,
+    ScanOut,
+)
+from app.services.artifacts import SEVERITY_ORDER
+from app.services.scan_files import find_run_dir, log_path, read_log_lines, remove_scan_dir, scan_dir, tail_from
+from app.services.targets import TargetKind, classify_all
+from app.worker.tasks import scan_run
+
+log = logging.getLogger("oreshnik.scans")
+
+router = APIRouter(prefix="/api/scans", tags=["scans"])
+
+# Visibility: admins and viewers see every scan (viewers are read-only); operators see their own.
+
+
+def _visible(user: User):
+    return Scan.user_id == user.id if user.role == Role.operator else true()
+
+
+def _get_visible(db: Session, user: User, scan_id: int) -> Scan:
+    scan = db.scalar(select(Scan).where(Scan.id == scan_id, _visible(user)))
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Скан не найден")
+    return scan
+
+
+def _severity_counts(db: Session, scan_ids: list[int]) -> dict[int, dict[str, int]]:
+    counts: dict[int, dict[str, int]] = {i: {} for i in scan_ids}
+    if not scan_ids:
+        return counts
+    rows = db.execute(
+        select(Finding.scan_id, Finding.severity, func.count())
+        .where(Finding.scan_id.in_(scan_ids))
+        .group_by(Finding.scan_id, Finding.severity)
+    )
+    for scan_id, severity, n in rows:
+        counts[scan_id][severity] = n
+    return counts
+
+
+def _out(scan: Scan, viewer: User, counts: dict[str, int]) -> ScanOut:
+    return ScanOut(
+        id=scan.id,
+        user_id=scan.user_id,
+        owner_email=scan.user.email,
+        runner_id=scan.runner_id,
+        runner_name=scan.runner.name if scan.runner else None,
+        llm_profile_id=scan.llm_profile_id,
+        llm_profile_name=scan.llm_profile.name if scan.llm_profile else None,
+        targets=scan.targets,
+        scan_mode=scan.scan_mode,
+        instruction=None if viewer.role == Role.viewer else scan.instruction,
+        max_budget=scan.max_budget,
+        status=scan.status,
+        status_detail=scan.status_detail,
+        exit_code=scan.exit_code,
+        run_name=scan.run_name,
+        run_status=scan.run_status,
+        cost=scan.cost,
+        total_tokens=scan.total_tokens,
+        created_at=scan.created_at,
+        started_at=scan.started_at,
+        finished_at=scan.finished_at,
+        severity_counts=counts,
+        findings_total=sum(counts.values()),
+    )
+
+
+def _out_one(db: Session, scan: Scan, viewer: User) -> ScanOut:
+    return _out(scan, viewer, _severity_counts(db, [scan.id])[scan.id])
+
+
+# ── create / list / read ─────────────────────────────────────────────────
+
+
+@router.post("", response_model=ScanOut, status_code=status.HTTP_201_CREATED)
+def create_scan(
+    body: ScanCreate, user: User = Depends(require_operator), db: Session = Depends(get_db)
+) -> ScanOut:
+    # Targets
+    try:
+        classified = classify_all(body.targets)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Некорректная цель: {exc}")
+    if user.role != Role.admin and any(kind == TargetKind.path for _, kind in classified):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Локальные пути и файлы может сканировать только администратор. "
+            "Укажите URL, домен, IP или git-репозиторий.",
+        )
+    targets = [t for t, _ in classified]
+
+    # Runner
+    if body.runner_id is not None:
+        runner = db.get(Runner, body.runner_id)
+        if runner is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Раннер не найден")
+    else:
+        try:
+            wanted = RunnerKind(settings.default_runner)
+        except ValueError:
+            wanted = RunnerKind.mock
+        runner = db.scalar(select(Runner).where(Runner.kind == wanted).order_by(Runner.id))
+        if runner is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Нет доступного раннера — создайте его в разделе «Раннеры»")
+    if runner.kind == RunnerKind.ssh:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "SSH-раннеры пока не поддерживаются")
+
+    # LLM profile: personal, and required for anything that really calls a model.
+    profile: LLMProfile | None = None
+    if body.llm_profile_id is not None:
+        profile = db.scalar(
+            select(LLMProfile).where(LLMProfile.id == body.llm_profile_id, LLMProfile.user_id == user.id)
+        )
+        if profile is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "LLM-профиль не найден")
+    elif runner.kind != RunnerKind.mock:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Для этого раннера нужно выбрать LLM-профиль")
+
+    # Cost guard
+    active = db.scalar(
+        select(func.count()).select_from(Scan).where(Scan.user_id == user.id, Scan.status.in_(ACTIVE_STATUSES))
+    )
+    if active >= settings.max_active_scans_per_user:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Уже запущено сканов: {active}. Лимит — {settings.max_active_scans_per_user}; дождитесь завершения или отмените лишние.",
+        )
+
+    scan = Scan(
+        user_id=user.id,
+        runner_id=runner.id,
+        llm_profile_id=profile.id if profile else None,
+        targets=targets,
+        scan_mode=body.scan_mode,
+        instruction=body.instruction,
+        max_budget=body.max_budget,
+        status=ScanStatus.queued,
+    )
+    db.add(scan)
+    db.commit()
+
+    try:
+        scan_run.delay(scan.id)
+    except Exception as exc:  # broker down
+        log.error("could not enqueue scan %s: %s", scan.id, exc)
+        scan.status = ScanStatus.failed
+        scan.status_detail = "Очередь задач недоступна"
+        scan.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Очередь задач недоступна, скан не запущен")
+
+    db.expire_all()  # an eager/fast worker may already have finished the scan
+    scan = db.get(Scan, scan.id)
+    return _out_one(db, scan, user)
+
+
+@router.get("", response_model=ScanList)
+def list_scans(
+    status_filter: ScanStatus | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScanList:
+    where = [_visible(user)]
+    if status_filter is not None:
+        where.append(Scan.status == status_filter)
+    total = db.scalar(select(func.count()).select_from(Scan).where(*where))
+    scans = db.scalars(select(Scan).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)).all()
+    counts = _severity_counts(db, [s.id for s in scans])
+    return ScanList(items=[_out(s, user, counts[s.id]) for s in scans], total=total, limit=limit, offset=offset)
+
+
+@router.get("/{scan_id}", response_model=ScanOut)
+def get_scan(scan_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ScanOut:
+    return _out_one(db, _get_visible(db, user, scan_id), user)
+
+
+# ── control ──────────────────────────────────────────────────────────────
+
+
+@router.post("/{scan_id}/cancel", response_model=ScanOut)
+def cancel_scan(scan_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> ScanOut:
+    scan = _get_visible(db, user, scan_id)
+    # Conditional updates: a scan that a worker is starting right now can't slip past a cancel.
+    if db.execute(
+        update(Scan)
+        .where(Scan.id == scan_id, Scan.status == ScanStatus.queued)
+        .values(status=ScanStatus.cancelled, finished_at=datetime.now(timezone.utc), status_detail="Отменён до запуска")
+    ).rowcount == 0:
+        if db.execute(
+            update(Scan).where(Scan.id == scan_id, Scan.status == ScanStatus.running).values(status=ScanStatus.cancelling)
+        ).rowcount == 0 and scan.status != ScanStatus.cancelling:
+            db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT, "Скан уже завершён")
+    db.commit()
+    db.expire_all()
+    return _out_one(db, db.get(Scan, scan_id), user)
+
+
+@router.delete("/{scan_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_scan(scan_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
+    scan = _get_visible(db, user, scan_id)
+    if scan.status in ACTIVE_STATUSES:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Скан ещё выполняется — сначала отмените его")
+    db.delete(scan)
+    db.commit()
+    remove_scan_dir(scan_id)
+
+
+# ── results ──────────────────────────────────────────────────────────────
+
+
+@router.get("/{scan_id}/log", response_model=LogPage)
+def get_log(
+    scan_id: int,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> LogPage:
+    scan = _get_visible(db, user, scan_id)
+    lines, next_offset = read_log_lines(scan_id, offset, limit)
+    return LogPage(lines=lines, next_offset=next_offset, finished=scan.status in FINAL_STATUSES)
+
+
+@router.get("/{scan_id}/findings", response_model=list[FindingBrief])
+def list_findings(scan_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[Finding]:
+    _get_visible(db, user, scan_id)
+    rows = db.scalars(select(Finding).where(Finding.scan_id == scan_id)).all()
+    return sorted(rows, key=lambda f: (SEVERITY_ORDER.get(f.severity, 99), f.id))
+
+
+@router.get("/{scan_id}/findings/{finding_id}", response_model=FindingOut)
+def get_finding(
+    scan_id: int, finding_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> Finding:
+    _get_visible(db, user, scan_id)
+    finding = db.scalar(select(Finding).where(Finding.id == finding_id, Finding.scan_id == scan_id))
+    if finding is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Находка не найдена")
+    return finding
+
+
+@router.get("/{scan_id}/report", response_model=ReportOut)
+def get_report(scan_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ReportOut:
+    _get_visible(db, user, scan_id)
+    run_dir = find_run_dir(scan_dir(scan_id))
+    report = run_dir / "penetration_test_report.md" if run_dir else None
+    if report is None or not report.is_file():
+        return ReportOut(markdown=None)
+    return ReportOut(markdown=report.read_text(encoding="utf-8", errors="replace"))
+
+
+_EXPORTS = {
+    "sarif": ("findings.sarif", "application/sarif+json"),
+    "md": ("penetration_test_report.md", "text/markdown; charset=utf-8"),
+}
+
+
+@router.get("/{scan_id}/export/{fmt}")
+def export_scan(
+    scan_id: int,
+    fmt: Literal["json", "sarif", "md"],
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_visible(db, user, scan_id)
+    base = f"oreshnik-scan-{scan_id}"
+    # Always served as an attachment: the content is attacker-influenced and must not render in-browser.
+    if fmt == "json":
+        rows = db.scalars(select(Finding).where(Finding.scan_id == scan_id).order_by(Finding.id)).all()
+        return JSONResponse(
+            [f.data for f in rows],
+            headers={"Content-Disposition": f'attachment; filename="{base}-vulnerabilities.json"', "X-Content-Type-Options": "nosniff"},
+        )
+    filename, media_type = _EXPORTS[fmt]
+    run_dir = find_run_dir(scan_dir(scan_id))
+    path = run_dir / filename if run_dir else None
+    if path is None or not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Файл ещё не создан")
+    return FileResponse(path, media_type=media_type, filename=f"{base}-{filename}", headers={"X-Content-Type-Options": "nosniff"})
+
+
+# ── live log over WebSocket ──────────────────────────────────────────────
+#
+# Protocol (JSON text frames). The client's FIRST frame authenticates (so the token never
+# appears in a URL or access log):   {"token": "<jwt>", "from": 0}
+# Server frames:  {"type":"status","status":...} | {"type":"log","seq":N,"line":"..."} | {"type":"end","status":...}
+# Closing codes:  4401 not authenticated, 4404 scan not found.
+
+_WS_POLL_SECONDS = 0.3
+
+
+def _ws_authorize(token: object, scan_id: int) -> bool:
+    if not isinstance(token, str):
+        return False
+    try:
+        user_id = int(decode_access_token(token)["sub"])
+    except (jwt.PyJWTError, KeyError, ValueError):
+        return False
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        return bool(user and user.is_active)
+
+
+def _ws_scan_status(token: str, scan_id: int) -> ScanStatus | None:
+    with SessionLocal() as db:
+        user = db.get(User, int(decode_access_token(token)["sub"]))
+        if user is None or not user.is_active:
+            return None
+        return db.scalar(select(Scan.status).where(Scan.id == scan_id, _visible(user)))
+
+
+@router.websocket("/{scan_id}/ws")
+async def scan_log_socket(ws: WebSocket, scan_id: int) -> None:
+    await ws.accept()
+    try:
+        first = json.loads(await asyncio.wait_for(ws.receive_text(), timeout=10))
+        token = first.get("token") if isinstance(first, dict) else None
+        skip = int(first.get("from", 0)) if isinstance(first, dict) else 0
+    except Exception:
+        await ws.close(code=4401)
+        return
+    if not await run_in_threadpool(_ws_authorize, token, scan_id):
+        await ws.close(code=4401)
+        return
+    current = await run_in_threadpool(_ws_scan_status, token, scan_id)
+    if current is None:
+        await ws.close(code=4404)
+        return
+
+    path = log_path(scan_id)
+    position, seq, last_status = 0, 0, current
+    disconnect = asyncio.create_task(ws.receive_text())  # completes when the client goes away
+    try:
+        # State first, so a client can render "running"/"finished" before the log replay starts.
+        await ws.send_json({"type": "status", "status": current.value})
+        while True:
+            lines, position = await run_in_threadpool(tail_from, path, position)
+            for line in lines:
+                if seq >= skip:
+                    await ws.send_json({"type": "log", "seq": seq, "line": line})
+                seq += 1
+
+            current = await run_in_threadpool(_ws_scan_status, token, scan_id)
+            if current is None:  # scan deleted or access revoked
+                await ws.close(code=4404)
+                return
+            if current != last_status:
+                await ws.send_json({"type": "status", "status": current.value})
+                last_status = current
+
+            if current in FINAL_STATUSES:
+                # The worker closes the log before it publishes the final status, so this drain is complete.
+                lines, position = await run_in_threadpool(tail_from, path, position)
+                for line in lines:
+                    if seq >= skip:
+                        await ws.send_json({"type": "log", "seq": seq, "line": line})
+                    seq += 1
+                await ws.send_json({"type": "end", "status": current.value})
+                await ws.close()
+                return
+
+            if disconnect.done():
+                return
+            await asyncio.sleep(_WS_POLL_SECONDS)
+    except Exception as exc:  # client gone mid-send
+        log.debug("scan %s websocket ended: %s", scan_id, exc)
+    finally:
+        disconnect.cancel()

@@ -37,6 +37,19 @@ class Settings(BaseSettings):
     # Runner / Strix
     strix_runs_dir: str = "/data/strix_runs"
     default_runner: str = "mock"
+    strix_bin: str = "strix"
+    # Wall-clock safety net per scan (0 disables). Strix's own --max-budget is the
+    # primary spend limit; this only stops a hung process.
+    scan_timeout_minutes: int = 180
+    # Seconds between SIGINT (graceful stop) and SIGTERM; SIGKILL follows after the same time.
+    strix_cancel_grace_seconds: int = 20
+    # A running scan whose worker has not heartbeated for this long is marked failed.
+    scan_stale_seconds: int = 180
+    # Guard against accidentally burning tokens with many parallel scans.
+    max_active_scans_per_user: int = 3
+    scan_log_max_bytes: int = 20_000_000
+    # Pace of the simulated runner (seconds between lines). Tests set 0.
+    mock_delay_seconds: float = 0.35
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]

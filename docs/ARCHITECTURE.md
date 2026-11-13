@@ -34,7 +34,7 @@ So Oreshnik runs the CLI as a job, streams its stdout, and parses its artifacts.
 │           findings · schedules · settings                   │
 │   secrets (LLM/SSH keys) encrypted at rest (Fernet)         │
 ├───────────────┬───────────────────────────────────────────┤
-│ Postgres      │ Redis (Celery broker + log pub/sub)        │
+│ Postgres      │ Redis (Celery broker + results)        │
 └───────────────┴───────────────────────────────────────────┘
                 │ enqueue
 ┌───────────────▼───────────────────────────────────────────┐
@@ -42,7 +42,8 @@ So Oreshnik runs the CLI as a job, streams its stdout, and parses its artifacts.
 │   • MockRunner  — fakes a Strix run (no tokens burned)     │
 │   • LocalRunner — subprocess `strix -n ...`, docker.sock   │
 │   • SSHRunner   — provisions + runs strix on a remote host │
-│  streams stdout → Redis → WS → UI; parses artifacts → DB   │
+│  appends stdout to a log file; API tails it → WS → UI;     │
+│  parses artifacts → DB                                     │
 ├────────────────────────────────────────────────────────────┤
 │ Celery beat ── cron schedules → periodic scans             │
 └────────────────────────────────────────────────────────────┘
@@ -116,7 +117,7 @@ class Runner(Protocol):
 - **Phase 0 — Skeleton** *(done)*: repo layout, docker-compose (postgres/redis/backend/worker/beat/frontend), config, Alembic, health endpoints, branded frontend shell + login page.
 - **Phase 1 — Domain + auth** *(done)*: users/roles, JWT login, per-user LLM profiles (encrypted), runners CRUD with
   worker-side health checks, first-run bootstrap, login throttling, panel UI for all of it. See §9.
-- **Phase 2 — Scan engine**: Runner abstraction (Mock + Local), Strix command builder, Celery task, stdout → WS, artifact parser → DB.
+- **Phase 2 — Scan engine** *(done)*: Runner abstraction (Mock + Local), Strix command builder, Celery task, live log over WebSocket, artifact parser → DB, cancel, reaper. See §10.
 - **Phase 3 — UI**: dashboard, new scan, scan detail (live log + findings + report), severity views, SARIF/JSON download.
 - **Phase 4 — Scheduling + cost**: beat schedules, cost from `run.json`.
 - **Phase 5 — SSH runners**: remote provisioning + execution + artifact fetch.
@@ -162,3 +163,63 @@ Strict **black**, but "alive": dark glass panels, smooth transitions, micro-inte
 cd backend && pip install -r requirements.txt -r requirements-dev.txt
 POSTGRES_HOST=localhost POSTGRES_PORT=5432 pytest      # needs a Postgres user that can CREATE DATABASE
 ```
+
+## 10. Phase 2 — scan engine
+
+### Verified against the real Strix (strix-agent 1.7.0, installed and inspected — not assumed)
+| Fact | Consequence in Oreshnik |
+|------|-------------------------|
+| headless `-n`; mode `-m quick\|standard\|deep`, **default `deep`** | panel defaults to `quick`; `max_budget` → `--max-budget` |
+| results in `./strix_runs/<name>/` of the cwd; name auto-generated | every scan gets a private cwd `STRIX_RUNS_DIR/scan-<id>/`; the run dir is discovered afterwards |
+| exit `0` done, `1` error (Docker/model/preflight), `2` findings — **but argparse also exits 2** | "vulnerabilities found" is only believed when findings were actually parsed (`scan_outcome.decide`) |
+| `SIGINT` → graceful stop (`run.json status=interrupted`, sandbox cleanup) | cancel = SIGINT → (grace) SIGTERM → (grace) SIGKILL on the whole process group |
+| sandbox containers get label `strix-run-id=$STRIX_RUN_ID` | `STRIX_RUN_ID=oreshnik-scan-<id>`; leftovers are `docker rm -f`-ed after every run and by the reaper |
+| keeps config in `~/.strix/` | each scan gets its own `HOME` — no key ever leaks between users' scans |
+| **local directory targets are mounted writable into the sandbox** | filesystem-path targets are admin-only (see `services/targets.py`) |
+| `--target=X` / `--instruction-file=F` forms parse correctly; `--target=-evil` is a value, not a flag | arguments always use the `=` form; instructions go through a file |
+
+### Flow
+```
+POST /api/scans ─► validate targets/runner/profile/limits ─► scans row (queued) ─► Celery scan_run(id)
+worker: atomic claim queued→running ─► engine (Mock|Local) ─► log file (cleaned, secrets redacted)
+        ─► parse run dir ─► decide status ─► findings rows + cost/tokens ─► final status
+API:    GET .../log (paged) · WS .../ws (live, replay+tail) · findings · report · export json|sarif|md
+```
+Statuses: `queued → running → succeeded | vulns_found | failed | cancelled` (+ `cancelling` while a stop is in flight).
+
+### Engine pieces (`backend/app/engine`, `worker/tasks.py`, `services/`)
+- **MockRunner** — writes artifacts in the exact Strix format, every finding labelled `[MOCK]`. Steerable from the instruction
+  text: `MOCK:clean`, `MOCK:fail`, `MOCK:slow` (handy for trying every UI state without spending a token).
+- **LocalRunner** — real subprocess. The Strix process gets an **allow-listed environment** (PATH, DOCKER_*, proxy vars +
+  `STRIX_LLM`/`LLM_API_KEY`/`LLM_API_BASE`); the panel's own secrets (`JWT_SECRET`, `SECRET_ENCRYPTION_KEY`, DB password…) never reach it.
+- **Log** — `STRIX_RUNS_DIR/scan-<id>/oreshnik.log`, ANSI/control characters stripped, the injected API key redacted, 20 MB cap.
+  The API *tails the file* for the WebSocket instead of using Redis pub/sub: one fewer moving part, no replay/race logic, and the
+  log survives a Redis restart. The worker closes the log **before** it publishes the final status, so the final drain is complete.
+- **Cancel** — API does conditional `UPDATE`s (`queued→cancelled`, `running→cancelling`) so a scan being claimed at that instant
+  cannot slip past; the worker polls the DB every 2 s (the same poll is its heartbeat).
+- **Reaper** (`reap_stale_scans`, every 60 s via beat) — a running scan with no heartbeat for `SCAN_STALE_SECONDS` is failed and its
+  sandbox containers removed. Covers a killed/OOM'd worker.
+- **Guards** — `MAX_ACTIVE_SCANS_PER_USER` (429), `SCAN_TIMEOUT_MINUTES` wall clock, scan claimed at most once (a redelivered task
+  never runs — and spends — twice).
+
+### API additions
+| Endpoint | Access |
+|----------|--------|
+| `POST /api/scans` | admin, operator |
+| `GET /api/scans` (`status`, `limit`, `offset`), `GET /api/scans/{id}` | all roles (operators: own scans only) |
+| `POST /api/scans/{id}/cancel`, `DELETE /api/scans/{id}` | admin, operator (own) |
+| `GET /api/scans/{id}/log?offset&limit`, `.../findings`, `.../findings/{fid}`, `.../report`, `.../export/{json\|sarif\|md}` | same visibility |
+| `WS /api/scans/{id}/ws` — first frame `{"token": "<jwt>", "from": 0}`; frames `status` / `log` / `end` | same visibility |
+
+Viewers see all scans read-only but **not the instruction text** (it may contain test credentials).
+
+### Known limits / not verified
+- `Dockerfile.worker` and the compose wiring were **not built or run** (no Docker daemon in the dev environment). The Strix
+  install mirrors a verified `pip install strix-agent==1.7.0`; the real Docker-out-of-Docker run (worker container → host Docker →
+  sandbox) still needs a first run on a machine with Docker.
+- A real LLM-backed scan has never been run (no key/Docker here). The `local` path was exercised with the real `strix` binary up to
+  its Docker preflight, and end-to-end with a fake `strix` that reproduces its arguments, exit codes, signals and artifacts.
+- Bind-mounting **admin-supplied local paths** from inside the worker container will refer to the container's filesystem, not the
+  host's. Remote targets (URL/domain/IP/repo) are unaffected.
+- Postman targets (`postman://`) are rejected for now (they need `POSTMAN_API_KEY`).
+- Run directories are never pruned automatically (only on scan delete).

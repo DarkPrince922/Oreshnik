@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api import auth, health, llm_profiles, runners, users
+from app.api import auth, health, llm_profiles, runners, scans, users
 from app.bootstrap import run_bootstrap
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -59,6 +59,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(llm_profiles.router)
 app.include_router(runners.router)
+app.include_router(scans.router)
 
 
 @app.get("/")

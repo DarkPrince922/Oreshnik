@@ -27,7 +27,7 @@ FastAPI · Postgres · Celery + Redis (queue + beat scheduler) · React/Vite/TS/
 
 ## Status
 
-Early development — phases 0–1 done (skeleton, auth/roles, per-user LLM profiles, runners). Scans arrive in phase 2. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
+Early development — phases 0–2 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine). The scan UI arrives in phase 3. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
 design and the phased build plan.
 
 ## Quick start (dev)
@@ -47,6 +47,8 @@ docker compose logs backend | grep "initial admin"
 ```
 
 Before using it for real, replace the `CHANGE_ME` secrets in `.env` (outside `ORESHNIK_ENV=dev` the API refuses to start with them).
+
+Scans are available through the API today (`/docs`); the browser UI for them is phase 3.
 
 The default runner is `mock` — it simulates Strix runs without calling any LLM, so you
 can build and test the whole pipeline without burning tokens. Switch a runner to

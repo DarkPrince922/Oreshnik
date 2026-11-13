@@ -26,7 +26,8 @@ from sqlalchemy import text  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.db import SessionLocal, engine  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
-from app.models import Role, User  # noqa: E402
+from app.models import LLMProfile, Provider, Role, Runner, RunnerKind, RunnerStatus, Scan, ScanMode, ScanStatus, User  # noqa: E402
+from app.core.crypto import encrypt  # noqa: E402
 
 
 def _ensure_database() -> None:
@@ -54,9 +55,15 @@ def _database():
 
 
 @pytest.fixture(autouse=True)
-def _clean_state(monkeypatch):
+def _clean_state(monkeypatch, tmp_path):
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE users, llm_profiles, runners RESTART IDENTITY CASCADE"))
+        conn.execute(text("TRUNCATE users, llm_profiles, runners, scans, findings RESTART IDENTITY CASCADE"))
+
+    # Scan artifacts go to a per-test directory; the simulated runner runs at full speed;
+    # a stuck fake Strix is escalated quickly.
+    monkeypatch.setattr(settings, "strix_runs_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(settings, "mock_delay_seconds", 0.0)
+    monkeypatch.setattr(settings, "strix_cancel_grace_seconds", 1)
 
     # In-memory stand-in for the Redis-backed login throttle.
     from app.services import throttle
@@ -116,3 +123,41 @@ def operator(client):
 def viewer(client):
     make_user("view@example.com", role=Role.viewer)
     return auth_headers(client, "view@example.com")
+
+
+def make_runner(kind: RunnerKind = RunnerKind.mock, name: str | None = None) -> Runner:
+    with SessionLocal() as db:
+        runner = Runner(name=name or f"{kind.value}-runner", kind=kind, status=RunnerStatus.online)
+        db.add(runner)
+        db.commit()
+        db.refresh(runner)
+        return runner
+
+
+def make_profile(user_id: int, name: str = "p", key: str = "sk-test-key-1234567890") -> LLMProfile:
+    with SessionLocal() as db:
+        profile = LLMProfile(
+            user_id=user_id, name=name, provider=Provider.claude, model="claude-sonnet-4-6",
+            api_key_enc=encrypt(key), api_key_hint="…7890",
+        )
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
+        return profile
+
+
+def make_scan(user_id: int, runner_id: int | None, *, targets=None, instruction=None, profile_id=None,
+              status: ScanStatus = ScanStatus.queued, mode: ScanMode = ScanMode.quick, **extra) -> Scan:
+    with SessionLocal() as db:
+        scan = Scan(user_id=user_id, runner_id=runner_id, llm_profile_id=profile_id,
+                    targets=targets or ["https://example.com"], scan_mode=mode, instruction=instruction,
+                    status=status, **extra)
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+        return scan
+
+
+def load_scan(scan_id: int) -> Scan:
+    with SessionLocal() as db:
+        return db.get(Scan, scan_id)

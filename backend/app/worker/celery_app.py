@@ -17,6 +17,12 @@ celery.conf.update(
     enable_utc=True,
     task_track_started=True,
     result_expires=3600,
+    # Scans run for minutes to hours: a worker process must take one job at a time instead of
+    # hoarding queued scans it can't start yet.
+    worker_prefetch_multiplier=1,
+    beat_schedule={
+        "reap-stale-scans": {"task": "oreshnik.reap_stale_scans", "schedule": 60.0},
+    },
 )
 
 

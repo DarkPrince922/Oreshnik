@@ -45,8 +45,14 @@ services:
         condition: service_healthy
 
   worker:
-    build: ./backend
-    command: celery -A app.worker.celery_app.celery worker --loglevel=info
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    # One worker process per concurrent scan (each scan = one Strix run + sandbox containers + LLM spend).
+    command: celery -A app.worker.celery_app.celery worker --loglevel=info --concurrency=${SCAN_CONCURRENCY:-2} --prefetch-multiplier=1
+    # `docker compose stop` makes Celery wait for running scans. After this period Docker kills the worker;
+    # the reaper then fails those scans (no heartbeat) and removes their sandbox containers.
+    stop_grace_period: 60s
     env_file: .env
     environment:
       POSTGRES_HOST: postgres

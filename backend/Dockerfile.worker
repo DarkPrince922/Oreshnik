@@ -1,0 +1,30 @@
+# Worker image: the panel's Python code + the Strix CLI + a Docker client.
+#
+# NOT built or run in the environment this was written in (no Docker daemon there): the Strix
+# install steps mirror a verified pip install of strix-agent 1.7.0 on Python 3.13, nothing more.
+FROM docker:27-cli AS dockercli
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# git: Strix clones repository targets.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Strix starts its sandbox containers through the host's Docker socket (mounted by compose).
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+
+# Strix lives in its own virtualenv so its large dependency tree cannot conflict with the panel's.
+ARG STRIX_VERSION=1.7.0
+RUN python -m venv /opt/strix \
+    && /opt/strix/bin/pip install --no-cache-dir "strix-agent==${STRIX_VERSION}" \
+    && ln -s /opt/strix/bin/strix /usr/local/bin/strix
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["celery", "-A", "app.worker.celery_app.celery", "worker", "--loglevel=info"]
