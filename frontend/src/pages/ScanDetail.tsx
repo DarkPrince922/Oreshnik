@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import AgentsPanel from "../components/AgentsPanel";
 import FindingsPanel from "../components/FindingsPanel";
 import LogViewer from "../components/LogViewer";
 import { MODE_META, SEVERITIES, SEVERITY_LABEL, SEVERITY_STYLE, SeverityBar, StatusBadge, isActive } from "../components/scan";
@@ -21,12 +22,13 @@ import {
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatCost, formatDateTime, formatDuration, formatTokens, scanDuration } from "../lib/format";
+import { useScanActivity } from "../lib/useScanActivity";
 import { useScanStream } from "../lib/useScanStream";
 
 // The markdown stack is only needed for the report tab, so it is loaded on demand.
 const SafeMarkdown = lazy(() => import("../components/Markdown"));
 
-type Tab = "log" | "findings" | "report" | "params";
+type Tab = "agents" | "log" | "findings" | "report" | "params";
 
 function useNow(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -114,13 +116,20 @@ function ScanDetailView({ scanId }: { scanId: number }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finished, scanId, findingsKey]);
 
-  // Open on the most useful tab once, when the scan first loads.
+  // Raw agent transcripts are not shown to viewers (the API refuses them too).
+  const canSeeAgents = !hasRole("viewer");
+
+  // Open on the most useful tab once, when the scan first loads: what the agents are doing while it runs,
+  // the findings once it is over.
   useEffect(() => {
     if (scan && !tabChosen.current) {
       tabChosen.current = true;
-      if (!isActive(scan.status) && scan.findings_total > 0) setTab("findings");
+      if (isActive(scan.status) && canSeeAgents) setTab("agents");
+      else if (!isActive(scan.status) && scan.findings_total > 0) setTab("findings");
     }
-  }, [scan]);
+  }, [scan, canSeeAgents]);
+
+  const activity = useScanActivity(scanId, { enabled: canSeeAgents && (tab === "agents" || active), active });
 
   const now = useNow(active);
   const duration = useMemo(() => (scan ? scanDuration(scan, now) : null), [scan, now]);
@@ -159,6 +168,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   }
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
+    ...(canSeeAgents ? [{ id: "agents" as Tab, label: "Агенты", count: activity.agents.length }] : []),
     { id: "log", label: "Лог" },
     { id: "findings", label: "Находки", count: scan.findings_total },
     { id: "report", label: "Отчёт" },
@@ -242,6 +252,10 @@ function ScanDetailView({ scanId }: { scanId: number }) {
           </button>
         ))}
       </div>
+
+      {tab === "agents" && canSeeAgents && (
+        <AgentsPanel events={activity.events} agents={activity.agents} loaded={activity.loaded} error={activity.error} active={active} />
+      )}
 
       {tab === "log" && <LogViewer buffer={buffer} state={state} active={active} />}
 

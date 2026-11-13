@@ -19,6 +19,8 @@ from app.core.config import settings
 
 LOG_NAME = "oreshnik.log"
 INSTRUCTION_NAME = "instruction.txt"
+ACTIVITY_NAME = "activity.jsonl"   # normalised agent events (see services/activity.py)
+AGENTS_NAME = "agents.json"        # normalised agent roster + statuses
 MAX_LINE_CHARS = 8000
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
@@ -34,6 +36,14 @@ def scan_dir(scan_id: int) -> Path:
 
 def log_path(scan_id: int) -> Path:
     return scan_dir(scan_id) / LOG_NAME
+
+
+def activity_path(scan_id: int) -> Path:
+    return scan_dir(scan_id) / ACTIVITY_NAME
+
+
+def agents_path(scan_id: int) -> Path:
+    return scan_dir(scan_id) / AGENTS_NAME
 
 
 def find_run_dir(work_dir: Path) -> Path | None:
@@ -118,13 +128,17 @@ def read_log_lines(scan_id: int, offset: int = 0, limit: int = 2000) -> tuple[li
     return out, offset + len(out)
 
 
-def tail_from(path: Path, position: int) -> tuple[list[str], int]:
-    """Complete lines written after byte `position`; returns (lines, new position)."""
+def tail_from(path: Path, position: int, max_bytes: int | None = None) -> tuple[list[str], int]:
+    """Complete lines written after byte `position`; returns (lines, new position).
+
+    `max_bytes` bounds how much is read in one call (lines are small, so at least one complete
+    line always fits); the caller simply asks again from the returned position.
+    """
     if not path.is_file():
         return [], position
     with path.open("rb") as fh:
         fh.seek(position)
-        chunk = fh.read()
+        chunk = fh.read(max_bytes) if max_bytes else fh.read()
     end = chunk.rfind(b"\n")
     if end == -1:
         return [], position  # only a partial line so far

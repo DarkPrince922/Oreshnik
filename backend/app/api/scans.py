@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import json
 import logging
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, FINAL_STATUSES, Finding, Scan, ScanStatus
 from app.models.user import Role, User
 from app.schemas.scan import (
+    ActivityPage,
     FindingBrief,
     FindingOut,
     LogPage,
@@ -28,8 +30,18 @@ from app.schemas.scan import (
     ScanList,
     ScanOut,
 )
+from app.services.activity import ActivityTailer
 from app.services.artifacts import SEVERITY_ORDER
-from app.services.scan_files import find_run_dir, log_path, read_log_lines, remove_scan_dir, scan_dir, tail_from
+from app.services.scan_files import (
+    activity_path,
+    agents_path,
+    find_run_dir,
+    log_path,
+    read_log_lines,
+    remove_scan_dir,
+    scan_dir,
+    tail_from,
+)
 from app.services.targets import TargetKind, classify_all
 from app.worker.tasks import scan_run
 
@@ -250,6 +262,70 @@ def get_log(
     scan = _get_visible(db, user, scan_id)
     lines, next_offset = read_log_lines(scan_id, offset, limit)
     return LogPage(lines=lines, next_offset=next_offset, finished=scan.status in FINAL_STATUSES)
+
+
+ACTIVITY_PAGE_BYTES = 1_000_000
+
+
+@router.get("/{scan_id}/activity", response_model=ActivityPage)
+def get_activity(
+    scan_id: int,
+    cursor: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ActivityPage:
+    """What the agents did: commands, tool output, messages, and the agent roster.
+
+    Raw agent transcripts are the most sensitive artifact of a scan (they contain every command,
+    including any credentials the instruction handed to the agents), so — unlike findings — they are
+    not shown to the read-only `viewer` role.
+    """
+    scan = _get_visible(db, user, scan_id)
+    if user.role == Role.viewer:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "История действий агентов недоступна для роли viewer")
+    if scan.status in FINAL_STATUSES:
+        _backfill_activity(scan_id)
+    lines, next_cursor = tail_from(activity_path(scan_id), cursor, ACTIVITY_PAGE_BYTES)
+    events = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue  # a corrupt line must not hide the rest
+    return ActivityPage(
+        events=events,
+        next_cursor=next_cursor,
+        agents=read_roster_snapshot(scan_id),
+        finished=scan.status in FINAL_STATUSES,
+    )
+
+
+def _backfill_activity(scan_id: int) -> None:
+    """Build activity.jsonl from Strix's agents.db for a FINISHED scan that has none.
+
+    Covers scans that ran before this feature existed or under an older worker. Only done for finished
+    scans: nothing is writing to the database any more, so reading it from the API process is safe.
+    An exclusive file lock keeps concurrent requests from writing the same events twice.
+    """
+    if activity_path(scan_id).exists() or find_run_dir(scan_dir(scan_id)) is None:
+        return
+    lock_path = scan_dir(scan_id) / ".activity.lock"
+    try:
+        with lock_path.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not activity_path(scan_id).exists():  # another request may have finished it while we waited
+                ActivityTailer(scan_id).poll()
+    except OSError as exc:
+        log.warning("could not backfill activity for scan %s: %s", scan_id, exc)
+
+
+def read_roster_snapshot(scan_id: int) -> list[dict]:
+    path = agents_path(scan_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
 
 
 @router.get("/{scan_id}/findings", response_model=list[FindingBrief])

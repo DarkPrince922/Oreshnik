@@ -269,3 +269,111 @@ def test_failed_scan_shows_why(client, operator, mock_runner):
     sid = create(client, operator, instruction="MOCK:fail").json()["id"]
     body = client.get(f"/api/scans/{sid}", headers=operator).json()
     assert body["status"] == "failed" and body["exit_code"] == 1 and "model connection failed" in body["status_detail"]
+
+
+# ── agent activity ──────────────────────────────────────────────────────
+
+def test_activity_endpoint_returns_the_transcript_and_the_roster(client, operator, mock_runner):
+    sid = create(client, operator).json()["id"]
+    page = client.get(f"/api/scans/{sid}/activity", headers=operator).json()
+    assert page["finished"] is True and len(page["events"]) > 15
+    assert {a["id"] for a in page["agents"]} >= {"agent_root", "agent_recon"}
+    first = page["events"][0]
+    assert first["kind"] == "task" and first["seq"] == 0 and first["agent"] == "agent_root"
+    call = next(e for e in page["events"] if e["kind"] == "tool_call" and e["tool"] == "exec_command")
+    assert call["args"]["cmd"] == call["summary"] or call["summary"] in call["args"]["cmd"]
+    # nothing new after the cursor
+    again = client.get(f"/api/scans/{sid}/activity?cursor={page['next_cursor']}", headers=operator).json()
+    assert again["events"] == [] and again["next_cursor"] == page["next_cursor"]
+
+
+def test_activity_paging_by_cursor_reassembles_the_whole_stream(client, operator, mock_runner, monkeypatch):
+    sid = create(client, operator).json()["id"]
+    whole = client.get(f"/api/scans/{sid}/activity", headers=operator).json()["events"]
+    monkeypatch.setattr(scans_api, "ACTIVITY_PAGE_BYTES", 1500)
+    cursor, collected, pages = 0, [], 0
+    while True:
+        page = client.get(f"/api/scans/{sid}/activity?cursor={cursor}", headers=operator).json()
+        pages += 1
+        if not page["events"]:
+            break
+        collected += page["events"]
+        assert page["next_cursor"] > cursor
+        cursor = page["next_cursor"]
+    assert pages > 3 and collected == whole  # no event lost, duplicated or reordered across page boundaries
+    # The cursor must land exactly on a line boundary: a byte too early would re-read the previous
+    # newline (an empty line the endpoint silently drops), so check the arithmetic itself.
+    from app.services.scan_files import activity_path
+    raw = activity_path(sid).read_bytes()
+    page = client.get(f"/api/scans/{sid}/activity?cursor=0", headers=operator).json()
+    assert raw[: page["next_cursor"]].endswith(b"\n") and page["next_cursor"] <= len(raw)
+
+
+def test_activity_is_not_available_to_viewers_and_follows_scan_visibility(client, admin, operator, viewer, mock_runner):
+    sid = create(client, operator).json()["id"]
+    assert client.get(f"/api/scans/{sid}/activity", headers=viewer).status_code == 403
+    assert client.get(f"/api/scans/{sid}/activity", headers=admin).status_code == 200
+    assert client.get(f"/api/scans/{sid}/activity").status_code == 401
+    other = make_user("op2@example.com")
+    foreign = make_scan(other.id, mock_runner.id).id
+    assert client.get(f"/api/scans/{foreign}/activity", headers=operator).status_code == 404
+    assert client.get("/api/scans/999999/activity", headers=operator).status_code == 404
+
+
+def test_activity_of_a_scan_that_has_not_started(client, operator, mock_runner, queued_only):
+    sid = create(client, operator).json()["id"]
+    assert client.get(f"/api/scans/{sid}/activity", headers=operator).json() == {
+        "events": [], "next_cursor": 0, "agents": [], "finished": False}
+
+
+def test_a_corrupt_activity_line_does_not_hide_the_rest(client, operator, mock_runner):
+    from app.services.scan_files import activity_path
+    sid = create(client, operator).json()["id"]
+    path = activity_path(sid)
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join([lines[0], "{ definitely not json", *lines[1:]]) + "\n")
+    events = client.get(f"/api/scans/{sid}/activity", headers=operator).json()["events"]
+    assert len(events) == len(lines)
+
+
+def test_hostile_target_text_is_returned_verbatim_for_the_client_to_escape(client, operator, mock_runner):
+    evil = "https://example.com/<script>alert(1)</script>"
+    sid = create(client, operator, targets=[evil]).json()["id"]
+    page = client.get(f"/api/scans/{sid}/activity", headers=operator).json()
+    assert any(evil in (e["text"] or "") or evil in (e["summary"] or "") for e in page["events"])
+
+
+def test_activity_of_a_finished_scan_without_a_feed_is_rebuilt_from_strix_data(client, operator, mock_runner):
+    """Scans from before the feature existed (or from an older worker) still have Strix's agents.db."""
+    from app.engine.mock_agents import MockAgents
+    from app.services.scan_files import activity_path, scan_dir
+    me = client.get("/api/auth/me", headers=operator).json()["id"]
+    sid = make_scan(me, mock_runner.id, status=ScanStatus.succeeded).id
+    run = scan_dir(sid) / "strix_runs" / "old-run"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text("{}")
+    agents = MockAgents(run)
+    agents.spawn("agent_root", "Root Agent", None, "scan it")
+    agents.run_command("agent_root", "whoami", "root")
+    agents.close()
+    assert not activity_path(sid).exists()
+    page = client.get(f"/api/scans/{sid}/activity", headers=operator).json()
+    assert [e["kind"] for e in page["events"]] == ["task", "tool_call", "tool_output"]
+    assert page["agents"][0]["name"] == "Root Agent"
+    again = client.get(f"/api/scans/{sid}/activity", headers=operator).json()
+    assert again["events"] == page["events"]  # built once, not duplicated
+
+
+def test_a_running_scan_is_never_backfilled_from_the_api_process(client, operator, mock_runner):
+    from app.engine.mock_agents import MockAgents
+    from app.services.scan_files import activity_path, scan_dir
+    me = client.get("/api/auth/me", headers=operator).json()["id"]
+    sid = make_scan(me, mock_runner.id, status=ScanStatus.running).id
+    run = scan_dir(sid) / "strix_runs" / "live"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text("{}")
+    agents = MockAgents(run)
+    agents.spawn("a", "A", None, "task")
+    agents.close()
+    page = client.get(f"/api/scans/{sid}/activity", headers=operator).json()
+    assert page["events"] == [] and not activity_path(sid).exists()  # the worker's tailer owns running scans

@@ -11,6 +11,7 @@ from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
 from app.models.runner import Runner, RunnerKind, RunnerStatus
 from app.models.scan import Finding, Scan, ScanStatus
+from app.services.activity import ActivityTailer
 from app.services.artifacts import ParsedRun, parse_run_dir
 from app.services.llm import build_strix_env
 from app.services.runner_health import check_runner
@@ -169,6 +170,8 @@ def scan_run(scan_id: int) -> str:
     work_dir = scan_dir(scan_id)
     writer = LogWriter(scan_id)
     writer.add_secrets([snap.env.get("LLM_API_KEY", "")])
+    # Mirrors what the Strix agents do (commands, messages, sub-agents) into activity.jsonl for the panel.
+    tailer = ActivityTailer(scan_id, secrets=[snap.env.get("LLM_API_KEY", "")])
     result = RunResult()
     early_error: str | None = None
     parsed = ParsedRun()
@@ -197,6 +200,7 @@ def scan_run(scan_id: int) -> str:
             timeout_seconds=timeout,
             env=snap.env,
         )
+        tailer.start()
         result = engine.run(spec, writer.write, _CancelProbe(scan_id))
     except _Preflight as exc:
         early_error = str(exc)
@@ -204,6 +208,7 @@ def scan_run(scan_id: int) -> str:
         log.exception("scan %s crashed in the engine", scan_id)
         early_error = f"Внутренняя ошибка движка ({exc.__class__.__name__})"
     finally:
+        tailer.stop()  # final flush, before the scan can be reported as finished
         try:
             parsed = parse_run_dir(find_run_dir(work_dir))
         except Exception:

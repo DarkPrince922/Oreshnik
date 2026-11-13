@@ -1,9 +1,9 @@
 """MockRunner: simulates a Strix run without calling any LLM or starting any container.
 
 It writes the same artifacts, in the same format, as real Strix 1.7.0 (run.json,
-vulnerabilities.json, vulnerabilities/<id>.md, penetration_test_report.md, findings.sarif),
-so the parser, API and UI are exercised exactly as with a real scan. Every finding is
-clearly marked "[MOCK]" so simulated data can never be mistaken for a real result.
+vulnerabilities.json, vulnerabilities/<id>.md, penetration_test_report.md, findings.sarif and the
+multi-agent transcript in .state/), so the parser, API and UI are exercised exactly as with a real
+scan. Every finding is clearly marked "[MOCK]" so simulated data can never be mistaken for a real result.
 
 Behaviour can be steered from the scan's instruction text (handy for UI development):
 
@@ -19,9 +19,11 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.core.config import settings
 from app.engine.base import RunResult, ScanSpec
+from app.engine.mock_agents import MockAgents
 
 _DIRECTIVE_RE = re.compile(r"MOCK:(\w+)", re.IGNORECASE)
 
@@ -39,6 +41,10 @@ _TEMPLATES = [
 
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:32] or "target"
+
+
+def _host(target: str) -> str:
+    return urlparse(target if "://" in target else f"//{target}").hostname or target
 
 
 def _pick_templates(targets: list[str]) -> list[tuple]:
@@ -62,6 +68,7 @@ class MockRunner:
         run_name = f"mock-{_slug(spec.targets[0])}-{hashlib.sha1(str(spec.scan_id).encode()).hexdigest()[:4]}"
         run_dir = spec.work_dir / "strix_runs" / run_name
         run_dir.mkdir(parents=True, exist_ok=True)
+        agents = MockAgents(run_dir)
 
         def pause() -> bool:
             """Sleep one step in small slices; True if cancellation was requested."""
@@ -78,19 +85,6 @@ class MockRunner:
             on_line(line)
             return pause()
 
-        steps = [
-            "[mock] Oreshnik mock runner — no LLM calls, no containers",
-            f"Strix (simulated) mode={spec.scan_mode} targets={len(spec.targets)}",
-            "Preflight: model connection ... ok (simulated)",
-            "Starting sandbox ... ok (simulated)",
-        ]
-        steps += [f"Target: {t}" for t in spec.targets]
-        steps += [f"Agent root: mapping attack surface of {spec.targets[0]}"]
-        if "slow" in directives:
-            steps += [f"Agent recon-{i}: crawling endpoints ({i}/60)" for i in range(1, 61)]
-        else:
-            steps += [f"Agent recon-{i}: crawling endpoints" for i in (1, 2)]
-
         record = {
             "run_id": run_name,
             "run_name": run_name,
@@ -103,26 +97,99 @@ class MockRunner:
         }
         self._write_json(run_dir / "run.json", record)
 
+        try:
+            return self._run(spec, directives, record, run_dir, agents, say, pause, on_line)
+        finally:
+            agents.close()
+
+    def _run(self, spec, directives, record, run_dir, agents: MockAgents, say, pause, on_line) -> RunResult:
+        t0 = spec.targets[0]
+        host = _host(t0)
+
+        def interrupted() -> RunResult:
+            agents.stop_all("stopped")
+            return self._interrupted(run_dir, record, on_line)
+
+        steps = [
+            "[mock] Oreshnik mock runner — no LLM calls, no containers",
+            f"Strix (simulated) mode={spec.scan_mode} targets={len(spec.targets)}",
+            "Preflight: model connection ... ok (simulated)",
+            "Starting sandbox ... ok (simulated)",
+        ]
         for step in steps:
             if say(step):
-                return self._interrupted(run_dir, record, on_line)
+                return interrupted()
+
+        # Root agent: the task it was launched with, a plan, and first reconnaissance.
+        agents.spawn("agent_root", "Root Agent", None,
+                     f"[MOCK] You are the root agent of a simulated penetration test.\nTargets: {', '.join(spec.targets)}")
+        agents.say("agent_root", f"[MOCK] Plan: fingerprint {host}, delegate reconnaissance, then validate each suspicious lead with a specialist agent.")
+        for t in spec.targets:
+            on_line(f"Target: {t}")
+            agents.run_command("agent_root", f"nmap -sV -Pn {_host(t)}",
+                               f"Starting Nmap 7.94 ( https://nmap.org )\nNmap scan report for {_host(t)}\nPORT    STATE SERVICE VERSION\n"
+                               "80/tcp  open  http    nginx 1.18.0\n443/tcp open  ssl/http nginx 1.18.0\n[MOCK] simulated output")
+            if say(f"Agent root: nmap -sV -Pn {_host(t)}"):
+                return interrupted()
+
+        on_line(f"Agent root: mapping attack surface of {t0}")
+        call = agents.call("agent_root", "create_agent", {
+            "name": "Recon Specialist", "task": f"Enumerate endpoints, parameters and technologies of {t0}", "skills": ["reconnaissance"]})
+        agents.spawn("agent_recon", "Recon Specialist", "agent_root", f"[MOCK] Enumerate endpoints, parameters and technologies of {t0}")
+        agents.output("agent_root", call, "Agent 'Recon Specialist' created (id: agent_recon). It runs in parallel.")
+        if pause():
+            return interrupted()
+
+        recon_commands = [
+            (f"curl -sI {t0}", "HTTP/1.1 200 OK\nServer: nginx/1.18.0\nContent-Type: text/html; charset=UTF-8\n[MOCK] simulated output"),
+            (f"ffuf -u {t0.rstrip('/')}/FUZZ -w /usr/share/wordlists/common.txt -mc 200,301", "api    [Status: 301]\nadmin  [Status: 403]\nlogin  [Status: 200]\n[MOCK] simulated output"),
+        ]
+        if "slow" in directives:
+            recon_commands = [(f"curl -s '{t0.rstrip('/')}/page/{i}'", f"<html>… simulated page {i} …</html>") for i in range(1, 61)]
+        for i, (cmd, result) in enumerate(recon_commands, 1):
+            if i == 1:
+                agents.say("agent_recon", "[MOCK] Starting with the cheap, quiet probes.")
+            agents.run_command("agent_recon", cmd, result)
+            label = f"({i}/60)" if "slow" in directives else ""
+            if say(f"Agent recon-{i}: crawling endpoints {label}".rstrip()):
+                return interrupted()
 
         if "fail" in directives:
             on_line("Error: model connection failed (simulated MOCK:fail)")
+            agents.set_status("agent_recon", "failed", "model connection failed (simulated)")
+            agents.set_status("agent_root", "failed", "model connection failed (simulated)")
             record.update(status="failed", end_time=datetime.now(timezone.utc).isoformat())
             self._write_json(run_dir / "run.json", record)
             return RunResult(exit_code=1)
 
+        agents.run_command("agent_recon", "echo 'recon complete'", "recon complete")
+        agents.set_status("agent_recon", "completed")
+        agents.say("agent_root", "[MOCK] Recon finished. Spawning validators for the promising leads.")
+
         findings: list[dict] = []
         if "clean" not in directives:
             for i, (sev, title, endpoint, method, cwe, cvss) in enumerate(_pick_templates(spec.targets), 1):
-                finding = self._finding(i, spec.targets[(i - 1) % len(spec.targets)], sev, title, endpoint, method, cwe, cvss)
+                target = spec.targets[(i - 1) % len(spec.targets)]
+                finding = self._finding(i, target, sev, title, endpoint, method, cwe, cvss)
+                worker = f"agent_validator_{i}"
+                call = agents.call("agent_root", "create_agent", {"name": f"Validator {i}", "task": f"Validate: {title} on {endpoint}"})
+                agents.spawn(worker, f"Validator {i}", "agent_root", f"[MOCK] Validate: {title} on {endpoint}")
+                agents.output("agent_root", call, f"Agent 'Validator {i}' created (id: {worker}).")
+                agents.say(worker, f"[MOCK] Testing {method} {endpoint} for: {title}")
+                agents.run_command(worker, f"curl -i -X {method} '{target.rstrip('/')}{endpoint}'",
+                                   f"HTTP/1.1 200 OK\n\n[MOCK] simulated response demonstrating: {title}")
+                report = agents.call("agent_root", "create_vulnerability_report", {"title": finding["title"], "severity": sev, "target": target})
                 findings.append(finding)
                 self._write_artifacts(run_dir, record, findings, final=False)
+                agents.output("agent_root", report, f"Report {finding['id']} recorded")
+                agents.set_status(worker, "completed")
                 if say(f"Finding {finding['id']} [{sev.upper()}] {finding['title']}"):
-                    return self._interrupted(run_dir, record, on_line)
+                    return interrupted()
 
-        on_line(f"Writing report to strix_runs/{run_name}/")
+        on_line(f"Writing report to strix_runs/{run_dir.name}/")
+        agents.say("agent_root", f"[MOCK] All validators finished. {len(findings)} finding(s) recorded; writing the final report.")
+        agents.call("agent_root", "finish", {"summary": f"{len(findings)} simulated finding(s)"})
+        agents.stop_all("completed")
         record.update(status="completed", end_time=datetime.now(timezone.utc).isoformat())
         self._write_artifacts(run_dir, record, findings, final=True)
         on_line(f"Scan completed. {len(findings)} finding(s).")

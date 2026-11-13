@@ -258,3 +258,44 @@ proof the target is safe. Runs that ended with an unexpected Strix status show a
 - Browser end-to-end (Playwright, 55 checks) was run against the real stack (uvicorn + prefork Celery worker + Vite): the full
   create → live → findings → export → report flow, socket killed twice mid-scan, cancel, failed/clean scans, hostile targets,
   operator isolation, viewer restrictions, live list refresh, mobile overflow. The script is not part of the repo.
+
+## 12. Agent activity — "what are the agents doing?"
+
+**Why the log looks empty.** In headless mode (`-n`) Strix prints only its banner and the findings to stdout. The agents' actual
+work — shell commands (`exec_command`), their output, reasoning, spawning of sub-agents (`create_agent`) — never reaches stdout. It is
+persisted in the run directory instead (verified against strix-agent 1.7.0, including a database written by its real session class):
+
+| File | Content |
+|------|---------|
+| `<run>/.state/agents.json` | `{statuses, names, parent_of, errors}` — the agent tree. Statuses: `running`, `waiting`, `budget_paused`, `completed`, `stopped`, `crashed`, `failed` |
+| `<run>/.state/agents.db` | SQLite (WAL), `agent_messages(id, session_id = agent id, message_data, created_at)`; `message_data` is an Agents-SDK item: message (`role`), `function_call` (`name`, JSON `arguments`, `call_id`), `function_call_output`, `reasoning` |
+
+**Pipeline.** The worker's `ActivityTailer` (a thread next to the Strix process, 1 s period) reads new `agent_messages` rows through a
+short-lived **read-only** SQLite connection — verified to work while Strix is writing — and appends normalised events to
+`scan-<id>/activity.jsonl`; the roster goes to `scan-<id>/agents.json` (atomic replace). The API never touches Strix's database
+(except the backfill below), so the panel is independent of Strix's internal format and of SQLite locking. `stop()` does a final flush
+**before** the scan is reported finished, so the last steps are never lost.
+
+- Event kinds: `task` (an agent's first user turn = the task it was launched with), `message`, `agent_message` (between agents),
+  `system` (budget notices), `tool_call` (+ one-line `summary`, e.g. the shell command), `tool_output` (paired by `call_id`).
+  System noise (inherited-context dumps, "you ended a turn without a tool call" nudges, reasoning items) is dropped.
+- **Bounded:** text 6 000 chars (head+tail kept), tool args 3 000 per string, images never inlined, 20 000 events / 50 MB per scan
+  (a final `system` event says when recording stopped). ANSI/control characters are stripped. The injected LLM key is redacted.
+- `GET /api/scans/{id}/activity?cursor=<byte offset>` → `{events, next_cursor, agents, finished}`; the cursor is a byte offset, so each
+  poll reads only new data and page boundaries cannot lose or repeat events.
+- **Access: admin and the owning operator only — not viewers.** Raw transcripts contain every command, including credentials the
+  instruction handed to the agents; findings are visible to viewers, transcripts are not (API 403, tab hidden).
+- **Backfill:** a *finished* scan that has no `activity.jsonl` (run before this feature, or by an older worker) is rebuilt from
+  `agents.db` on first request, under a file lock. Running scans are never read by the API process.
+
+**UI (`Агенты` tab, the default for a running scan).** Agent tree (who spawned whom, status, command count; click to filter) and a live
+feed: shell commands with their output, the agents' messages, "Запущен агент X — задача …", vulnerability reports. Filters
+Всё/Команды/Сообщения, auto-follow with a "↓ к новым шагам" hint, windowed rendering. All text is rendered as plain text — commands and
+output quote the scanned target and may be hostile (verified in a browser with `<img onerror>` in targets).
+
+**MockRunner** writes the same `.state/agents.json` + `agents.db` (the DDL is taken from a database produced by the real library):
+root agent → nmap → spawns "Recon Specialist" → spawns a "Validator N" per finding → vulnerability reports → finish. `MOCK:slow` makes the
+recon phase 60 commands long, `MOCK:fail`/cancel leave agents `failed`/`stopped`.
+
+**Not verified:** a real multi-agent scan. Real Strix uses more tools than the mock (browser, proxy/Caido, notes, coverage, …); they are
+shown generically (tool name + the first meaningful argument) and may need nicer rendering once seen on real data.

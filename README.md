@@ -27,7 +27,7 @@ FastAPI · Postgres · Celery + Redis (queue + beat scheduler) · React/Vite/TS/
 
 ## Status
 
-Early development — phases 0–3 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI). Scheduling and SSH runners are next. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
+Early development — phases 0–3 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI, live agent activity). Scheduling and SSH runners are next. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
 design and the phased build plan.
 
 ## Quick start (dev)

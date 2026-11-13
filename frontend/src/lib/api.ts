@@ -266,3 +266,38 @@ export async function downloadExport(id: number, fmt: ExportFormat): Promise<voi
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
+
+// ── Agent activity ───────────────────────────────────────────────────────
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  status: string; // running | waiting | budget_paused | completed | stopped | crashed | failed
+  error: string | null;
+}
+
+/** One step of the agents' work. All text quotes the scanned target — untrusted, render as plain text. */
+export interface ActivityEvent {
+  seq: number;
+  ts: string;
+  agent: string;
+  kind: "task" | "message" | "agent_message" | "system" | "tool_call" | "tool_output";
+  role: string | null;
+  text: string | null;
+  tool: string | null;
+  call_id: string | null;
+  args: Record<string, unknown> | null;
+  summary: string | null;
+  truncated: boolean;
+}
+
+export interface ActivityPage {
+  events: ActivityEvent[];
+  next_cursor: number;
+  agents: AgentInfo[];
+  finished: boolean;
+}
+
+export const getActivity = async (id: number, cursor: number) =>
+  (await api.get<ActivityPage>(`/api/scans/${id}/activity`, { params: { cursor } })).data;

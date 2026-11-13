@@ -39,6 +39,26 @@ def write_run(status, findings=(), cost=0.42, report=True):
         (run_dir / "penetration_test_report.md").write_text("# Security Penetration Test Report\n\nfake\n")
 
 
+def write_agents():
+    import sqlite3
+    state = run_dir / ".state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "agents.json").write_text(json.dumps({
+        "statuses": {"root": "completed", "child": "completed"}, "names": {"root": "Root", "child": "Child"},
+        "parent_of": {"root": None, "child": "root"}, "errors": {}}))
+    conn = sqlite3.connect(state / "agents.db", isolation_level=None)
+    conn.executescript("""CREATE TABLE IF NOT EXISTS agent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+        message_data TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);""")
+    key = os.environ.get("LLM_API_KEY")
+    rows = [("root", {"role": "user", "content": "scan the target"}),
+            ("root", {"type": "function_call", "call_id": "c1", "name": "exec_command", "arguments": json.dumps({"cmd": "echo hi"})}),
+            ("root", {"type": "function_call_output", "call_id": "c1", "output": f"hi (key={key})"}),
+            ("child", {"role": "assistant", "content": [{"type": "output_text", "text": "child works"}]})]
+    for agent, item in rows:
+        conn.execute("INSERT INTO agent_messages (session_id, message_data) VALUES (?, ?)", (agent, json.dumps(item)))
+    conn.close()
+
+
 FINDINGS = [
     {"id": "vuln-0001", "title": "Weird severity", "severity": "catastrophic", "timestamp": now(), "target": "https://example.com"},
     {"id": "vuln-0002", "title": "Open redirect", "severity": "medium", "timestamp": now(), "target": "https://example.com", "cvss": 4.3},
@@ -49,6 +69,7 @@ print("Strix fake 1.7.0 starting", flush=True)
 
 if mode == "ok_clean":
     write_run("completed")
+    write_agents()
     print("done: nothing found", flush=True)
     sys.exit(0)
 if mode == "ok_findings":
@@ -66,6 +87,7 @@ if mode == "no_artifacts":
 if mode == "secret_echo":
     print(f"debug LLM_API_KEY={os.environ.get('LLM_API_KEY')}", flush=True)
     write_run("completed")
+    write_agents()
     sys.exit(0)
 if mode == "ansi":
     print("\x1b[31mred\x1b[0m text", flush=True)

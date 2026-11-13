@@ -81,3 +81,34 @@ class LogPage(BaseModel):
 
 class ReportOut(BaseModel):
     markdown: str | None
+
+
+class AgentInfo(BaseModel):
+    id: str
+    name: str
+    parent_id: str | None
+    status: str  # running | waiting | budget_paused | completed | stopped | crashed | failed
+    error: str | None = None
+
+
+class ActivityEvent(BaseModel):
+    """One step of the agents' work. All text is untrusted (it quotes the scanned target)."""
+
+    seq: int
+    ts: str
+    agent: str
+    kind: str  # task | message | agent_message | system | tool_call | tool_output
+    role: str | None = None
+    text: str | None = None
+    tool: str | None = None
+    call_id: str | None = None
+    args: dict[str, Any] | None = None
+    summary: str | None = None
+    truncated: bool = False
+
+
+class ActivityPage(BaseModel):
+    events: list[ActivityEvent]
+    next_cursor: int  # byte offset to pass as `cursor` on the next call
+    agents: list[AgentInfo]
+    finished: bool

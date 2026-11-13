@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.core.db import SessionLocal
 from app.models import Finding, RunnerKind, ScanStatus
-from app.services.scan_files import read_log_lines
+from app.services.scan_files import activity_path, agents_path, read_log_lines
 from app.worker import tasks
 from app.worker.tasks import reap_stale_scans, scan_run
 from tests.conftest import load_scan, make_profile, make_runner, make_scan, make_user
@@ -222,3 +222,88 @@ def test_reaper_fails_scans_whose_worker_vanished(monkeypatch):
     assert load_scan(done.id).status == ScanStatus.succeeded
     assert sorted(cleaned) == sorted(f"oreshnik-scan-{i.id}" for i in (stale, stale_cancelling, never_beat))
     assert reap_stale_scans() == 0
+
+
+# ── agent activity ──────────────────────────────────────────────────────
+
+def activity_events(scan_id):
+    return [json.loads(l) for l in activity_path(scan_id).read_text().splitlines()]
+
+
+def roster(scan_id):
+    return {a["id"]: a for a in json.loads(agents_path(scan_id).read_text())}
+
+
+def test_a_mock_scan_records_a_multi_agent_transcript():
+    user, runner = make_user("a@example.com"), make_runner()
+    scan = make_scan(user.id, runner.id, targets=["https://shop.example.com"])
+    scan_run(scan.id)
+    evs = activity_events(scan.id)
+    assert [e["seq"] for e in evs] == list(range(len(evs)))
+    kinds = {e["kind"] for e in evs}
+    assert {"task", "message", "tool_call", "tool_output"} <= kinds
+    agents = roster(scan.id)
+    assert agents["agent_root"]["parent_id"] is None and agents["agent_recon"]["parent_id"] == "agent_root"
+    assert sum(1 for a in agents.values() if a["name"].startswith("Validator")) >= 3
+    assert {a["status"] for a in agents.values()} == {"completed"}  # nothing is left "running" after a finished scan
+    commands = [e["summary"] for e in evs if e["kind"] == "tool_call" and e["tool"] == "exec_command"]
+    assert any(c.startswith("nmap") for c in commands) and any("curl" in c for c in commands)
+    spawn = next(e for e in evs if e["tool"] == "create_agent" and e["kind"] == "tool_call")
+    assert "Recon Specialist" in spawn["summary"]
+    outputs = [e for e in evs if e["kind"] == "tool_output"]
+    assert all(o["tool"] for o in outputs)  # every output is paired with its call
+
+
+def test_clean_and_failed_mock_scans_leave_honest_agent_states():
+    user, runner = make_user("a@example.com"), make_runner()
+    failed = make_scan(user.id, runner.id, instruction="MOCK:fail")
+    scan_run(failed.id)
+    states = {a["status"] for a in roster(failed.id).values()}
+    assert states == {"failed"} and "model connection failed" in next(iter(roster(failed.id).values()))["error"]
+    clean = make_scan(user.id, runner.id, instruction="MOCK:clean")
+    scan_run(clean.id)
+    assert not any(e["tool"] == "create_vulnerability_report" for e in activity_events(clean.id))
+
+
+def test_cancelling_marks_running_agents_as_stopped(monkeypatch):
+    monkeypatch.setattr(tasks._CancelProbe, "INTERVAL", 0.05)
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "mock_delay_seconds", 0.05)
+    user, runner = make_user("a@example.com"), make_runner()
+    scan = make_scan(user.id, runner.id, instruction="MOCK:slow")
+    worker = threading.Thread(target=lambda: scan_run(scan.id))
+    worker.start()
+    for _ in range(100):
+        if load_scan(scan.id).status == ScanStatus.running and activity_path(scan.id).exists() and len(activity_events(scan.id)) > 8:
+            break
+        time.sleep(0.05)
+    seen_live = len(activity_events(scan.id))
+    assert seen_live > 8, "events must appear while the scan is still running, not only at the end"
+    with SessionLocal() as db:
+        from sqlalchemy import update
+        from app.models import Scan
+        db.execute(update(Scan).where(Scan.id == scan.id).values(status=ScanStatus.cancelling))
+        db.commit()
+    worker.join(timeout=10)
+    assert load_scan(scan.id).status == ScanStatus.cancelled
+    assert {a["status"] for a in roster(scan.id).values()} == {"stopped"}
+    assert len(activity_events(scan.id)) >= seen_live
+
+
+def test_local_runner_activity_is_captured_and_the_api_key_is_redacted_in_it(local_strix):
+    user, runner = make_user("a@example.com"), make_runner(RunnerKind.local)
+    profile = make_profile(user.id, key="sk-live-key-9999999999")
+    scan = make_scan(user.id, runner.id, profile_id=profile.id, instruction="secret_echo")
+    scan_run(scan.id)
+    raw = activity_path(scan.id).read_text()
+    assert "sk-live-key" not in raw and "hi (key=***)" in raw
+    evs = activity_events(scan.id)
+    assert [e["kind"] for e in evs] == ["task", "tool_call", "tool_output", "message"]
+    assert roster(scan.id)["child"]["parent_id"] == "root"
+
+
+def test_a_scan_without_agent_data_just_has_no_activity(local_strix):
+    user, runner = make_user("a@example.com"), make_runner(RunnerKind.local)
+    scan = make_scan(user.id, runner.id, profile_id=make_profile(user.id).id, instruction="fail")
+    assert scan_run(scan.id) == "failed"
+    assert not activity_path(scan.id).exists()
