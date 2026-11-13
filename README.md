@@ -27,7 +27,7 @@ FastAPI · Postgres · Celery + Redis (queue + beat scheduler) · React/Vite/TS/
 
 ## Status
 
-Early development. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
+Early development — phases 0–1 done (skeleton, auth/roles, per-user LLM profiles, runners). Scans arrive in phase 2. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
 design and the phased build plan.
 
 ## Quick start (dev)
@@ -36,8 +36,17 @@ design and the phased build plan.
 cp .env.example .env         # then edit secrets
 docker compose up --build
 # frontend: http://localhost:5173
-# api:      http://localhost:8000/api/health
+# api:      http://localhost:8000/api/health  (docs: /docs)
 ```
+
+**First login.** An admin is created on first start (`ADMIN_EMAIL`, default `admin@oreshnik.dev`). If `ADMIN_PASSWORD`
+is empty a random password is printed once:
+
+```bash
+docker compose logs backend | grep "initial admin"
+```
+
+Before using it for real, replace the `CHANGE_ME` secrets in `.env` (outside `ORESHNIK_ENV=dev` the API refuses to start with them).
 
 The default runner is `mock` — it simulates Strix runs without calling any LLM, so you
 can build and test the whole pipeline without burning tokens. Switch a runner to

@@ -1,18 +1,37 @@
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import Logo from "../components/Logo";
 import SystemStatus from "../components/SystemStatus";
+import { Button, ErrorNote } from "../components/ui";
+import { errorMessage } from "../lib/api";
+import { useAuth } from "../lib/auth";
 
 export default function Login() {
+  const { user, login } = useAuth();
+  const navigate = useNavigate();
+  const from = (useLocation().state as { from?: string } | null)?.from ?? "/";
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const onSubmit = (e: React.FormEvent) => {
+  if (user) return <Navigate to={from} replace />;
+
+  const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    // Phase 0: auth is not wired yet — that lands in Phase 1.
-    setNote("Авторизация подключается в фазе 1. Каркас жив.");
+    setError(null);
+    setBusy(true);
+    try {
+      await login(email, password);
+      navigate(from, { replace: true });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -33,42 +52,35 @@ export default function Login() {
           >
             Oreshnik
           </motion.h1>
-          <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">
-            Security testing console
-          </p>
+          <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">Security testing console</p>
         </div>
 
         <form onSubmit={onSubmit} className="mt-8 space-y-3">
           <input
-            type="email"
+            type="text"
+            inputMode="email"
             className="field"
             placeholder="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="username"
+            autoFocus
+            required
           />
           <input
             type="password"
             className="field"
-            placeholder="password"
+            placeholder="пароль"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoComplete="current-password"
+            required
           />
-          <button type="submit" className="btn-primary">
-            <span className="relative z-10">Войти</span>
-          </button>
+          <ErrorNote message={error} />
+          <Button type="submit" variant="primary" loading={busy} className="w-full py-3">
+            Войти
+          </Button>
         </form>
-
-        {note && (
-          <motion.p
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mt-4 text-center text-xs text-accent-soft"
-          >
-            {note}
-          </motion.p>
-        )}
 
         <div className="mt-8 border-t border-white/5 pt-5">
           <SystemStatus />

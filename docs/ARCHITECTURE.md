@@ -113,8 +113,9 @@ class Runner(Protocol):
 
 ## 7. Phased build plan
 
-- **Phase 0 — Skeleton** *(current)*: repo layout, docker-compose (postgres/redis/backend/worker/beat/frontend), config, Alembic, health endpoints, branded frontend shell + login page.
-- **Phase 1 — Domain + auth**: users/roles, JWT, per-user LLM profiles (encrypted), runners CRUD, settings.
+- **Phase 0 — Skeleton** *(done)*: repo layout, docker-compose (postgres/redis/backend/worker/beat/frontend), config, Alembic, health endpoints, branded frontend shell + login page.
+- **Phase 1 — Domain + auth** *(done)*: users/roles, JWT login, per-user LLM profiles (encrypted), runners CRUD with
+  worker-side health checks, first-run bootstrap, login throttling, panel UI for all of it. See §9.
 - **Phase 2 — Scan engine**: Runner abstraction (Mock + Local), Strix command builder, Celery task, stdout → WS, artifact parser → DB.
 - **Phase 3 — UI**: dashboard, new scan, scan detail (live log + findings + report), severity views, SARIF/JSON download.
 - **Phase 4 — Scheduling + cost**: beat schedules, cost from `run.json`.
@@ -124,3 +125,40 @@ class Runner(Protocol):
 
 Strict **black**, but "alive": dark glass panels, smooth transitions, micro-interactions
 (Framer Motion), animated background, live status indicators. Brand: Oreshnik.
+
+## 9. Phase 1 — what exists
+
+### API
+| Area | Endpoints | Access |
+|------|-----------|--------|
+| Auth | `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/change-password` | login: public; others: any user |
+| Users | `GET/POST /api/users`, `PATCH/DELETE /api/users/{id}` | admin |
+| LLM profiles | `GET/POST /api/llm-profiles`, `PATCH/DELETE /api/llm-profiles/{id}`, `GET /api/llm-profiles/presets` | admin, operator — **own profiles only** |
+| Runners | `GET /api/runners` | any user (SSH details admin-only) |
+| | `POST /api/runners`, `PATCH/DELETE /api/runners/{id}`, `POST /api/runners/{id}/check` | admin |
+
+### Behaviours worth knowing
+- **First run:** if the `users` table is empty an admin is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD`. With an empty
+  `ADMIN_PASSWORD` a random one is logged **once** (`docker compose logs backend | grep "initial admin"`). A `mock` runner is
+  created too. Both steps are idempotent.
+- **Tokens** are JWTs, but the user is re-read from the DB on every request, so deactivating an account or changing its role
+  takes effect immediately.
+- **Login throttling:** 10 failed attempts per email+IP per 15 min (Redis; fails open if Redis is down). Unknown emails and wrong
+  passwords return the same response and take the same time.
+- **Secrets:** LLM API keys and SSH keys are Fernet-encrypted; responses only carry a hint (`…1234`) / `has_ssh_key`. A profile owned
+  by someone else is a 404 — admins can't read other users' keys either.
+- **LLM → Strix mapping** (`app/services/llm.py::build_strix_env`): `claude→anthropic/<model>`, `openai→openai/<model>`,
+  `grok→xai/<model>`, `custom→openai/<model>` + `LLM_API_BASE` (custom requires a base URL). The Phase 2 scan engine calls this
+  right before launching Strix.
+- **Runner checks run on the Celery worker**, not in the API, because the worker is where scans run (`local` = strix CLI +
+  docker.sock present). If the worker doesn't answer within 15 s the runner is marked offline. `ssh` runners are stored but can't be
+  checked until Phase 5.
+- **Startup safety:** outside `ORESHNIK_ENV=dev` the API refuses to start with placeholder/weak `SECRET_ENCRYPTION_KEY` / `JWT_SECRET`.
+
+### Tests
+`backend/tests` — 37 tests against a real Postgres (schema built by the real Alembic migrations). Run:
+
+```bash
+cd backend && pip install -r requirements.txt -r requirements-dev.txt
+POSTGRES_HOST=localhost POSTGRES_PORT=5432 pytest      # needs a Postgres user that can CREATE DATABASE
+```
