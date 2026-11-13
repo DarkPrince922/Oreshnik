@@ -2,9 +2,11 @@ import { motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { Card, PageHeader, StatusDot, rise, stagger } from "../components/ui";
-import { getHealth, listProfiles, listRunners, type Health, type LLMProfile, type Runner } from "../lib/api";
+import { SeverityCounts, StatusBadge, isActive } from "../components/scan";
+import { Button, Card, PageHeader, StatusDot, relativeTime, rise, stagger } from "../components/ui";
+import { getHealth, listProfiles, listRunners, listScans, type Health, type LLMProfile, type Runner, type ScanList } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { targetsLabel } from "../lib/format";
 
 function Stat({ label, value, sub, to }: { label: string; value: string; sub?: string; to?: string }) {
   const body = (
@@ -14,11 +16,7 @@ function Stat({ label, value, sub, to }: { label: string; value: string; sub?: s
       {sub && <div className="mt-1 text-xs text-slate-500">{sub}</div>}
     </Card>
   );
-  return (
-    <motion.div variants={rise}>
-      {to ? <Link to={to}>{body}</Link> : body}
-    </motion.div>
-  );
+  return <motion.div variants={rise}>{to ? <Link to={to}>{body}</Link> : body}</motion.div>;
 }
 
 export default function Dashboard() {
@@ -28,11 +26,13 @@ export default function Dashboard() {
   const [health, setHealth] = useState<Health | null | undefined>(undefined);
   const [profiles, setProfiles] = useState<LLMProfile[] | null>(null);
   const [runners, setRunners] = useState<Runner[] | null>(null);
+  const [scans, setScans] = useState<ScanList | null>(null);
 
   useEffect(() => {
     let alive = true;
     getHealth().then((h) => alive && setHealth(h)).catch(() => alive && setHealth(null));
     listRunners().then((r) => alive && setRunners(r)).catch(() => undefined);
+    listScans({ limit: 20 }).then((s) => alive && setScans(s)).catch(() => undefined);
     if (canProfiles) listProfiles().then((p) => alive && setProfiles(p)).catch(() => undefined);
     return () => {
       alive = false;
@@ -40,6 +40,8 @@ export default function Dashboard() {
   }, [canProfiles]);
 
   const online = runners?.filter((r) => r.status === "online").length ?? 0;
+  const activeScans = scans?.items.filter((s) => isActive(s.status)).length ?? 0;
+  const recentFindings = scans?.items.reduce((n, s) => n + s.findings_total, 0) ?? 0;
   const services = [
     { label: "API", ok: health === undefined ? null : health !== null },
     { label: "База данных", ok: health ? health.services.database : health === null ? false : null },
@@ -48,43 +50,65 @@ export default function Dashboard() {
 
   return (
     <>
-      <PageHeader title={`Добро пожаловать${user ? `, ${user.email.split("@")[0]}` : ""}`} subtitle="Сводка по панели Oreshnik" />
+      <PageHeader
+        title={`Добро пожаловать${user ? `, ${user.email.split("@")[0]}` : ""}`}
+        subtitle="Сводка по панели Oreshnik"
+        action={hasRole("admin", "operator") ? <Link to="/scans/new"><Button variant="primary">+ Новый скан</Button></Link> : undefined}
+      />
 
-      <motion.div variants={stagger} initial="hidden" animate="show" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <motion.div variants={stagger} initial="hidden" animate="show" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="Активные сканы" value={scans ? String(activeScans) : "—"} sub="в очереди и выполняются" to="/scans" />
+        <Stat label="Находки" value={scans ? String(recentFindings) : "—"} sub={scans ? `в последних ${scans.items.length} сканах` : undefined} to="/scans" />
         <Stat label="Раннеры онлайн" value={runners ? `${online} / ${runners.length}` : "—"} sub="готовы принимать сканы" to="/runners" />
-        {canProfiles && (
+        {canProfiles ? (
           <Stat label="LLM-профили" value={profiles ? String(profiles.length) : "—"} sub="ваши ключи и модели" to="/llm" />
+        ) : (
+          <motion.div variants={rise}>
+            <Card className="h-full p-5">
+              <div className="text-xs uppercase tracking-wider text-slate-500">Сервисы</div>
+              <ul className="mt-4 space-y-2.5">
+                {services.map((s) => (
+                  <li key={s.label} className="flex items-center justify-between text-sm text-slate-300">
+                    {s.label}
+                    <StatusDot tone={s.ok === null ? "muted" : s.ok ? "ok" : "bad"} />
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          </motion.div>
         )}
-        <motion.div variants={rise}>
-          <Card className="h-full p-5">
-            <div className="text-xs uppercase tracking-wider text-slate-500">Сервисы</div>
-            <ul className="mt-4 space-y-2.5">
-              {services.map((s) => (
-                <li key={s.label} className="flex items-center justify-between text-sm text-slate-300">
-                  {s.label}
-                  <StatusDot tone={s.ok === null ? "muted" : s.ok ? "ok" : "bad"} />
-                </li>
-              ))}
-            </ul>
-          </Card>
-        </motion.div>
       </motion.div>
 
-      <motion.div variants={rise} initial="hidden" animate="show" transition={{ delay: 0.3 }}>
-        <Card className="mt-6 p-6">
-          <div className="flex items-center gap-4">
-            <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 14, repeat: Infinity, ease: "linear" }}
-              className="h-9 w-9 shrink-0 rounded-full border border-dashed border-accent/50"
-            />
-            <div>
-              <h3 className="text-sm font-semibold text-white">Сканы — следующий этап</h3>
-              <p className="mt-0.5 text-xs leading-relaxed text-slate-500">
-                Запуск Strix, live-лог и отчёты появятся в фазах 2–3. Пока можно настроить профили LLM и раннеры.
-              </p>
-            </div>
+      <motion.div variants={rise} initial="hidden" animate="show" transition={{ delay: 0.25 }} className="mt-6">
+        <Card className="overflow-hidden">
+          <div className="flex items-center justify-between border-b border-white/5 px-5 py-4">
+            <h2 className="text-sm font-semibold text-white">Последние сканы</h2>
+            <Link to="/scans" className="text-xs text-slate-500 transition hover:text-white">Все →</Link>
           </div>
+          {scans === null ? (
+            <p className="px-5 py-8 text-center text-sm text-slate-600">Загрузка…</p>
+          ) : scans.items.length === 0 ? (
+            <p className="px-5 py-8 text-center text-sm text-slate-500">Сканов пока нет.</p>
+          ) : (
+            <ul className="divide-y divide-white/5">
+              {scans.items.slice(0, 5).map((s) => {
+                const { first, more } = targetsLabel(s.targets);
+                return (
+                  <li key={s.id}>
+                    <Link to={`/scans/${s.id}`} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5 transition-colors hover:bg-white/[0.04]">
+                      <span className="font-mono text-xs text-slate-600">#{s.id}</span>
+                      <span className="min-w-0 flex-1 basis-40 truncate text-sm text-slate-200">
+                        {first}{more > 0 && <span className="ml-2 text-xs text-slate-500">+{more}</span>}
+                      </span>
+                      <SeverityCounts counts={s.severity_counts} />
+                      <StatusBadge status={s.status} />
+                      <span className="w-20 text-right text-xs text-slate-600">{relativeTime(s.started_at ?? s.created_at)}</span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </Card>
       </motion.div>
     </>

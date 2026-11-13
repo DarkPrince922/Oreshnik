@@ -16,6 +16,14 @@ export default {
           soft: "#9d86ff",
           glow: "#5b3df0",
         },
+        sev: {
+          critical: "#ff3b5c",
+          high: "#ff8a3d",
+          medium: "#ffc233",
+          low: "#5ba4ff",
+          info: "#8b93a7",
+          unknown: "#6b7280",
+        },
         signal: {
           ok: "#3ddc97",
           warn: "#ffb020",

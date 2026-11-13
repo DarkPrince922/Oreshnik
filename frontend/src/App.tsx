@@ -8,7 +8,10 @@ import Account from "./pages/Account";
 import Dashboard from "./pages/Dashboard";
 import LLMProfiles from "./pages/LLMProfiles";
 import Login from "./pages/Login";
+import NewScan from "./pages/NewScan";
 import Runners from "./pages/Runners";
+import ScanDetail from "./pages/ScanDetail";
+import Scans from "./pages/Scans";
 import Users from "./pages/Users";
 
 export default function App() {
@@ -26,6 +29,16 @@ export default function App() {
             }
           >
             <Route index element={<Dashboard />} />
+            <Route path="scans" element={<Scans />} />
+            <Route
+              path="scans/new"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <NewScan />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="scans/:id" element={<ScanDetail />} />
             <Route
               path="llm"
               element={

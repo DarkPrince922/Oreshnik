@@ -26,6 +26,13 @@ let onUnauthorized: (() => void) | null = null;
 export function setUnauthorizedHandler(fn: (() => void) | null): void {
   onUnauthorized = fn;
 }
+/** For non-axios transports (the log WebSocket) that learn the session is invalid. */
+export function notifyUnauthorized(): void {
+  onUnauthorized?.();
+}
+export function apiWsUrl(path: string): string {
+  return baseURL.replace(/^http/, "ws") + path;
+}
 
 api.interceptors.request.use((config) => {
   const token = getToken();
@@ -115,6 +122,62 @@ export interface Health {
   services: { database: boolean; redis: boolean };
 }
 
+export type ScanStatus = "queued" | "running" | "cancelling" | "succeeded" | "vulns_found" | "failed" | "cancelled";
+export type ScanMode = "quick" | "standard" | "deep";
+export type Severity = "critical" | "high" | "medium" | "low" | "info" | "unknown";
+
+export interface Scan {
+  id: number;
+  user_id: number;
+  owner_email: string;
+  runner_id: number | null;
+  runner_name: string | null;
+  llm_profile_id: number | null;
+  llm_profile_name: string | null;
+  targets: string[];
+  scan_mode: ScanMode;
+  instruction: string | null;
+  max_budget: number | null;
+  status: ScanStatus;
+  status_detail: string | null;
+  exit_code: number | null;
+  run_name: string | null;
+  run_status: string | null;
+  cost: number | null;
+  total_tokens: number | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  severity_counts: Partial<Record<Severity, number>>;
+  findings_total: number;
+}
+
+export interface ScanList {
+  items: Scan[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface Finding {
+  id: number;
+  vuln_id: string;
+  title: string;
+  severity: Severity;
+  target: string | null;
+  endpoint: string | null;
+  method: string | null;
+  cve: string | null;
+  cwe: string | null;
+  cvss: number | null;
+  found_at: string | null;
+}
+
+/** `data` is the untouched Strix record. Its text comes from the scanned target: treat as untrusted. */
+export interface FindingDetail extends Finding {
+  data: Record<string, unknown>;
+}
+
 // ── Calls ────────────────────────────────────────────────────────────────
 
 export const getHealth = async () => (await api.get<Health>("/api/health")).data;
@@ -162,3 +225,44 @@ export const updateRunner = async (id: number, body: RunnerInput) =>
 export const deleteRunner = (id: number) => api.delete(`/api/runners/${id}`);
 export const checkRunner = async (id: number) =>
   (await api.post<Runner>(`/api/runners/${id}/check`, null, { timeout: 30000 })).data;
+
+// ── Scans ────────────────────────────────────────────────────────────────
+
+export interface ScanCreateInput {
+  targets: string[];
+  scan_mode: ScanMode;
+  instruction: string | null;
+  max_budget: number | null;
+  runner_id: number | null;
+  llm_profile_id: number | null;
+}
+export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
+export const listScans = async (params: { status?: ScanStatus; limit?: number; offset?: number } = {}) =>
+  (await api.get<ScanList>("/api/scans", { params })).data;
+export const getScan = async (id: number) => (await api.get<Scan>(`/api/scans/${id}`)).data;
+export const cancelScan = async (id: number) => (await api.post<Scan>(`/api/scans/${id}/cancel`)).data;
+export const deleteScan = (id: number) => api.delete(`/api/scans/${id}`);
+export const listFindings = async (id: number) => (await api.get<Finding[]>(`/api/scans/${id}/findings`)).data;
+export const getFinding = async (scanId: number, findingId: number) =>
+  (await api.get<FindingDetail>(`/api/scans/${scanId}/findings/${findingId}`)).data;
+export const getReport = async (id: number) =>
+  (await api.get<{ markdown: string | null }>(`/api/scans/${id}/report`)).data.markdown;
+
+export type ExportFormat = "json" | "sarif" | "md";
+const EXPORT_NAMES: Record<ExportFormat, string> = {
+  json: "vulnerabilities.json",
+  sarif: "findings.sarif",
+  md: "penetration_test_report.md",
+};
+/** Authenticated download (a plain <a href> cannot send the bearer token). */
+export async function downloadExport(id: number, fmt: ExportFormat): Promise<void> {
+  const res = await api.get<Blob>(`/api/scans/${id}/export/${fmt}`, { responseType: "blob" });
+  const url = URL.createObjectURL(res.data);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `oreshnik-scan-${id}-${EXPORT_NAMES[fmt]}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}

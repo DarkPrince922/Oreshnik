@@ -118,7 +118,7 @@ class Runner(Protocol):
 - **Phase 1 — Domain + auth** *(done)*: users/roles, JWT login, per-user LLM profiles (encrypted), runners CRUD with
   worker-side health checks, first-run bootstrap, login throttling, panel UI for all of it. See §9.
 - **Phase 2 — Scan engine** *(done)*: Runner abstraction (Mock + Local), Strix command builder, Celery task, live log over WebSocket, artifact parser → DB, cancel, reaper. See §10.
-- **Phase 3 — UI**: dashboard, new scan, scan detail (live log + findings + report), severity views, SARIF/JSON download.
+- **Phase 3 — UI** *(done)*: dashboard, scan list, new scan, scan detail (live log + findings + report), severity views, SARIF/JSON download. See §11.
 - **Phase 4 — Scheduling + cost**: beat schedules, cost from `run.json`.
 - **Phase 5 — SSH runners**: remote provisioning + execution + artifact fetch.
 
@@ -223,3 +223,38 @@ Viewers see all scans read-only but **not the instruction text** (it may contain
   host's. Remote targets (URL/domain/IP/repo) are unaffected.
 - Postman targets (`postman://`) are rejected for now (they need `POSTMAN_API_KEY`).
 - Run directories are never pruned automatically (only on scan delete).
+
+## 11. Phase 3 — scan UI
+
+### Pages
+| Route | Who | What |
+|-------|-----|------|
+| `/scans` | all | history with status filter, pagination, severity mini-bars; **polls every 3 s while anything is active** |
+| `/scans/new` | admin, operator | targets (one per line), mode quick/standard/deep (deep carries a cost warning), runner, LLM profile, budget, instruction; `MOCK:*` helper chips on the mock runner |
+| `/scans/:id` | all (operators: own) | status, live log, findings, report, exports, cancel/delete |
+| `/` | all | active scans, recent findings, last 5 scans |
+
+### Live log (`lib/useScanStream.ts`, `lib/logStream.ts`)
+WebSocket with first-frame auth. On a dropped connection it reconnects with exponential backoff (0.4 s → 8 s) and resumes
+with `from = nextSeq`; `LogBuffer` drops replayed frames, so a reconnect can neither lose nor duplicate lines. Memory is capped
+at 50 000 lines and rendering is windowed to the last 1 000 (button to show all). Auto-scroll follows the tail unless the reader
+scrolls up ("↓ к новым строкам"). Close code 4401 ends the session; 4404 means the scan is gone.
+
+### Rendering untrusted text (the important part)
+Everything a scan produces — log lines, finding fields, the report — is derived from the scanned target and may be hostile.
+- Log lines and finding fields are rendered **only as React text nodes** (`whitespace-pre-wrap`), never as HTML.
+- The report is markdown rendered by `react-markdown` (no raw HTML, `javascript:` URLs stripped) with **images removed** (an
+  `<img>` would make the viewer's browser call an arbitrary host) and links opened with `noopener noreferrer nofollow`.
+- Exports are downloaded through an authenticated `fetch` (a plain link cannot carry the bearer token) and served as attachments.
+- Verified in a real browser with targets containing `<img onerror=…>`, a markdown image to an external host and a
+  `javascript:` link: nothing executes, no request leaves for the external host, no `<img>`/`javascript:` link reaches the DOM.
+
+### Wording that avoids false assurance
+A scan with no findings is labelled **«Завершён, находок нет»** (never «Чисто»/«Безопасно») and its Findings tab says this is not
+proof the target is safe. Runs that ended with an unexpected Strix status show a warning (e.g. possibly incomplete).
+
+### Tests
+- `frontend`: `npm test` (vitest) — `LogBuffer` (dedupe, gap marker, cap, resume), line classification, finding text helpers, target parsing.
+- Browser end-to-end (Playwright, 55 checks) was run against the real stack (uvicorn + prefork Celery worker + Vite): the full
+  create → live → findings → export → report flow, socket killed twice mid-scan, cancel, failed/clean scans, hostile targets,
+  operator isolation, viewer restrictions, live list refresh, mobile overflow. The script is not part of the repo.

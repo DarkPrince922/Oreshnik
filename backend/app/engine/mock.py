@@ -177,6 +177,7 @@ class MockRunner:
         self._write_json(run_dir / "run.json", record)
         if final:
             lines = ["# Security Penetration Test Report", "", "**[MOCK] simulated report — no real testing took place.**", ""]
+            lines += ["## Targets", ""] + [f"- {t['original']}" for t in record["targets_info"]] + [""]
             lines += [f"## Findings ({len(findings)})", ""]
             lines += [f"- **{f['severity'].upper()}** {f['title']} (`{f['id']}`)" for f in findings] or ["No findings."]
             (run_dir / "penetration_test_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

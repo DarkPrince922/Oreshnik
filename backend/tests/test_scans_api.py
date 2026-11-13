@@ -245,6 +245,7 @@ def test_findings_log_report_and_exports_of_a_finished_scan(client, operator, vi
 
     report = client.get(f"/api/scans/{sid}/report", headers=viewer).json()["markdown"]
     assert report.startswith("# Security Penetration Test Report") and "[MOCK]" in report
+    assert "## Targets" in report and "- https://example.com" in report  # real reports quote their targets too
 
     exported = client.get(f"/api/scans/{sid}/export/json", headers=viewer)
     assert exported.status_code == 200 and "attachment" in exported.headers["content-disposition"]

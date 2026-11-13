@@ -37,6 +37,17 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    to: "/scans",
+    label: "Сканы",
+    icon: icon(
+      <>
+        <circle cx="12" cy="12" r="8" />
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" />
+      </>
+    ),
+  },
+  {
     to: "/llm",
     label: "LLM-профили",
     roles: ["admin", "operator"],
