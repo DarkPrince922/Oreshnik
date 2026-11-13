@@ -13,5 +13,7 @@ cryptography>=43,<47
 python-multipart>=0.0.12,<0.1
 websockets>=13,<15
 asyncssh>=2.17,<3
+# The panel's own outbound call to fetch a provider's model list ("Загрузить модели").
+httpx>=0.27,<1
 croniter>=2,<7
 tzdata>=2024.1

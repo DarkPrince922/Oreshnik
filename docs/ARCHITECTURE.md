@@ -155,7 +155,7 @@ Strict **black**, but "alive": dark glass panels, smooth transitions, micro-inte
 |------|-----------|--------|
 | Auth | `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/change-password` | login: public; others: any user |
 | Users | `GET/POST /api/users`, `PATCH/DELETE /api/users/{id}` | admin |
-| LLM profiles | `GET/POST /api/llm-profiles`, `PATCH/DELETE /api/llm-profiles/{id}`, `GET /api/llm-profiles/presets` | admin, operator — **own profiles only** |
+| LLM profiles | `GET/POST /api/llm-profiles`, `PATCH/DELETE /api/llm-profiles/{id}`, `GET /api/llm-profiles/presets`, `POST /api/llm-profiles/models` (fetch the provider's model list) | admin, operator — **own profiles only** |
 | Runners | `GET /api/runners` | any user (SSH details admin-only) |
 | | `POST /api/runners`, `PATCH/DELETE /api/runners/{id}`, `POST /api/runners/{id}/check` | admin |
 
@@ -170,8 +170,26 @@ Strict **black**, but "alive": dark glass panels, smooth transitions, micro-inte
 - **Secrets:** LLM API keys and SSH keys are Fernet-encrypted; responses only carry a hint (`…1234`) / `has_ssh_key`. A profile owned
   by someone else is a 404 — admins can't read other users' keys either.
 - **LLM → Strix mapping** (`app/services/llm.py::build_strix_env`): `claude→anthropic/<model>`, `openai→openai/<model>`,
-  `grok→xai/<model>`, `custom→openai/<model>` + `LLM_API_BASE` (custom requires a base URL). The Phase 2 scan engine calls this
-  right before launching Strix.
+  `grok→xai/<model>` (prefix skipped if the admin already typed it fully qualified) + `LLM_API_BASE` (custom requires a base
+  URL). The Phase 2 scan engine calls this right before launching Strix.
+  For `custom`, `<model>` is **unconditionally** prefixed with `openai/`, never skipped even if it already looks
+  prefixed — verified against the real `strix-agent` 1.7.0 / `openai-agents` SDK: any *other* prefix is handed to LiteLLM as
+  a provider name and rejected if it isn't one LiteLLM recognises (so a model id like `customprovider/modelid` would fail
+  outright), while `openai/` is the one tag the SDK's own `MultiProvider` always strips exactly once before using the client
+  that actually honours `LLM_API_BASE` — so prepending it unconditionally is what makes the remainder reach the endpoint
+  byte-for-byte as typed, whatever it contains (including a model id that happens to itself start with `openai/`, e.g. a
+  namespaced id like `openai/gpt-oss-20b` served by a self-hosted gateway).
+- **"Загрузить модели"** (`POST /api/llm-profiles/models`, `app/services/llm.py::fetch_provider_models`): lets the form ask
+  the provider what it actually serves instead of the admin guessing an id — Anthropic/OpenAI/xAI's own `/v1/models`, or
+  `{base_url}/models` for `custom`. Either a freshly typed (not yet saved) `api_key`, or `profile_id` of an owned profile
+  whose stored key is reused server-side (so refreshing the list while editing never needs the key retyped), must resolve
+  to a key. For `custom` this is the panel's own outbound request to the admin's own `base_url` — the same host the key
+  already goes to on every real scan, so it opens no reach beyond what the profile already grants. Bounded timeout (10 s)
+  and response size (2 MB, enforced while streaming, not after buffering); 401/403 and other HTTP errors, a timeout, non-JSON
+  and an empty model list are all reported as a readable `422`/`502`, never a stack trace. Model ids are returned exactly as
+  the provider spelled them (`{"data":[...]}` or `{"models":[...]}` or a bare list, item either a string or `{"id"|"name":
+  ...}`) — the frontend offers them as `<datalist>` options next to the preset's own suggestions, but the field stays free
+  text either way.
 - **Reasoning effort** (`STRIX_REASONING_EFFORT`, `engine/base.py::strix_reasoning_env`, applied like the privacy env above —
   explicit, after the scan's own variables, same for both runners): how hard each model call thinks before answering
   (none…max; Strix's own default is `high`, which is this setting's default too, so leaving it alone changes nothing).
@@ -620,3 +638,48 @@ touched); rootless Docker / `DOCKER_HOST` on the host; SSH through jump hosts; S
 password (a second factor); `sudo` with a password.
 Known limits: Strix's repository clones in `/tmp/strix_repos/<run>` on the host are not removed by the panel; the host's own load is
 not throttled beyond the per-user active-scan limit and the worker's concurrency.
+
+## 16. Custom-provider model ids, and fetching a provider's model list
+
+Two related fixes/additions to LLM profiles, both in `app/services/llm.py`:
+
+- **`strix_model_id` no longer special-cases an already-prefixed `custom` model.** A `custom` endpoint's model id can be
+  anything that endpoint calls it — it does not have to look like `<vendor>/<id>`, and when it does, that `/` is part of
+  the real id (e.g. `customprovider/modelid`), not a hint to add or skip a prefix. Traced through the installed
+  `strix-agent` 1.7.0 and the `openai-agents` SDK it builds on (`StrixProvider`/`MultiProvider`): `openai/` is the *one*
+  prefix the SDK always strips exactly once to pick the client that honours `LLM_API_BASE`; every other prefix is instead
+  handed to LiteLLM as a `custom_llm_provider` name and rejected if LiteLLM doesn't recognise it — so an unrecognised
+  prefix like `customproviders/modelid` would previously have reached Strix unprefixed (model has no "/" at the very
+  start matching "openai/") only when the typed id had no slash at all; whenever it did, the fix now always prepends
+  `openai/`, even if the typed id already starts with `openai/` (e.g. a literal namespaced id such as
+  `openai/gpt-oss-20b` served by a self-hosted gateway) — so the remainder after Strix's single guaranteed strip is
+  always exactly, byte-for-byte, what the admin typed. Verified for real: started the panel's own API and a tiny
+  OpenAI-compatible stand-in server, created `custom` profiles with both a nested id (`customprovider/mymodel` →
+  `strix_model: "openai/customprovider/mymodel"`) and the literal-prefix edge case
+  (`openai/gpt-oss-20b` → `"openai/openai/gpt-oss-20b"`, which the SDK strips back down to the original `openai/gpt-oss-20b`).
+- **"Загрузить модели"** (`POST /api/llm-profiles/models`): the profile form can ask the provider what it actually
+  serves — Claude/OpenAI/xAI's own `/v1/models`, or `{base_url}/models` for `custom` — instead of the admin guessing an
+  id. Either a freshly typed (not yet saved) `api_key`, or an owned profile's `profile_id` (its stored key is decrypted
+  and reused server-side, so refreshing the list while editing never needs the key retyped), must resolve to a key; for
+  `custom`, `base_url` is required the same way it is for creating a profile. This is the panel's own outbound request —
+  for `custom` it reaches the admin's own `base_url`, exactly the host the key already goes to on every real scan, so it
+  opens no reach beyond what the profile already grants. Bounded timeout (10 s) and response size (2 MB, enforced while
+  streaming the body, not after buffering it); 401/403, any other HTTP status, a timeout, non-JSON and an empty list are
+  all reported as a readable `422`/`502`, never a stack trace. Accepts the common response shapes (`{"data":[...]}`,
+  `{"models":[...]}`, or a bare list; each item either a plain string or `{"id"|"name": ...}`) and returns the ids
+  exactly as the provider spelled them, sorted. The frontend (`LLMProfiles.tsx`) offers them as `<datalist>` options next
+  to the preset's own suggestions — the model field stays free text either way, so an id the fetch can't discover can
+  still be typed by hand. The button's enablement and the suggestion-merging are pure functions
+  (`frontend/src/lib/llmProfile.ts`) so they are unit-tested the way the rest of `src/lib` is, rather than through a
+  component-test harness this project doesn't otherwise use.
+
+### Tests
+Backend: 18 new tests (598 in total) — `strix_model_id`'s verbatim pass-through (plain id, nested slashes, the literal
+`openai/`-prefix edge case), `fetch_provider_models` against an `httpx.MockTransport` (every response shape, 401, other
+HTTP errors, non-JSON, the size cap enforced mid-stream, an empty list, the right auth header per provider), and the
+endpoint (role check, needs a key or a `profile_id`, `base_url` required for `custom`, reusing another user's profile is a
+404, a `profile_id` for the wrong provider is a 422, provider errors surface as 502). Frontend: 7 new unit tests (79 in
+total) for `canFetchModels`/`mergeModelOptions`. Verified for real, beyond the mocked tests above: the panel's own API
+making a genuine outbound HTTP call (real `httpx`, real sockets) to a throwaway OpenAI-compatible stand-in server, both
+directly (`curl`) and driven through a real headless browser — opening the LLM-profiles page, picking `custom`, filling
+`base_url`/key, clicking **Загрузить модели**, seeing the datalist fill with both ids above, and saving the profile.

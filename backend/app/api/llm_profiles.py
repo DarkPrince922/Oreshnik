@@ -4,7 +4,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_operator
-from app.core.crypto import encrypt
+from app.core.crypto import decrypt, encrypt
 from app.core.db import get_db
 from app.models.llm_profile import LLMProfile, Provider
 from app.models.user import User
@@ -12,9 +12,11 @@ from app.schemas.llm import (
     LLMProfileCreate,
     LLMProfileOut,
     LLMProfileUpdate,
+    ModelListRequest,
+    ModelListResponse,
     ProviderPreset,
 )
-from app.services.llm import PRESETS, key_hint
+from app.services.llm import PRESETS, ModelListError, fetch_provider_models, key_hint
 
 router = APIRouter(prefix="/api/llm-profiles", tags=["llm-profiles"])
 
@@ -42,6 +44,39 @@ def _require_base_url_for_custom(provider: Provider, base_url: str | None) -> No
 @router.get("/presets", response_model=list[ProviderPreset])
 def presets(_: User = Depends(require_operator)) -> list[dict]:
     return PRESETS
+
+
+@router.post("/models", response_model=ModelListResponse)
+def fetch_models(
+    body: ModelListRequest,
+    user: User = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> ModelListResponse:
+    """«Загрузить модели»: ask the provider itself what it serves.
+
+    Used both while creating a profile (a freshly typed, not-yet-saved key) and while
+    editing one (`profile_id`, so the stored key need not be retyped just to refresh the
+    list) — `api_key`/`base_url` in the body win over the profile's stored values so an
+    edited-but-unsaved endpoint can be probed too.
+    """
+    api_key = body.api_key
+    base_url = body.base_url
+    if body.profile_id is not None:
+        profile = _own_or_404(db, user, body.profile_id)
+        if profile.provider != body.provider:
+            raise HTTPException(422, "profile_id относится к другому провайдеру")
+        if api_key is None:
+            api_key = decrypt(profile.api_key_enc)
+        if base_url is None:
+            base_url = profile.base_url
+    if not api_key:
+        raise HTTPException(422, "Нужен api_key (свой или уже сохранённого профиля через profile_id)")
+    _require_base_url_for_custom(body.provider, base_url)
+    try:
+        models = fetch_provider_models(body.provider, base_url, api_key)
+    except ModelListError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return ModelListResponse(models=models)
 
 
 @router.get("", response_model=list[LLMProfileOut])

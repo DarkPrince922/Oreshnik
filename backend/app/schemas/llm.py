@@ -85,3 +85,32 @@ class ProviderPreset(BaseModel):
     model_placeholder: str
     suggestions: list[str]
     base_url_required: bool
+
+
+class ModelListRequest(BaseModel):
+    """What to fetch the provider's model list with.
+
+    Either `api_key` (typed into the form, not yet saved) or `profile_id` (an existing
+    profile owned by the caller, whose stored key is reused) must resolve to a key; the
+    router enforces that. `base_url` overrides a profile's stored one so a changed-but-not-
+    yet-saved endpoint can be probed before it is submitted.
+    """
+
+    provider: Provider
+    base_url: str | None = None
+    api_key: str | None = Field(default=None, max_length=500)
+    profile_id: int | None = None
+
+    _url = field_validator("base_url")(_clean_base_url)
+
+    @field_validator("api_key")
+    @classmethod
+    def _strip_key(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None
+
+
+class ModelListResponse(BaseModel):
+    models: list[str]

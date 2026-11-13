@@ -221,6 +221,14 @@ export const deleteUser = (id: number) => api.delete(`/api/users/${id}`);
 
 export const listPresets = async () => (await api.get<ProviderPreset[]>("/api/llm-profiles/presets")).data;
 export const listProfiles = async () => (await api.get<LLMProfile[]>("/api/llm-profiles")).data;
+/** "Загрузить модели": ask the provider what it serves. Either `api_key` (freshly typed,
+ * not yet saved) or `profile_id` (reuse an existing profile's stored key) must be given. */
+export const fetchModels = async (body: {
+  provider: Provider;
+  base_url: string | null;
+  api_key?: string;
+  profile_id?: number;
+}) => (await api.post<{ models: string[] }>("/api/llm-profiles/models", body)).data.models;
 export const createProfile = async (body: {
   name: string;
   provider: Provider;

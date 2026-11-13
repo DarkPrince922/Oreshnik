@@ -7,6 +7,7 @@ import {
   createProfile,
   deleteProfile,
   errorMessage,
+  fetchModels,
   listPresets,
   listProfiles,
   updateProfile,
@@ -14,6 +15,7 @@ import {
   type Provider,
   type ProviderPreset,
 } from "../lib/api";
+import { canFetchModels as computeCanFetchModels, mergeModelOptions } from "../lib/llmProfile";
 
 interface Form {
   name: string;
@@ -36,6 +38,16 @@ export default function LLMProfiles() {
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<number | null>(null);
 
+  // "Загрузить модели": a model list fetched from the provider, offered as datalist
+  // options alongside the preset's own suggestions — the field stays free text either way.
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [modelsBusy, setModelsBusy] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const resetFetchedModels = () => {
+    setFetchedModels([]);
+    setModelsError(null);
+  };
+
   const reload = useCallback(async () => {
     try {
       const [p, pr] = await Promise.all([listProfiles(), listPresets()]);
@@ -56,13 +68,42 @@ export default function LLMProfiles() {
     setEditing(null);
     setForm(emptyForm);
     setFormError(null);
+    resetFetchedModels();
     setOpen(true);
   };
   const openEdit = (p: LLMProfile) => {
     setEditing(p);
     setForm({ name: p.name, provider: p.provider, model: p.model, base_url: p.base_url ?? "", api_key: "" });
     setFormError(null);
+    resetFetchedModels();
     setOpen(true);
+  };
+
+  const canFetch = computeCanFetchModels({
+    provider: form.provider,
+    baseUrl: form.base_url,
+    apiKey: form.api_key,
+    editingProvider: editing?.provider ?? null,
+  });
+
+  const doFetchModels = async () => {
+    setModelsError(null);
+    setModelsBusy(true);
+    try {
+      const key = form.api_key.trim();
+      const reuseProfile = !key && editing && editing.provider === form.provider;
+      const list = await fetchModels({
+        provider: form.provider,
+        base_url: form.provider === "custom" ? form.base_url.trim() || null : null,
+        ...(key ? { api_key: key } : reuseProfile ? { profile_id: editing.id } : {}),
+      });
+      setFetchedModels(list);
+    } catch (e) {
+      setFetchedModels([]);
+      setModelsError(errorMessage(e));
+    } finally {
+      setModelsBusy(false);
+    }
   };
 
   const submit = async (e: FormEvent) => {
@@ -183,7 +224,10 @@ export default function LLMProfiles() {
                   <button
                     type="button"
                     key={p.provider}
-                    onClick={() => setForm({ ...form, provider: p.provider })}
+                    onClick={() => {
+                      setForm({ ...form, provider: p.provider });
+                      resetFetchedModels();
+                    }}
                     className={clsx(
                       "relative rounded-lg px-2 py-2 text-xs font-medium transition-colors",
                       form.provider === p.provider ? "text-white" : "text-slate-500 hover:text-slate-300"
@@ -197,23 +241,40 @@ export default function LLMProfiles() {
             {preset && <p className="mt-1.5 text-[11px] text-slate-500">{preset.hint}</p>}
           </div>
 
-          <Field label="Модель" hint={form.model ? `Для Strix: ${form.provider === "custom" ? "openai" : form.provider === "claude" ? "anthropic" : form.provider === "grok" ? "xai" : "openai"}/${form.model}` : undefined}>
-            <input className="field font-mono" list="model-suggestions" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder={preset?.model_placeholder} required maxLength={200} />
-            <datalist id="model-suggestions">
-              {preset?.suggestions.map((s) => <option key={s} value={s} />)}
-            </datalist>
-          </Field>
-
           <Field
             label={preset?.base_url_required ? "Base URL" : "Base URL (необязательно)"}
             hint={preset?.base_url_required ? "OpenAI-совместимый endpoint, например http://host:11434/v1" : "Только если ходите через прокси или шлюз"}
           >
-            <input className="field font-mono" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder="https://…" required={preset?.base_url_required} />
+            <input className="field font-mono" value={form.base_url} onChange={(e) => { setForm({ ...form, base_url: e.target.value }); resetFetchedModels(); }} placeholder="https://…" required={preset?.base_url_required} />
           </Field>
 
           <Field label="API-ключ" hint={editing ? `Сейчас: ${editing.api_key_hint}. Оставьте пустым, чтобы не менять.` : undefined}>
-            <input className="field font-mono" type="password" autoComplete="off" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder={editing ? "••••••••" : "sk-…"} required={!editing} />
+            <input className="field font-mono" type="password" autoComplete="off" value={form.api_key} onChange={(e) => { setForm({ ...form, api_key: e.target.value }); resetFetchedModels(); }} placeholder={editing ? "••••••••" : "sk-…"} required={!editing} />
           </Field>
+
+          <Field label="Модель" hint={form.model ? `Для Strix: ${form.provider === "custom" ? "openai" : form.provider === "claude" ? "anthropic" : form.provider === "grok" ? "xai" : "openai"}/${form.model}` : undefined}>
+            <input className="field font-mono" list="model-suggestions" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder={preset?.model_placeholder} required maxLength={200} />
+            <datalist id="model-suggestions">
+              {mergeModelOptions(preset?.suggestions ?? [], fetchedModels).map((s) => <option key={s} value={s} />)}
+            </datalist>
+          </Field>
+
+          <div className="flex flex-wrap items-center gap-2 -mt-1.5">
+            <Button
+              type="button"
+              className="px-3 py-1.5 text-xs"
+              loading={modelsBusy}
+              disabled={!canFetch}
+              title={!canFetch ? (preset?.base_url_required ? "Укажите base_url и ключ" : "Введите API-ключ") : undefined}
+              onClick={doFetchModels}
+            >
+              Загрузить модели
+            </Button>
+            {!modelsBusy && !modelsError && fetchedModels.length > 0 && (
+              <span className="text-[11px] text-slate-500">Загружено {fetchedModels.length} — выберите из списка в поле «Модель» или впишите свою</span>
+            )}
+          </div>
+          <ErrorNote message={modelsError} />
 
           <ErrorNote message={formError} />
           <div className="flex justify-end gap-2 pt-2">
