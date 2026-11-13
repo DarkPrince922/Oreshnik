@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     strix_cancel_grace_seconds: int = 20
     # A running scan whose worker has not heartbeated for this long is marked failed.
     scan_stale_seconds: int = 180
+    # How many scans RUN at once. A scan beyond this waits as `queued` and starts the moment one finishes. The panel itself
+    # holds this limit (so it can be changed in «Настройки» without restarting anything); the worker is started with
+    # SCAN_WORKER_SLOTS processes as a ceiling it can never exceed.
+    scan_concurrency: int = Field(default=2, ge=1, le=64)
+    scan_worker_slots: int = Field(default=16, ge=1, le=256)
     # Guard against accidentally burning tokens with many parallel scans: active (queued + running) scans one account may
     # have on ONE runner. A runner can set its own number (`runners.max_scans_per_user`); this is the default for the rest.
     max_active_scans_per_user: int = 3

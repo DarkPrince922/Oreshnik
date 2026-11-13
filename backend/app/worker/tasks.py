@@ -5,7 +5,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -168,9 +168,21 @@ class _Snapshot:
     resume_count: int = 0
 
 
-def _claim(scan_id: int) -> _Snapshot | None:
-    """Atomically move queued -> running; None if the scan is gone or was cancelled meanwhile."""
+# Serializes "count what runs, then start one" between workers, so two of them cannot both take the last place.
+_SLOT_LOCK = 7101
+_WAIT_SECONDS = 5
+
+
+def _claim(scan_id: int) -> "_Snapshot | str | None":
+    """Atomically move queued -> running; None if the scan is gone or was cancelled meanwhile, "busy" while the
+    limit of scans running at once (`scan_concurrency`, changeable in «Настройки») is reached — the scan stays queued."""
     with SessionLocal() as db:
+        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _SLOT_LOCK})  # released by the commit below
+        if db.scalar(select(Scan.status).where(Scan.id == scan_id)) != ScanStatus.queued:
+            return None
+        running = db.scalar(select(func.count()).select_from(Scan).where(Scan.status.in_((ScanStatus.running, ScanStatus.cancelling))))
+        if running >= settings.scan_concurrency:
+            return "busy"
         claimed = db.execute(
             update(Scan)
             .where(Scan.id == scan_id, Scan.status == ScanStatus.queued)
@@ -304,6 +316,12 @@ def _finalize(scan_id: int, status: ScanStatus, detail: str | None, result: RunR
 @celery.task(name="oreshnik.scan_run")
 def scan_run(scan_id: int) -> str:
     snap = _claim(scan_id)
+    if snap == "busy":
+        # No free place: try again shortly, the scan stays queued meanwhile (cancelling it makes the next try a no-op).
+        # Places are not handed out strictly in the order of arrival.
+        if not celery.conf.task_always_eager:
+            scan_run.apply_async((scan_id,), countdown=_WAIT_SECONDS)
+        return "waiting"
     if snap is None:
         return "skipped"
 

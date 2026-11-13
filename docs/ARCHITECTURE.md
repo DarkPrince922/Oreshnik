@@ -932,3 +932,50 @@ history order and `resume`, what Codex is given — argv, key, no panel secrets 
 container, the stale-turn reaper, delete, WebSocket replay/resume/auth) against `tests/fake_codex.py` through the real agentd app; a real uvicorn
 for the tests that need streaming (stop; a silent long command stays alive); agentd on its own (token, unsafe identifiers, timeout, TOML quoting).
 Frontend: `src/lib/agentModel.test.ts` — how events become the feed.
+
+## 21. «Настройки»: operating parameters in the panel, and a live limit of scans that run at once
+
+Until now every number below lived in `.env` and needed a restart. They are now edited by an administrator on the **«Настройки»** page
+(`GET/PUT /api/settings`, admin only) and take effect without restarting anything.
+
+### Where a value comes from
+
+`.env` (and the default in `app/core/config.py`) is the **baseline**. A change made in the panel is a row in `app_settings` (migration 0012)
+and **wins over the baseline**; "сбросить" deletes the row. Setting a value equal to the baseline stores no row (so a later edit of `.env`
+still counts for a parameter nobody really changed). Each row keeps who changed it and when.
+
+The panel code already read `settings.<name>` at the moment it needed a value, so applying a change is setting that attribute
+(`app/core/runtime_settings.py::apply`). Every process — the API, each worker child, beat — runs a small background thread that reloads the
+table every 5 seconds (`start_refresher`: API lifespan, Celery `worker_process_init` and `beat_init`); the API process that took the `PUT`
+applies it at once. So a change reaches all of them within seconds. A database that is away, or not yet migrated, leaves the current values
+alone; a stored value that no longer passes validation, or for a parameter that no longer exists, is ignored.
+
+### What is editable (27 parameters, `runtime_settings.SPECS`) and what is not
+
+Scans (parallelism, timeout, grace on stop, stale threshold, log size, per-account limit), schedules, Strix (reasoning effort, API route,
+preflight timeout, telemetry, update check, version and sandbox image to install), SSH, Операции, Агент, login throttling and session length.
+Each has bounds checked on the server (and mirrored in the page), a unit, a hint, and its `.env` name.
+
+**Not here, deliberately:** secrets and what the panel needs before it can read the database (`JWT_SECRET`, `SECRET_ENCRYPTION_KEY`, Postgres
+and Redis addresses, `ADMIN_*`, `ORESHNIK_ENV`, `CORS_ORIGINS`), `AGENT_TOKEN` / `AGENT_URL`, paths and binaries, and the worker's process
+counts (`SCAN_WORKER_SLOTS`, `AGENT_CONCURRENCY`). `strix_version` and `strix_sandbox_image` end up in shell commands on SSH hosts, so they
+must match a strict pattern (no spaces, quotes, `;`, `$`, backticks). `ssh_check_interval_seconds` sets beat's schedule at startup, so it is
+saved but marked "нужен перезапуск" (`docker compose restart beat`).
+
+### The limit of scans that run at once (`SCAN_CONCURRENCY`)
+
+It used to be the worker's `--concurrency`, i.e. fixed at start. Now the **panel** holds it: the worker starts with up to
+`SCAN_WORKER_SLOTS` processes (default 16, `--autoscale`, so idle ones are not kept) as a ceiling, and `tasks._claim` — under a PostgreSQL
+advisory lock, so two workers cannot take the last place — counts scans in `running` + `cancelling` and moves a queued scan to `running` only
+while that count is below `scan_concurrency`. Otherwise the scan **stays `queued`** and its task is scheduled again in 5 s; cancelling it makes the
+next try a no-op. Raising the limit lets waiting scans start within seconds; lowering it does **not** stop scans that are already running — it only
+stops new ones from starting. The setting cannot exceed the ceiling (refused with a reason). Places are not handed out strictly in order of arrival.
+
+### Tests and limits
+
+`tests/test_app_settings.py` (34): every parameter exists on `settings` and its default is valid; secrets are not editable; shell metacharacters are
+refused; the API (roles, listing, apply at once, reset, "equal to default stores nothing", all-or-nothing, round trips); another process picking a
+change up by refreshing, invalid and unknown rows ignored, a broken database; the scan gate (waits at the limit, starts with a free place, raising
+the limit without restart, lowering does not kill, cancelling still holds its place, finished ones do not, cancelled is skipped, re-scheduled in a real
+worker). Frontend: `src/lib/settingsForm.test.ts` (11). **Not run:** the Celery signal hooks and the autoscaling worker themselves (no broker or Docker
+in the environment where this was written) — after updating, change «Сканов одновременно» with scans queued and watch them start.

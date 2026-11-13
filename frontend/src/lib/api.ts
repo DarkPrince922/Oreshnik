@@ -524,3 +524,36 @@ export const deleteAgentSession = async (id: number) => {
 export const sendAgentMessage = async (id: number, text: string) =>
   (await api.post<AgentSession>(`/api/agent/sessions/${id}/messages`, { text })).data;
 export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`/api/agent/sessions/${id}/stop`)).data;
+
+// ── Настройки ────────────────────────────────────────────────────────────
+//
+// The operating parameters that used to live only in `.env`. `value` applies right now; `default` is what `.env` / the built-in
+// default says (what "сбросить" returns to); `restart` is not empty for a parameter that needs a restart of that part to apply.
+
+export type SettingKind = "int" | "float" | "bool" | "choice" | "text";
+export type SettingValue = number | boolean | string;
+
+export interface AppSettingItem {
+  key: string;
+  env: string;
+  label: string;
+  hint: string;
+  kind: SettingKind;
+  minimum: number | null;
+  maximum: number | null;
+  choices: string[];
+  unit: string;
+  restart: string;
+  value: SettingValue;
+  default: SettingValue;
+  changed: boolean;
+  updated_at: string | null;
+}
+export interface AppSettingsGroup {
+  name: string;
+  items: AppSettingItem[];
+}
+export const getAppSettings = async () => (await api.get<{ groups: AppSettingsGroup[] }>("/api/settings")).data.groups;
+/** key -> new value; `null` resets that parameter to its default. All or nothing. */
+export const updateAppSettings = async (values: Record<string, SettingValue | null>) =>
+  (await api.put<{ groups: AppSettingsGroup[] }>("/api/settings", { values })).data.groups;

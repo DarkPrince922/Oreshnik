@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.signals import beat_init, worker_process_init
 
 from app.core.config import settings
 
@@ -39,3 +40,18 @@ celery.conf.update(
 def ping() -> str:
     """Smoke-test task — confirms the worker is wired up."""
     return "pong"
+
+
+@worker_process_init.connect
+def _worker_settings(**_: object) -> None:
+    """Each forked worker process follows the settings changed in the panel («Настройки»)."""
+    from app.core import runtime_settings
+
+    runtime_settings.start_refresher()
+
+
+@beat_init.connect
+def _beat_settings(**_: object) -> None:
+    from app.core import runtime_settings
+
+    runtime_settings.start_refresher()

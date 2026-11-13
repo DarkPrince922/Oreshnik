@@ -5,9 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api import agent, auth, costs, health, llm_profiles, ops, runners, scans, schedules, users
+from app.api import agent, app_settings, auth, costs, health, llm_profiles, ops, runners, scans, schedules, users
 from app.bootstrap import run_bootstrap
 from app.core.config import settings
+from app.core import runtime_settings
 from app.core.db import SessionLocal
 
 log = logging.getLogger("oreshnik")
@@ -29,6 +30,7 @@ def check_config() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     check_config()
+    runtime_settings.start_refresher()  # settings changed in the panel reach this process within seconds
     try:
         with SessionLocal() as db:
             run_bootstrap(db)
@@ -64,6 +66,7 @@ app.include_router(schedules.router)
 app.include_router(costs.router)
 app.include_router(ops.router)
 app.include_router(agent.router)
+app.include_router(app_settings.router)
 
 
 @app.get("/")
