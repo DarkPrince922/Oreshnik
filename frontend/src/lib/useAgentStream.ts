@@ -45,6 +45,7 @@ export function useAgentStream(sessionId: number | null) {
       socket = ws;
       ws.onopen = () => ws.send(JSON.stringify({ token: getToken(), from: next }));
       ws.onmessage = (message) => {
+        if (disposed || socket !== ws) return; // a connection we already gave up on must not feed the list
         let frame: { type?: string; seq?: number; kind?: string; payload?: Record<string, unknown>; status?: AgentSessionStatus };
         try {
           frame = JSON.parse(message.data);
