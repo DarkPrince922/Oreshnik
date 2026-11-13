@@ -79,6 +79,8 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     severity_counts: dict[str, int]
     findings_total: int
+    schedule_id: int | None = None
+    schedule_name: str | None = None
     parent_scan_id: int | None = None
     cost_base: float | None = None  # what the parent had cost; `cost` is cumulative across a resume
     continuations: list[int] = []   # scans that continue this one (visible to the viewer)

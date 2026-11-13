@@ -95,6 +95,29 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
   );
 }
 
+export function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (next: boolean) => void; label: string; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={clsx(
+        "relative h-6 w-11 shrink-0 rounded-full border transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50",
+        checked ? "border-accent/50 bg-accent/40" : "border-white/10 bg-white/10"
+      )}
+    >
+      <motion.span
+        className="absolute left-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-white shadow"
+        animate={{ x: checked ? 20 : 0 }}
+        transition={{ type: "spring", stiffness: 500, damping: 32 }}
+      />
+    </button>
+  );
+}
+
 export function ErrorNote({ message }: { message: string | null }) {
   return (
     <AnimatePresence>
@@ -145,11 +168,13 @@ export function Modal({
   onClose,
   title,
   children,
+  wide = false,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
+  wide?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -176,7 +201,7 @@ export function Modal({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-            className="glass max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl p-7"
+            className={clsx("glass max-h-[90vh] w-full overflow-y-auto rounded-3xl p-7", wide ? "max-w-3xl" : "max-w-lg")}
           >
             <div className="mb-5 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">{title}</h2>

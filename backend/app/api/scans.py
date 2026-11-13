@@ -19,6 +19,7 @@ from app.core.security import decode_access_token
 from app.models.llm_profile import LLMProfile
 from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, FINAL_STATUSES, Finding, Scan, ScanStatus
+from app.models.schedule import Schedule
 from app.models.user import Role, User
 from app.schemas.scan import (
     ActivityPage,
@@ -44,7 +45,7 @@ from app.services.scan_files import (
     tail_from,
 )
 from app.services.resume import ResumeError, check_resumable
-from app.services.targets import TargetKind, classify_all
+from app.services.scan_factory import ScanRequestError, create_queued_scan
 from app.worker.tasks import scan_run
 
 log = logging.getLogger("oreshnik.scans")
@@ -92,7 +93,20 @@ def _continuations(db: Session, viewer: User, scan_ids: list[int]) -> dict[int, 
     return out
 
 
-def _out(scan: Scan, viewer: User, counts: dict[str, int], continuations: list[int] | None = None) -> ScanOut:
+def _schedule_names(db: Session, scans: list[Scan]) -> dict[int, str]:
+    ids = {s.schedule_id for s in scans if s.schedule_id is not None}
+    if not ids:
+        return {}
+    return dict(db.execute(select(Schedule.id, Schedule.name).where(Schedule.id.in_(ids))).all())
+
+
+def _out(
+    scan: Scan,
+    viewer: User,
+    counts: dict[str, int],
+    continuations: list[int] | None = None,
+    schedule_name: str | None = None,
+) -> ScanOut:
     return ScanOut(
         id=scan.id,
         user_id=scan.user_id,
@@ -118,6 +132,8 @@ def _out(scan: Scan, viewer: User, counts: dict[str, int], continuations: list[i
         finished_at=scan.finished_at,
         severity_counts=counts,
         findings_total=sum(counts.values()),
+        schedule_id=scan.schedule_id,
+        schedule_name=schedule_name,
         parent_scan_id=scan.parent_scan_id,
         cost_base=scan.cost_base,
         continuations=continuations or [],
@@ -125,7 +141,10 @@ def _out(scan: Scan, viewer: User, counts: dict[str, int], continuations: list[i
 
 
 def _out_one(db: Session, scan: Scan, viewer: User) -> ScanOut:
-    return _out(scan, viewer, _severity_counts(db, [scan.id])[scan.id], _continuations(db, viewer, [scan.id])[scan.id])
+    return _out(
+        scan, viewer, _severity_counts(db, [scan.id])[scan.id], _continuations(db, viewer, [scan.id])[scan.id],
+        _schedule_names(db, [scan]).get(scan.schedule_id),
+    )
 
 
 # ── create / list / read ─────────────────────────────────────────────────
@@ -135,68 +154,19 @@ def _out_one(db: Session, scan: Scan, viewer: User) -> ScanOut:
 def create_scan(
     body: ScanCreate, user: User = Depends(require_operator), db: Session = Depends(get_db)
 ) -> ScanOut:
-    # Targets
     try:
-        classified = classify_all(body.targets)
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Некорректная цель: {exc}")
-    if user.role != Role.admin and any(kind == TargetKind.path for _, kind in classified):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "Локальные пути и файлы может сканировать только администратор. "
-            "Укажите URL, домен, IP или git-репозиторий.",
+        scan = create_queued_scan(
+            db,
+            user,
+            targets=body.targets,
+            scan_mode=body.scan_mode,
+            instruction=body.instruction,
+            max_budget=body.max_budget,
+            runner_id=body.runner_id,
+            llm_profile_id=body.llm_profile_id,
         )
-    targets = [t for t, _ in classified]
-
-    # Runner
-    if body.runner_id is not None:
-        runner = db.get(Runner, body.runner_id)
-        if runner is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Раннер не найден")
-    else:
-        try:
-            wanted = RunnerKind(settings.default_runner)
-        except ValueError:
-            wanted = RunnerKind.mock
-        runner = db.scalar(select(Runner).where(Runner.kind == wanted).order_by(Runner.id))
-        if runner is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Нет доступного раннера — создайте его в разделе «Раннеры»")
-    if runner.kind == RunnerKind.ssh:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "SSH-раннеры пока не поддерживаются")
-
-    # LLM profile: personal, and required for anything that really calls a model.
-    profile: LLMProfile | None = None
-    if body.llm_profile_id is not None:
-        profile = db.scalar(
-            select(LLMProfile).where(LLMProfile.id == body.llm_profile_id, LLMProfile.user_id == user.id)
-        )
-        if profile is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "LLM-профиль не найден")
-    elif runner.kind != RunnerKind.mock:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Для этого раннера нужно выбрать LLM-профиль")
-
-    # Cost guard
-    active = db.scalar(
-        select(func.count()).select_from(Scan).where(Scan.user_id == user.id, Scan.status.in_(ACTIVE_STATUSES))
-    )
-    if active >= settings.max_active_scans_per_user:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"Уже запущено сканов: {active}. Лимит — {settings.max_active_scans_per_user}; дождитесь завершения или отмените лишние.",
-        )
-
-    scan = Scan(
-        user_id=user.id,
-        runner_id=runner.id,
-        llm_profile_id=profile.id if profile else None,
-        targets=targets,
-        scan_mode=body.scan_mode,
-        instruction=body.instruction,
-        max_budget=body.max_budget,
-        status=ScanStatus.queued,
-    )
-    db.add(scan)
-    db.commit()
+    except ScanRequestError as exc:
+        raise HTTPException(exc.status_code, exc.detail)
     return _enqueue(db, scan, user)
 
 
@@ -302,6 +272,7 @@ def continue_scan(
 @router.get("", response_model=ScanList)
 def list_scans(
     status_filter: ScanStatus | None = Query(default=None, alias="status"),
+    schedule_id: int | None = Query(default=None, description="only scans started by this schedule"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
@@ -310,11 +281,17 @@ def list_scans(
     where = [_visible(user)]
     if status_filter is not None:
         where.append(Scan.status == status_filter)
+    if schedule_id is not None:
+        where.append(Scan.schedule_id == schedule_id)
     total = db.scalar(select(func.count()).select_from(Scan).where(*where))
     scans = db.scalars(select(Scan).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)).all()
     ids = [s.id for s in scans]
     counts, children = _severity_counts(db, ids), _continuations(db, user, ids)
-    return ScanList(items=[_out(s, user, counts[s.id], children[s.id]) for s in scans], total=total, limit=limit, offset=offset)
+    names = _schedule_names(db, list(scans))
+    return ScanList(
+        items=[_out(s, user, counts[s.id], children[s.id], names.get(s.schedule_id)) for s in scans],
+        total=total, limit=limit, offset=offset,
+    )
 
 
 @router.get("/{scan_id}", response_model=ScanOut)

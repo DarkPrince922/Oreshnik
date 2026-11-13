@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # Pace of the simulated runner (seconds between lines). Tests set 0.
     mock_delay_seconds: float = 0.35
 
+    # Scheduling. Real (paid) runners cannot be scheduled more often than this; the simulated runner is exempt.
+    schedule_min_interval_minutes: int = 15
+    max_schedules_per_user: int = 20
+
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 

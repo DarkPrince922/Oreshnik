@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { SeverityBar, SeverityCounts, StatusBadge, STATUS_META, MODE_META, isActive } from "../components/scan";
 import { Button, Card, EmptyState, ErrorNote, PageHeader, Spinner, relativeTime, rise, stagger } from "../components/ui";
@@ -37,6 +37,7 @@ function Row({ scan, showOwner }: { scan: Scan; showOwner: boolean }) {
           <span className="mt-0.5 block truncate text-xs text-slate-500">
             {MODE_META[scan.scan_mode].label} · {scan.runner_name ?? "раннер удалён"}
             {scan.parent_scan_id !== null && ` · ↻ из #${scan.parent_scan_id}`}
+            {scan.schedule_id !== null && ` · ⏱ ${scan.schedule_name ?? `расписание #${scan.schedule_id}`}`}
             {showOwner && ` · ${scan.owner_email}`}
           </span>
         </span>
@@ -54,6 +55,9 @@ function Row({ scan, showOwner }: { scan: Scan; showOwner: boolean }) {
 
 export default function Scans() {
   const { hasRole } = useAuth();
+  const [params, setParams] = useSearchParams();
+  const rawSchedule = params.get("schedule");
+  const scheduleId = rawSchedule !== null && /^\d+$/.test(rawSchedule) ? Number(rawSchedule) : null;
   const [filter, setFilter] = useState<ScanStatus | "all">("all");
   const [page, setPage] = useState(0);
   const [data, setData] = useState<ScanList | null>(null);
@@ -63,7 +67,7 @@ export default function Scans() {
   const load = useCallback(async () => {
     const mine = ++requestId.current;
     try {
-      const result = await listScans({ status: filter === "all" ? undefined : filter, limit: PAGE, offset: page * PAGE });
+      const result = await listScans({ status: filter === "all" ? undefined : filter, schedule_id: scheduleId ?? undefined, limit: PAGE, offset: page * PAGE });
       if (mine === requestId.current) {
         setData(result);
         setError(null);
@@ -71,7 +75,7 @@ export default function Scans() {
     } catch (e) {
       if (mine === requestId.current) setError(errorMessage(e));
     }
-  }, [filter, page]);
+  }, [filter, page, scheduleId]);
 
   useEffect(() => {
     setData(null);
@@ -97,6 +101,13 @@ export default function Scans() {
         subtitle={data ? `Всего: ${data.total}` : "История и текущие запуски"}
         action={canCreate ? <Link to="/scans/new"><Button variant="primary">+ Новый скан</Button></Link> : undefined}
       />
+
+      {scheduleId !== null && (
+        <div className="mb-4 flex items-center gap-3 text-sm text-slate-400" data-testid="schedule-filter">
+          <span className="rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs text-accent-soft">⏱ Сканы расписания #{scheduleId}</span>
+          <button onClick={() => { setParams({}); setPage(0); }} className="text-xs text-slate-500 transition hover:text-white">Показать все ✕</button>
+        </div>
+      )}
 
       <div className="mb-5 flex flex-wrap gap-2">
         {FILTERS.map((f) => (

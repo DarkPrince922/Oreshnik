@@ -120,6 +120,16 @@ if mode == "secret_echo":
     write_run("completed")
     write_agents()
     sys.exit(0)
+if mode == "cost_live":
+    # Strix rewrites run.json (with the running total of llm_usage.cost) after every model cycle.
+    write_run("running", cost=0.0)
+    for spent in (0.11, 0.22, 0.33):
+        time.sleep(0.4)
+        write_run("running", cost=spent)
+    write_run("completed", cost=0.33)
+    write_agents()
+    print("done: spent 0.33", flush=True)
+    sys.exit(0)
 if mode == "ansi":
     print("\x1b[31mred\x1b[0m text", flush=True)
     print("progress 10%\rprogress 50%\rprogress 100%", flush=True)

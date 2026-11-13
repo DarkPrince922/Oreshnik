@@ -48,6 +48,27 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    to: "/schedules",
+    label: "Расписания",
+    roles: ["admin", "operator"],
+    icon: icon(
+      <>
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 7v5l3.2 2" />
+      </>
+    ),
+  },
+  {
+    to: "/costs",
+    label: "Расходы",
+    roles: ["admin", "operator"],
+    icon: icon(
+      <>
+        <path d="M4 20V10M10 20V4M16 20v-7M21 20H3" />
+      </>
+    ),
+  },
+  {
     to: "/llm",
     label: "LLM-профили",
     roles: ["admin", "operator"],

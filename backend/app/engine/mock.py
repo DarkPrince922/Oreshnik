@@ -10,6 +10,8 @@ Behaviour can be steered from the scan's instruction text (handy for UI developm
     MOCK:clean   no findings           (exit 0)
     MOCK:fail    run fails early       (exit 1)
     MOCK:slow    long run (~60 steps)  — to try cancelling
+    MOCK:cost    simulated spend that grows with every step ($0.03 and 1 200 tokens each), written to run.json the way
+                 Strix does — to try the live cost counter, budget bar and accounting. Without it the mock costs nothing.
 """
 
 import hashlib
@@ -56,6 +58,22 @@ def _pick_templates(targets: list[str]) -> list[tuple]:
 
 
 class MockRunner:
+    _record: dict | None = None
+    _run_json: Path | None = None
+    _billing = False
+
+    def _bill(self) -> None:
+        """MOCK:cost — add one step's simulated spend and rewrite run.json (Strix does this after every model cycle)."""
+        if not (self._billing and self._record is not None and self._run_json is not None):
+            return
+        usage = self._record.setdefault("llm_usage", {})
+        usage["cost"] = round(float(usage.get("cost") or 0.0) + 0.03, 4)
+        usage["requests"] = int(usage.get("requests") or 0) + 1
+        usage["input_tokens"] = int(usage.get("input_tokens") or 0) + 1000
+        usage["output_tokens"] = int(usage.get("output_tokens") or 0) + 200
+        usage["total_tokens"] = int(usage.get("total_tokens") or 0) + 1200
+        self._write_json(self._run_json, self._record)
+
     def run(
         self,
         spec: ScanSpec,
@@ -79,7 +97,10 @@ class MockRunner:
 
         def say(line: str) -> bool:
             on_line(line)
+            self._bill()
             return pause()
+
+        self._billing = "cost" in directives
 
         if spec.resume_run:
             run_dir = spec.work_dir / "strix_runs" / spec.resume_run
@@ -107,6 +128,7 @@ class MockRunner:
             "llm_usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost": 0.0},
         }
         self._write_json(run_dir / "run.json", record)
+        self._record, self._run_json = record, run_dir / "run.json"
 
         try:
             return self._run(spec, directives, record, run_dir, agents, say, pause, on_line)
@@ -214,6 +236,7 @@ class MockRunner:
         existing = json.loads((run_dir / "vulnerabilities.json").read_text(encoding="utf-8")) if (run_dir / "vulnerabilities.json").is_file() else []
         record.update(status="running", end_time=None)
         self._write_json(run_dir / "run.json", record)
+        self._record, self._run_json = record, run_dir / "run.json"
 
         def interrupted() -> RunResult:
             agents.stop_all("stopped")

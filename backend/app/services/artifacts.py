@@ -161,3 +161,15 @@ def parse_run_dir(run_dir: Path | None) -> ParsedRun:
             parsed.warnings.append(f"penetration_test_report.md: {exc.__class__.__name__}")
 
     return parsed
+
+
+def read_live_usage(run_dir: Path | None) -> tuple[float | None, int | None]:
+    """(cost, total_tokens) from a run that is still going. Strix rewrites run.json after every model cycle,
+    so this is the live spend. Returns (None, None) when the file is missing or not readable yet."""
+    if run_dir is None:
+        return None, None
+    record = _read_json(run_dir / "run.json", [])
+    usage = record.get("llm_usage") if isinstance(record, dict) else None
+    if not isinstance(usage, dict):
+        return None, None
+    return _float(usage.get("cost")), _int(usage.get("total_tokens"))

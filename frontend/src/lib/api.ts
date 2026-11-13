@@ -151,6 +151,8 @@ export interface Scan {
   finished_at: string | null;
   severity_counts: Partial<Record<Severity, number>>;
   findings_total: number;
+  schedule_id: number | null;
+  schedule_name: string | null;
   parent_scan_id: number | null;
   /** What the parent had cost: `cost` is cumulative across a continuation. */
   cost_base: number | null;
@@ -242,7 +244,7 @@ export interface ScanCreateInput {
   llm_profile_id: number | null;
 }
 export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
-export const listScans = async (params: { status?: ScanStatus; limit?: number; offset?: number } = {}) =>
+export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; limit?: number; offset?: number } = {}) =>
   (await api.get<ScanList>("/api/scans", { params })).data;
 export const getScan = async (id: number) => (await api.get<Scan>(`/api/scans/${id}`)).data;
 export const cancelScan = async (id: number) => (await api.post<Scan>(`/api/scans/${id}/cancel`)).data;
@@ -315,3 +317,74 @@ export interface ContinueInput {
 /** Continue a finished/stopped scan (`strix --resume`): creates a NEW scan that works on a copy of its run. */
 export const continueScan = async (id: number, body: ContinueInput) =>
   (await api.post<Scan>(`/api/scans/${id}/continue`, body)).data;
+
+// ── Schedules ────────────────────────────────────────────────────────────
+
+export interface Schedule {
+  id: number;
+  user_id: number;
+  owner_email: string;
+  name: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  targets: string[];
+  scan_mode: ScanMode;
+  instruction: string | null;
+  max_budget: number | null;
+  runner_id: number | null;
+  runner_name: string | null;
+  runner_kind: RunnerKind | null;
+  llm_profile_id: number | null;
+  llm_profile_name: string | null;
+  next_run_at: string | null;
+  next_runs: string[];
+  last_run_at: string | null;
+  last_scan_id: number | null;
+  last_result: "started" | "skipped" | "error" | null;
+  last_detail: string | null;
+  disabled_reason: string | null;
+  created_at: string;
+}
+
+export interface ScheduleInput {
+  name: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  targets: string[];
+  scan_mode: ScanMode;
+  instruction: string | null;
+  max_budget: number | null;
+  runner_id: number | null;
+  llm_profile_id: number | null;
+}
+
+export interface SchedulePreview {
+  valid: boolean;
+  error: string | null;
+  next_runs: string[];
+  min_interval_minutes: number | null;
+}
+
+export const listSchedules = async () => (await api.get<Schedule[]>("/api/schedules")).data;
+export const createSchedule = async (body: ScheduleInput) => (await api.post<Schedule>("/api/schedules", body)).data;
+export const updateSchedule = async (id: number, body: Partial<ScheduleInput>) =>
+  (await api.patch<Schedule>(`/api/schedules/${id}`, body)).data;
+export const deleteSchedule = (id: number) => api.delete(`/api/schedules/${id}`);
+export const runSchedule = async (id: number) => (await api.post<{ scan_id: number }>(`/api/schedules/${id}/run`)).data;
+export const previewSchedule = async (cron: string, timezone: string, count = 5) =>
+  (await api.get<SchedulePreview>("/api/schedules/preview", { params: { cron, timezone, count } })).data;
+
+// ── Costs ────────────────────────────────────────────────────────────────
+
+export interface CostSummary {
+  days: number;
+  periods: { today: number; week: number; month: number; window: number; all_time: number };
+  running: { count: number; cost: number };
+  tokens: number;
+  per_day: { date: string; cost: number; scans: number }[];
+  per_user: { user_id: number; email: string; cost: number; scans: number }[];
+  top_scans: { id: number; target: string; owner_email: string; status: string; cost: number }[];
+}
+export const getCosts = async (days = 30) => (await api.get<CostSummary>("/api/costs", { params: { days } })).data;

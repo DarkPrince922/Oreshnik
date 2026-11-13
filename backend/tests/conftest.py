@@ -26,7 +26,7 @@ from sqlalchemy import text  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.db import SessionLocal, engine  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
-from app.models import LLMProfile, Provider, Role, Runner, RunnerKind, RunnerStatus, Scan, ScanMode, ScanStatus, User  # noqa: E402
+from app.models import LLMProfile, Provider, Role, Runner, RunnerKind, RunnerStatus, Scan, ScanMode, ScanStatus, Schedule, User  # noqa: E402
 from app.core.crypto import encrypt  # noqa: E402
 
 
@@ -57,7 +57,7 @@ def _database():
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch, tmp_path):
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE users, llm_profiles, runners, scans, findings RESTART IDENTITY CASCADE"))
+        conn.execute(text("TRUNCATE users, llm_profiles, runners, scans, findings, schedules RESTART IDENTITY CASCADE"))
 
     # Scan artifacts go to a per-test directory; the simulated runner runs at full speed;
     # a stuck fake Strix is escalated quickly.
@@ -161,3 +161,23 @@ def make_scan(user_id: int, runner_id: int | None, *, targets=None, instruction=
 def load_scan(scan_id: int) -> Scan:
     with SessionLocal() as db:
         return db.get(Scan, scan_id)
+
+
+def make_schedule(user_id: int, runner_id: int | None, *, name: str = "nightly", cron: str = "0 3 * * *", tz: str = "UTC",
+                  enabled: bool = True, next_run_at=None, profile_id=None, targets=None, **extra) -> Schedule:
+    from datetime import datetime, timezone
+    with SessionLocal() as db:
+        schedule = Schedule(
+            user_id=user_id, name=name, cron=cron, timezone=tz, enabled=enabled, targets=targets or ["https://example.com"],
+            scan_mode=ScanMode.quick, runner_id=runner_id, llm_profile_id=profile_id,
+            next_run_at=next_run_at if next_run_at is not None else (datetime.now(timezone.utc) if enabled else None), **extra,
+        )
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)
+        return schedule
+
+
+def load_schedule(schedule_id: int) -> Schedule:
+    with SessionLocal() as db:
+        return db.get(Schedule, schedule_id)

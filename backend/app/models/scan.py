@@ -73,6 +73,10 @@ class Scan(Base):
     # Continuation of an earlier scan (`strix --resume`): the parent, the Strix run it continues, and what the
     # parent had already cost. Strix's cost is cumulative across a resume, so this scan's own spend is
     # `cost - cost_base`.
+    # Set when a schedule started this scan.
+    schedule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL", use_alter=True, name="fk_scans_schedule_id"), nullable=True, index=True
+    )
     parent_scan_id: Mapped[int | None] = mapped_column(
         ForeignKey("scans.id", ondelete="SET NULL"), nullable=True, index=True
     )

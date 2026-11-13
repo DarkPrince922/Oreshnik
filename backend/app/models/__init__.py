@@ -1,5 +1,6 @@
 from app.models.llm_profile import LLMProfile, Provider
 from app.models.runner import Runner, RunnerKind, RunnerStatus
+from app.models.schedule import Schedule
 from app.models.scan import (
     ACTIVE_STATUSES,
     FINAL_STATUSES,
@@ -22,6 +23,7 @@ __all__ = [
     "ScanMode",
     "ScanStatus",
     "Finding",
+    "Schedule",
     "ACTIVE_STATUSES",
     "FINAL_STATUSES",
 ]

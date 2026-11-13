@@ -1,12 +1,14 @@
+import clsx from "clsx";
 import { motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { SeverityCounts, StatusBadge, isActive } from "../components/scan";
 import { Button, Card, PageHeader, StatusDot, relativeTime, rise, stagger } from "../components/ui";
-import { getHealth, listProfiles, listRunners, listScans, type Health, type LLMProfile, type Runner, type ScanList } from "../lib/api";
+import { getCosts, getHealth, listProfiles, listRunners, listScans, type CostSummary, type Health, type LLMProfile, type Runner, type ScanList } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { targetsLabel } from "../lib/format";
+import { WARN_AT, budgetState } from "../lib/cost";
+import { formatCost, targetsLabel } from "../lib/format";
 
 function Stat({ label, value, sub, to }: { label: string; value: string; sub?: string; to?: string }) {
   const body = (
@@ -27,12 +29,14 @@ export default function Dashboard() {
   const [profiles, setProfiles] = useState<LLMProfile[] | null>(null);
   const [runners, setRunners] = useState<Runner[] | null>(null);
   const [scans, setScans] = useState<ScanList | null>(null);
+  const [costs, setCosts] = useState<CostSummary | null>(null);
 
   useEffect(() => {
     let alive = true;
     getHealth().then((h) => alive && setHealth(h)).catch(() => alive && setHealth(null));
     listRunners().then((r) => alive && setRunners(r)).catch(() => undefined);
     listScans({ limit: 20 }).then((s) => alive && setScans(s)).catch(() => undefined);
+    if (canProfiles) getCosts(30).then((c) => alive && setCosts(c)).catch(() => undefined);
     if (canProfiles) listProfiles().then((p) => alive && setProfiles(p)).catch(() => undefined);
     return () => {
       alive = false;
@@ -41,6 +45,7 @@ export default function Dashboard() {
 
   const online = runners?.filter((r) => r.status === "online").length ?? 0;
   const activeScans = scans?.items.filter((s) => isActive(s.status)).length ?? 0;
+  const nearLimit = scans?.items.filter((s) => isActive(s.status) && (budgetState(s.cost, s.max_budget)?.fraction ?? 0) >= WARN_AT) ?? [];
   const recentFindings = scans?.items.reduce((n, s) => n + s.findings_total, 0) ?? 0;
   const services = [
     { label: "API", ok: health === undefined ? null : health !== null },
@@ -56,10 +61,18 @@ export default function Dashboard() {
         action={hasRole("admin", "operator") ? <Link to="/scans/new"><Button variant="primary">+ Новый скан</Button></Link> : undefined}
       />
 
-      <motion.div variants={stagger} initial="hidden" animate="show" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <motion.div variants={stagger} initial="hidden" animate="show" className={clsx("grid gap-4 sm:grid-cols-2 lg:grid-cols-4", canProfiles && "xl:grid-cols-5")}>
         <Stat label="Активные сканы" value={scans ? String(activeScans) : "—"} sub="в очереди и выполняются" to="/scans" />
         <Stat label="Находки" value={scans ? String(recentFindings) : "—"} sub={scans ? `в последних ${scans.items.length} сканах` : undefined} to="/scans" />
         <Stat label="Раннеры онлайн" value={runners ? `${online} / ${runners.length}` : "—"} sub="готовы принимать сканы" to="/runners" />
+        {canProfiles && (
+          <Stat
+            label="Расходы за месяц"
+            value={costs ? formatCost(costs.periods.month) : "—"}
+            sub={costs ? (costs.running.count > 0 ? `сейчас в работе: ${formatCost(costs.running.cost)}` : "по сканам этого месяца") : undefined}
+            to="/costs"
+          />
+        )}
         {canProfiles ? (
           <Stat label="LLM-профили" value={profiles ? String(profiles.length) : "—"} sub="ваши ключи и модели" to="/llm" />
         ) : (
@@ -78,6 +91,19 @@ export default function Dashboard() {
           </motion.div>
         )}
       </motion.div>
+
+      {nearLimit.length > 0 && (
+        <div role="status" data-testid="budget-warning" className="mt-6 rounded-xl border border-signal-warn/25 bg-signal-warn/10 px-4 py-3 text-sm text-signal-warn">
+          Близко к лимиту бюджета:{" "}
+          {nearLimit.map((s, i) => (
+            <span key={s.id}>
+              {i > 0 && ", "}
+              <Link to={`/scans/${s.id}`} className="underline">#{s.id}</Link>
+            </span>
+          ))}
+          . При достижении лимита Strix остановит скан.
+        </div>
+      )}
 
       <motion.div variants={rise} initial="hidden" animate="show" transition={{ delay: 0.25 }} className="mt-6">
         <Card className="overflow-hidden">

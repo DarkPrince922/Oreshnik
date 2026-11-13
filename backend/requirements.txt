@@ -13,3 +13,5 @@ cryptography>=43,<47
 python-multipart>=0.0.12,<0.1
 websockets>=13,<15
 asyncssh>=2.17,<3
+croniter>=2,<7
+tzdata>=2024.1

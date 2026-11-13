@@ -1,5 +1,6 @@
 import logging
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -11,13 +12,15 @@ from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
 from app.models.runner import Runner, RunnerKind, RunnerStatus
 from app.models.scan import Finding, Scan, ScanStatus
+from app.models.schedule import Schedule
 from app.services.activity import ActivityTailer
-from app.services.artifacts import ParsedRun, parse_run_dir
+from app.services.artifacts import ParsedRun, parse_run_dir, read_live_usage
 from app.services.llm import build_strix_env
 from app.services.resume import ResumeError, stage_run
 from app.services.runner_health import check_runner
 from app.services.scan_files import LogWriter, find_run_dir, scan_dir
 from app.services.scan_outcome import decide
+from app.services.schedule import fire_scheduled, next_fire
 from app.worker.celery_app import celery
 
 log = logging.getLogger("oreshnik.worker")
@@ -114,6 +117,12 @@ class _CancelProbe:
         self.scan_id = scan_id
         self._flag = False
         self._last = 0.0
+        self._run_dir: Path | None = None
+
+    def _live_usage(self) -> tuple[float | None, int | None]:
+        if self._run_dir is None:  # Strix creates its run directory a little after it starts
+            self._run_dir = find_run_dir(scan_dir(self.scan_id))
+        return read_live_usage(self._run_dir)
 
     def __call__(self) -> bool:
         now = time.monotonic()
@@ -123,7 +132,14 @@ class _CancelProbe:
         try:
             with SessionLocal() as db:
                 status = db.execute(select(Scan.status).where(Scan.id == self.scan_id)).scalar_one_or_none()
-                db.execute(update(Scan).where(Scan.id == self.scan_id).values(heartbeat_at=_utcnow()))
+                # The same poll carries the live spend: Strix rewrites run.json after every model cycle.
+                values: dict = {"heartbeat_at": _utcnow()}
+                cost, tokens = self._live_usage()
+                if cost is not None:
+                    values["cost"] = cost
+                if tokens is not None:
+                    values["total_tokens"] = tokens
+                db.execute(update(Scan).where(Scan.id == self.scan_id).values(**values))
                 db.commit()
         except Exception as exc:  # transient DB trouble must not kill a running scan
             log.warning("cancel/heartbeat probe failed for scan %s: %s", self.scan_id, exc)
@@ -280,3 +296,39 @@ def reap_stale_scans() -> int:
         log.warning("reaped stale scan %s", scan_id)
         cleanup_containers(run_label(scan_id))
     return len(reaped)
+
+
+@celery.task(name="oreshnik.run_due_schedules")
+def run_due_schedules() -> int:
+    """Start every schedule whose time has come. Runs every 30 s from celery beat.
+
+    Each due schedule is *claimed* with a compare-and-swap on `next_run_at` before anything starts, so two scheduler
+    processes (or an overlapping tick) can never start the same firing twice. The next time is computed from now, which
+    means firings missed while beat was down are not replayed as a burst of scans.
+    """
+    now = _utcnow()
+    with SessionLocal() as db:
+        due = db.execute(
+            select(Schedule.id, Schedule.cron, Schedule.timezone, Schedule.next_run_at)
+            .where(Schedule.enabled.is_(True), Schedule.next_run_at <= now)
+            .order_by(Schedule.next_run_at)
+        ).all()
+    started = 0
+    for schedule_id, cron, tz_name, expected in due:
+        try:
+            following = next_fire(cron, tz_name, now)
+        except Exception:
+            log.exception("schedule %s has an unusable cron/time zone; skipping", schedule_id)
+            continue
+        with SessionLocal() as db:
+            claimed = db.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule_id, Schedule.enabled.is_(True), Schedule.next_run_at == expected)
+                .values(next_run_at=following)
+            )
+            db.commit()
+            if claimed.rowcount == 0:
+                continue
+            if fire_scheduled(db, schedule_id, lambda scan_id: scan_run.delay(scan_id), now) == "started":
+                started += 1
+    return started

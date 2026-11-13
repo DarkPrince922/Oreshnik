@@ -5,11 +5,13 @@ import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { AuthProvider } from "./lib/auth";
 import Account from "./pages/Account";
+import Costs from "./pages/Costs";
 import Dashboard from "./pages/Dashboard";
 import LLMProfiles from "./pages/LLMProfiles";
 import Login from "./pages/Login";
 import NewScan from "./pages/NewScan";
 import Runners from "./pages/Runners";
+import Schedules from "./pages/Schedules";
 import ScanDetail from "./pages/ScanDetail";
 import Scans from "./pages/Scans";
 import Users from "./pages/Users";
@@ -39,6 +41,22 @@ export default function App() {
               }
             />
             <Route path="scans/:id" element={<ScanDetail />} />
+            <Route
+              path="schedules"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Schedules />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="costs"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Costs />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="llm"
               element={

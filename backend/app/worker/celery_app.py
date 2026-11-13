@@ -22,6 +22,7 @@ celery.conf.update(
     worker_prefetch_multiplier=1,
     beat_schedule={
         "reap-stale-scans": {"task": "oreshnik.reap_stale_scans", "schedule": 60.0},
+        "run-due-schedules": {"task": "oreshnik.run_due_schedules", "schedule": 30.0},
     },
 )
 

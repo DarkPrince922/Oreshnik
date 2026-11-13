@@ -114,13 +114,26 @@ class Runner(Protocol):
 
 ## 7. Phased build plan
 
+Status legend: *(done)* shipped and tested · *(in progress)* being built · *(planned)* not started.
+
 - **Phase 0 — Skeleton** *(done)*: repo layout, docker-compose (postgres/redis/backend/worker/beat/frontend), config, Alembic, health endpoints, branded frontend shell + login page.
 - **Phase 1 — Domain + auth** *(done)*: users/roles, JWT login, per-user LLM profiles (encrypted), runners CRUD with
   worker-side health checks, first-run bootstrap, login throttling, panel UI for all of it. See §9.
 - **Phase 2 — Scan engine** *(done)*: Runner abstraction (Mock + Local), Strix command builder, Celery task, live log over WebSocket, artifact parser → DB, cancel, reaper. See §10.
 - **Phase 3 — UI** *(done)*: dashboard, scan list, new scan, scan detail (live log + findings + report), severity views, SARIF/JSON download. See §11.
-- **Phase 4 — Scheduling + cost**: beat schedules, cost from `run.json`.
-- **Phase 5 — SSH runners**: remote provisioning + execution + artifact fetch.
+  Three things were added to phase 3 **beyond the original plan**, each at the owner's request after seeing a real scan run:
+  - *live agent activity* — the "Агенты" tab (commands, messages, sub-agents) with a worker-side tailer and API. See §12.
+  - *continuing a scan with new instructions* (`strix --resume`) — a new scan on a copy of the run, migration 0004. See §13.
+  - *full-width layout* on large screens (UI only).
+- **Phase 4 — Scheduling + cost** *(done)*: see §14.
+  - *Scheduling:* recurring scans by cron (with time zone), run-now, overlap protection, safe defaults for real (paid) runners.
+  - *Live cost:* the spend of a running scan from `run.json` (Strix rewrites it after every model cycle) and a budget bar with warnings.
+  - *Cost accounting:* spend by user, day and scan, counting only what each scan itself cost (continuations are cumulative in Strix).
+- **Phase 5 — SSH runners** *(planned)*: panel connects over SSH, installs Docker + Strix, health-checks the host, runs the scan remotely and fetches `strix_runs/<run>`; the `ssh` runner kind already exists in the data model and UI ("скоро").
+
+**Deferred by decision** (not part of any phase unless the owner asks): target allow-list / ownership checks (decision #10), audit log (#7), notifications outside the panel (#6), automatic retention/pruning of run directories.
+
+**Open technical debt:** `Dockerfile.worker` and the compose wiring have never been built or run (no Docker daemon in the dev environment); no real LLM-backed scan has been verified end to end through the panel; sending messages to a *running* headless scan is impossible in Strix 1.7.0 (only the interactive TUI can), so "continue" works on finished or stopped scans only.
 
 ## 8. UI direction
 
@@ -348,3 +361,92 @@ the CLI contract and with the simulated runner — but what the root agent actua
 already finished is up to the model.
 **Known limit:** repository targets are cloned to `/tmp/strix_repos/<run>` (outside the run directory); if the worker container was
 recreated since the parent ran, Strix itself refuses the resume with a clear message ("cloned repo … is missing").
+
+## 14. Scheduling, live cost and cost accounting (phase 4)
+
+### Scheduling
+A **schedule** is a scan template (targets, mode, instruction, budget, runner, LLM profile — the same fields as `POST /api/scans`)
+plus a 5-field **cron** expression and an IANA **time zone**. Migration `0005_schedules` adds the `schedules` table and
+`scans.schedule_id` (a scan remembers which schedule started it; deleting the schedule keeps its scans and clears the link).
+
+**Who fires it.** Celery beat runs `oreshnik.run_due_schedules` every 30 s (so a schedule fires within ~30 s of its time). For each
+due schedule the task first *claims* the firing with `UPDATE … WHERE next_run_at = <expected>` — a compare-and-swap, so two beat
+processes or overlapping ticks can never start the same firing twice — and only then starts the scan, as its **owner**, with the
+owner's LLM profile, through the same code as `POST /api/scans` (`services/scan_factory.py`), so every rule of a normal scan
+(targets, filesystem paths admin-only, per-user active-scan limit, profile ownership) applies unchanged.
+
+**What it does when things go wrong** (the outcome is stored on the schedule and shown on its card):
+
+| Situation | Result |
+|---|---|
+| the previous scan of the same schedule is still running | *Пропущен* — no pile-up |
+| the owner already has the maximum of active scans, or the task queue is down | *Пропущен* (transient, tries again at the next time) |
+| owner deactivated, runner deleted, LLM profile deleted/invalid | *Ошибка*, and the schedule is **switched off** with `disabled_reason` ("Отключено автоматически: …") — a configuration problem does not fix itself |
+| beat or the whole worker was down at the scheduled time | the missed firing is **dropped**; the next time is computed from *now*, so recovery never causes a burst of scans |
+
+A schedule whose runner was deleted never falls back to "the default runner" — that could silently turn a real scan into a
+simulated one (or the other way round). Editing it requires picking a runner again.
+
+**Safe defaults for real (paid) runners**: a `max_budget` is **mandatory**, and the schedule may not fire more often than every
+`SCHEDULE_MIN_INTERVAL_MINUTES` (15). The simulated runner is exempt from both. Other limits: 20 schedules per user
+(`MAX_SCHEDULES_PER_USER`), unique name per user, SSH runners refused until phase 5.
+
+**Time zones and DST.** The expression is evaluated on the *wall clock* of the schedule's zone, then converted to UTC, so "03:00
+Europe/Berlin" stays 03:00 local across DST changes: a time skipped by spring-forward fires once (at the first valid instant), and a
+time repeated by fall-back fires once (the first occurrence) instead of twice. *Residual edge, accepted:* if the scheduler was down
+across the first occurrence and comes back inside the repeated hour, one extra scan can start; overlap protection and the budget
+limit bound the damage.
+
+**API** (`/api/schedules`, admin = all, operator = own, **viewer = 403**): `GET` list (with the next 5 firing times), `POST`,
+`GET/PATCH/DELETE /{id}`, `GET /preview?cron=&timezone=&count=` (validation + next times + the shortest interval, used by the form),
+`POST /{id}/run` (start now; same overlap rule → 409; does not move the schedule's own next time). PATCH recomputes `next_run_at`
+only when the timing changed or the schedule was re-enabled, and clears `disabled_reason` when re-enabled.
+
+**UI** — «Расписания» (admin/operator): cards with next/last run in the schedule's own zone, result badge with the reason, a link
+to the last scan, an on/off switch, «Запустить сейчас», «Сканы расписания» (the scan list filtered with `?schedule=<id>`), edit,
+delete. The form offers presets (hourly, daily 03:00, weekdays 09:00, …), a free cron field with **live preview of the next five
+runs** in the chosen zone, and shows the budget/interval rules before submitting. Scans started by a schedule say so on their page
+and in the list ("⏱ <name>").
+
+### Live cost and the budget bar
+Strix rewrites `run.json` (with `llm_usage.cost` and `total_tokens`) after every model cycle. The worker's existing cancel probe —
+which already polls every 2 s for a cancel request and writes the heartbeat — now also reads those two numbers and
+writes them in the same `UPDATE`, so `scans.cost` grows **while the scan runs** instead of appearing at the end. A half-written or
+odd file is ignored (never fatal); the final value from the artifacts still wins at the end.
+
+On the scan page a **budget bar** shows spend against the scan's limit: normal below 80 %, amber from 80 % ("подходит к лимиту…"),
+red at 100 % ("Лимит бюджета достигнут — Strix сворачивает работу"). It can legitimately pass 100 %: Strix stops after the model
+cycle that crossed the limit. For a continuation the bar uses the **cumulative** cost, because that is what Strix compares with the
+limit (§13). The dashboard shows a warning when an active scan among the latest ones is at ≥ 80 %, and «Расходы» lists the budgets of running scans.
+
+### Cost accounting («Расходы», `GET /api/costs?days=1..365&user_id=`)
+- A scan's **own cost** is `greatest(cost − cost_base, 0)`: a continuation's `cost` is cumulative in Strix, so only its own part is
+  booked and money is never counted twice.
+- It is booked on the UTC date of `coalesce(finished_at, started_at, created_at)` (so a scan that is still running already counts).
+- Response: today / last 7 days / month-to-date / the chosen window / all time, what the *currently running* scans have cost so
+  far, tokens, a gap-free per-day series, per-user totals, and the ten most expensive scans.
+- Operators see **only their own** spend (`user_id` is ignored for them); admins see everyone and may filter; viewers get 403.
+- UI: stat cards, a bar chart per day (7/30/90 days), per-user table (admin), top scans, a "now" panel with live budget bars.
+
+**Caveat worth knowing.** The numbers are what Strix reports from its pricing tables (LiteLLM), i.e. an **estimate, not an
+invoice**. For models whose prices Strix does not know (custom `base_url` models in particular) the figure can be zero or far too
+low — a real scan seen earlier showed ≈ $0.07 for 1.8 M tokens. Since `--max-budget` uses the same number, such a limit may never
+trigger; for those models the wall-clock limit (`SCAN_TIMEOUT_MINUTES`) and the provider's own spend cap are the real protection.
+
+### Tests
+Backend **386 tests** (277 before; 109 new): `test_schedule_service` (cron/zone/DST maths, claim and firing rules, auto-disable),
+`test_schedules` (API, roles, validation, ownership), `test_costs` (accounting, windows, roles), `test_live_cost` (a real
+subprocess rewriting `run.json` while the scan runs; the database must show the growing value *during* the run). The safeguards
+were checked by **deliberately breaking each one** and watching a test fail: non-atomic claim, no overlap protection, falling back to
+the default runner, replaying missed firings, double-counting a continuation, no budget requirement, no minimum interval, live cost
+not written, viewers seeing money, a new schedule without `next_run_at`. Frontend: **56 vitest tests** (budget states, chart scale,
+cron presets, time formatting). Browser end-to-end on a real stack (uvicorn + prefork Celery with beat + Vite): **65 checks**,
+including a schedule that beat really fired into a scan, plus the earlier suites rerun (77 + 28) as regression.
+
+### Not verified / limits
+- **Live cost on a real Strix scan.** Read from the source (`record_sdk_usage` → `save_run_data`) and reproduced by a fake `strix` and
+  the simulated runner, but not observed on a real LLM-backed scan.
+- A real (non-simulated) schedule has never fired end to end — only the simulated runner did (no Docker/LLM here).
+- Schedules are not evaluated while **beat** is not running; compose runs exactly one beat (a second one would be harmless thanks to
+  the claim, merely redundant).
+- The DST edge above; precision is the 30 s beat tick; no calendar exclusions (holidays) and no per-schedule retention of old scans.

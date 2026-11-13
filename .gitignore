@@ -29,3 +29,6 @@ backend/data/
 .vscode/
 *.log
 *.tsbuildinfo
+
+# celery beat state
+celerybeat-schedule*

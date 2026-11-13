@@ -4,6 +4,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import AgentsPanel from "../components/AgentsPanel";
+import BudgetBar from "../components/BudgetBar";
 import ContinueModal from "../components/ContinueModal";
 import FindingsPanel from "../components/FindingsPanel";
 import LogViewer from "../components/LogViewer";
@@ -194,6 +195,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
               <h1 className="text-xl font-semibold tracking-tight text-white">Скан #{scan.id}</h1>
               <StatusBadge status={scan.status} />
             </div>
+            {scan.schedule_id !== null && (
+              <p className="mt-2 text-xs text-slate-500" data-testid="schedule-origin">
+                ⏱ Запущен по расписанию{" "}
+                <Link to={`/scans?schedule=${scan.schedule_id}`} className="text-accent-soft hover:underline">«{scan.schedule_name ?? `#${scan.schedule_id}`}»</Link>
+              </p>
+            )}
             {(scan.parent_scan_id !== null || scan.continuations.length > 0) && (
               <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                 {scan.parent_scan_id !== null && (
@@ -259,6 +266,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
           <Stat label="Токены" value={formatTokens(scan.total_tokens)} />
           <Stat label="Владелец" value={scan.owner_email} />
         </dl>
+
+        {scan.max_budget !== null && (
+          <div className="mt-6 max-w-xl">
+            <BudgetBar cost={scan.cost} limit={scan.max_budget} active={active} />
+          </div>
+        )}
 
         {scan.findings_total > 0 && (
           <div className="mt-6">
