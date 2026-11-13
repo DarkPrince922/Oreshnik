@@ -65,10 +65,6 @@ class MockRunner:
         directives = {m.lower() for m in _DIRECTIVE_RE.findall(spec.instruction or "")}
         delay = settings.mock_delay_seconds * (2 if "slow" in directives else 1)
         started = datetime.now(timezone.utc)
-        run_name = f"mock-{_slug(spec.targets[0])}-{hashlib.sha1(str(spec.scan_id).encode()).hexdigest()[:4]}"
-        run_dir = spec.work_dir / "strix_runs" / run_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-        agents = MockAgents(run_dir)
 
         def pause() -> bool:
             """Sleep one step in small slices; True if cancellation was requested."""
@@ -84,6 +80,21 @@ class MockRunner:
         def say(line: str) -> bool:
             on_line(line)
             return pause()
+
+        if spec.resume_run:
+            run_dir = spec.work_dir / "strix_runs" / spec.resume_run
+            if not (run_dir / "run.json").is_file():
+                return RunResult(error="Нет данных прогона для продолжения")
+            agents = MockAgents(run_dir)
+            try:
+                return self._resume(spec, directives, run_dir, agents, say, on_line)
+            finally:
+                agents.close()
+
+        run_name = f"mock-{_slug(spec.targets[0])}-{hashlib.sha1(str(spec.scan_id).encode()).hexdigest()[:4]}"
+        run_dir = spec.work_dir / "strix_runs" / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        agents = MockAgents(run_dir)
 
         record = {
             "run_id": run_name,
@@ -193,6 +204,76 @@ class MockRunner:
         record.update(status="completed", end_time=datetime.now(timezone.utc).isoformat())
         self._write_artifacts(run_dir, record, findings, final=True)
         on_line(f"Scan completed. {len(findings)} finding(s).")
+        return RunResult(exit_code=2 if findings else 0)
+
+    def _resume(self, spec: ScanSpec, directives: set[str], run_dir: Path, agents: MockAgents, say, on_line) -> RunResult:
+        """Continue a finished (mock) run: the user's instruction reaches the root agent, a follow-up
+        specialist checks it, and any new finding is ADDED to those the run already had — like Strix,
+        whose run directory (findings, usage, agents) is cumulative across a resume."""
+        record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        existing = json.loads((run_dir / "vulnerabilities.json").read_text(encoding="utf-8")) if (run_dir / "vulnerabilities.json").is_file() else []
+        record.update(status="running", end_time=None)
+        self._write_json(run_dir / "run.json", record)
+
+        def interrupted() -> RunResult:
+            agents.stop_all("stopped")
+            return self._interrupted(run_dir, record, on_line)
+
+        for step in (
+            f"[mock] Resuming run {run_dir.name}",
+            f"Resume: restored {len(agents.statuses)} agent(s) from the previous run",
+        ):
+            if say(step):
+                return interrupted()
+
+        root = next((a for a, parent in agents.parent_of.items() if parent is None), "agent_root")
+        agents.reopen(root)
+        if spec.instruction:
+            on_line("Resume: injected new instruction into the root agent")
+            agents.user(root, spec.instruction)
+        agents.say(root, "[MOCK] Understood the new instruction; planning follow-up checks.")
+        if say("Agent root: planning follow-up checks"):
+            return interrupted()
+
+        if "fail" in directives:
+            on_line("Error: model connection failed (simulated MOCK:fail)")
+            agents.set_status(root, "failed", "model connection failed (simulated)")
+            record.update(status="failed", end_time=datetime.now(timezone.utc).isoformat())
+            self._write_json(run_dir / "run.json", record)
+            return RunResult(exit_code=1)
+
+        if "slow" in directives:  # a long continuation, to try cancelling and the "one run at a time" rule
+            for i in range(1, 41):
+                agents.run_command(root, f"curl -s '{spec.targets[0].rstrip('/')}/follow-up/{i}'", f"<html>… simulated follow-up page {i} …</html>")
+                if say(f"Agent root: follow-up probe ({i}/40)"):
+                    return interrupted()
+
+        findings = list(existing)
+        if "clean" not in directives:
+            n = len(findings) + 1
+            focus = " ".join((spec.instruction or "the follow-up").split())[:70]
+            target = spec.targets[0]
+            worker = f"agent_followup_{n}"
+            call = agents.call(root, "create_agent", {"name": f"Follow-up Specialist {n}", "task": f"Follow up: {focus}"})
+            agents.spawn(worker, f"Follow-up Specialist {n}", root, f"[MOCK] Follow up: {focus}")
+            agents.output(root, call, f"Agent 'Follow-up Specialist {n}' created (id: {worker}).")
+            agents.say(worker, f"[MOCK] Checking: {focus}")
+            agents.run_command(worker, f"curl -i '{target.rstrip('/')}/follow-up'", "HTTP/1.1 200 OK\n\n[MOCK] simulated follow-up response")
+            finding = self._finding(n, target, "medium", f"Follow-up: {focus}", "/follow-up", "GET", "CWE-200", 5.0)
+            report = agents.call(root, "create_vulnerability_report", {"title": finding["title"], "severity": "medium", "target": target})
+            findings.append(finding)
+            self._write_artifacts(run_dir, record, findings, final=False)
+            agents.output(root, report, f"Report {finding['id']} recorded")
+            agents.set_status(worker, "completed")
+            if say(f"Finding {finding['id']} [MEDIUM] {finding['title']}"):
+                return interrupted()
+
+        agents.say(root, f"[MOCK] Follow-up finished. {len(findings)} finding(s) in total.")
+        agents.call(root, "finish", {"summary": f"{len(findings)} simulated finding(s) in total"})
+        agents.stop_all("completed")
+        record.update(status="completed", end_time=datetime.now(timezone.utc).isoformat())
+        self._write_artifacts(run_dir, record, findings, final=True)
+        on_line(f"Scan completed. {len(findings)} finding(s) in total.")
         return RunResult(exit_code=2 if findings else 0)
 
     # ── helpers ──────────────────────────────────────────────────────────

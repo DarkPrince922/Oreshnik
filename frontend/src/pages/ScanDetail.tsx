@@ -4,6 +4,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import AgentsPanel from "../components/AgentsPanel";
+import ContinueModal from "../components/ContinueModal";
 import FindingsPanel from "../components/FindingsPanel";
 import LogViewer from "../components/LogViewer";
 import { MODE_META, SEVERITIES, SEVERITY_LABEL, SEVERITY_STYLE, SeverityBar, StatusBadge, isActive } from "../components/scan";
@@ -40,11 +41,12 @@ function useNow(enabled: boolean): number {
   return enabled ? now : Date.now();
 }
 
-function Stat({ label, value }: { label: string; value: React.ReactNode }) {
+function Stat({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
   return (
     <div>
       <dt className="text-[11px] uppercase tracking-wider text-slate-600">{label}</dt>
       <dd className="mt-1 truncate text-sm text-slate-200">{value}</dd>
+      {sub && <dd className="mt-0.5 truncate text-[11px] text-slate-500">{sub}</dd>}
     </div>
   );
 }
@@ -70,6 +72,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const [findings, setFindings] = useState<Finding[] | null>(null);
   const [report, setReport] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState<"cancel" | "delete" | ExportFormat | null>(null);
+  const [continuing, setContinuing] = useState(false);
   const tabChosen = useRef(false);
   const scanRef = useRef<Scan | null>(null);
   scanRef.current = scan;
@@ -191,6 +194,28 @@ function ScanDetailView({ scanId }: { scanId: number }) {
               <h1 className="text-xl font-semibold tracking-tight text-white">Скан #{scan.id}</h1>
               <StatusBadge status={scan.status} />
             </div>
+            {(scan.parent_scan_id !== null || scan.continuations.length > 0) && (
+              <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                {scan.parent_scan_id !== null && (
+                  <span>
+                    ↻ Продолжение скана{" "}
+                    <Link to={`/scans/${scan.parent_scan_id}`} className="text-accent-soft hover:underline">#{scan.parent_scan_id}</Link>
+                    <span className="text-slate-600"> · находки и стоимость накопительные</span>
+                  </span>
+                )}
+                {scan.continuations.length > 0 && (
+                  <span>
+                    Продолжен в{" "}
+                    {scan.continuations.map((id, i) => (
+                      <span key={id}>
+                        {i > 0 && ", "}
+                        <Link to={`/scans/${id}`} className="text-accent-soft hover:underline">#{id}</Link>
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </p>
+            )}
             <ul className="mt-3 flex flex-wrap gap-2">
               {scan.targets.map((t) => (
                 <li key={t} className="max-w-full truncate rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 font-mono text-xs text-slate-300">{t}</li>
@@ -207,6 +232,11 @@ function ScanDetailView({ scanId }: { scanId: number }) {
             {canModify && active && scan.status !== "cancelling" && (
               <Button variant="danger" loading={busy === "cancel"} onClick={onCancel}>Остановить</Button>
             )}
+            {canModify && finished && scan.run_name && scan.runner_name && (
+              <Button variant="primary" onClick={() => setContinuing(true)} title="Продолжить этот прогон с новой инструкцией (новый скан)">
+                Продолжить…
+              </Button>
+            )}
             {canModify && finished && (
               <Button variant="danger" loading={busy === "delete"} onClick={onDelete}>Удалить</Button>
             )}
@@ -221,7 +251,11 @@ function ScanDetailView({ scanId }: { scanId: number }) {
           <Stat label="Режим" value={MODE_META[scan.scan_mode].label} />
           <Stat label="Раннер" value={scan.runner_name ?? "удалён"} />
           <Stat label="Длительность" value={duration === null ? "—" : formatDuration(duration)} />
-          <Stat label="Стоимость" value={formatCost(scan.cost)} />
+          <Stat
+            label="Стоимость"
+            value={formatCost(scan.cost)}
+            sub={scan.cost_base !== null && scan.cost !== null && scan.parent_scan_id !== null ? `+${formatCost(Math.max(0, scan.cost - scan.cost_base))} в этом скане` : undefined}
+          />
           <Stat label="Токены" value={formatTokens(scan.total_tokens)} />
           <Stat label="Владелец" value={scan.owner_email} />
         </dl>
@@ -242,6 +276,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
       </Card>
 
       <ErrorNote message={error} />
+      {scan.run_name && <ContinueModal scan={scan} open={continuing} onClose={() => setContinuing(false)} />}
 
       <div className="mb-5 mt-8 flex gap-1 border-b border-white/10">
         {tabs.map((t) => (

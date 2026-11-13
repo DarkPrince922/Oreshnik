@@ -52,3 +52,11 @@ def test_timeout_message_mentions_the_limit():
 
 def test_cancel_wins_over_everything_else():
     assert decide(RunResult(cancelled=True, timed_out=True, error="x"), run(), "early", 180)[0] == ScanStatus.cancelled
+
+
+def test_inherited_findings_do_not_count_when_the_continued_run_was_never_touched():
+    # A continued run starts out holding the parent's findings; exit code 2 is also argparse's startup-error code.
+    parsed, result = run(n=3), RunResult(exit_code=2)
+    assert decide(result, parsed, None, 180, "strix: error: x", results_are_fresh=False)[0] == ScanStatus.failed
+    assert decide(result, parsed, None, 180, "", results_are_fresh=True)[0] == ScanStatus.vulns_found
+    assert decide(result, parsed, None, 180)[0] == ScanStatus.vulns_found  # fresh by default

@@ -39,7 +39,15 @@ class MockAgents:
         self.names: dict[str, str] = {}
         self.parent_of: dict[str, str | None] = {}
         self.errors: dict[str, str] = {}
-        self._calls = 0
+        # Continuing an existing run: pick up its roster and keep call ids unique.
+        roster = self.state_dir / "agents.json"
+        if roster.is_file():
+            data = json.loads(roster.read_text(encoding="utf-8"))
+            self.statuses.update(data.get("statuses") or {})
+            self.names.update(data.get("names") or {})
+            self.parent_of.update(data.get("parent_of") or {})
+            self.errors.update(data.get("errors") or {})
+        self._calls = self._conn.execute("SELECT COUNT(*) FROM agent_messages").fetchone()[0]
 
     def close(self) -> None:
         self._conn.close()
@@ -64,6 +72,16 @@ class MockAgents:
         if error:
             self.errors[agent_id] = error
         self._flush_roster()
+
+    def reopen(self, agent_id: str) -> None:
+        """A finished agent picks work up again (what `--resume` does to the root agent)."""
+        self.statuses[agent_id] = "running"
+        self.errors.pop(agent_id, None)
+        self._flush_roster()
+
+    def user(self, agent_id: str, text: str) -> None:
+        """A message typed by the user — Strix stores it as a plain user turn."""
+        self._add(agent_id, {"role": "user", "content": text})
 
     def stop_all(self, status: str, error: str | None = None) -> None:
         for agent_id in list(self.statuses):

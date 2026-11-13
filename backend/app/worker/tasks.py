@@ -14,6 +14,7 @@ from app.models.scan import Finding, Scan, ScanStatus
 from app.services.activity import ActivityTailer
 from app.services.artifacts import ParsedRun, parse_run_dir
 from app.services.llm import build_strix_env
+from app.services.resume import ResumeError, stage_run
 from app.services.runner_health import check_runner
 from app.services.scan_files import LogWriter, find_run_dir, scan_dir
 from app.services.scan_outcome import decide
@@ -63,6 +64,8 @@ class _Snapshot:
     has_profile: bool
     env: dict[str, str]
     env_error: str | None
+    parent_scan_id: int | None = None
+    resume_run: str | None = None
 
 
 def _claim(scan_id: int) -> _Snapshot | None:
@@ -94,6 +97,8 @@ def _claim(scan_id: int) -> _Snapshot | None:
             has_profile=scan.llm_profile is not None,
             env=env,
             env_error=env_error,
+            parent_scan_id=scan.parent_scan_id,
+            resume_run=scan.resume_run_name,
         )
 
 
@@ -175,6 +180,7 @@ def scan_run(scan_id: int) -> str:
     result = RunResult()
     early_error: str | None = None
     parsed = ParsedRun()
+    run_json_before: int | None = None
     try:
         if snap.runner_kind is None:
             raise _Preflight("Раннер был удалён до запуска скана")
@@ -188,6 +194,19 @@ def scan_run(scan_id: int) -> str:
             if not snap.has_profile:
                 raise _Preflight("Для реального запуска нужен LLM-профиль (не выбран или удалён)")
 
+        if snap.resume_run:
+            # A continuation: give Strix the parent's run directory (a copy) and start the activity feed after
+            # the history that is already in it.
+            if snap.parent_scan_id is None:
+                raise _Preflight("Родительский скан был удалён — продолжить нельзя")
+            try:
+                staged = stage_run(snap.parent_scan_id, snap.resume_run, work_dir)
+            except ResumeError as exc:
+                raise _Preflight(str(exc))
+            writer.write(f"[oreshnik] Продолжение скана #{snap.parent_scan_id}: прогон {snap.resume_run} скопирован в рабочую папку")
+            tailer.skip_existing(staged)
+            run_json_before = (staged / "run.json").stat().st_mtime_ns
+
         timeout = settings.scan_timeout_minutes * 60 if settings.scan_timeout_minutes > 0 else None
         spec = ScanSpec(
             scan_id=scan_id,
@@ -198,6 +217,7 @@ def scan_run(scan_id: int) -> str:
             work_dir=work_dir,
             run_label=run_label(scan_id),
             timeout_seconds=timeout,
+            resume_run=snap.resume_run,
             env=snap.env,
         )
         tailer.start()
@@ -220,7 +240,17 @@ def scan_run(scan_id: int) -> str:
         last_line = writer.last_line
         writer.close()
 
-    status, detail = decide(result, parsed, early_error, settings.scan_timeout_minutes, last_line)
+    # A continued run starts out holding the parent's findings; only trust them as THIS run's result if
+    # Strix really wrote to the run (it rewrites run.json when it starts and when it finishes).
+    results_are_fresh = True
+    if run_json_before is not None:
+        current = find_run_dir(work_dir)
+        try:
+            results_are_fresh = current is not None and (current / "run.json").stat().st_mtime_ns != run_json_before
+        except OSError:
+            results_are_fresh = False
+
+    status, detail = decide(result, parsed, early_error, settings.scan_timeout_minutes, last_line, results_are_fresh)
     _finalize(scan_id, status, detail, result, parsed)
     return status.value
 

@@ -378,6 +378,27 @@ class ActivityTailer:
                 break
         return appended
 
+    def skip_existing(self, run_dir: Path) -> None:
+        """For a continued run: everything already in agents.db belongs to the parent scan.
+
+        The feed of the continuation then starts with *new* activity (the injected instruction first),
+        and the agents that already exist are marked as having had their first user turn, so that
+        instruction is not mistaken for an agent's original task.
+        """
+        self._run_dir = run_dir
+        db = run_dir / ".state" / "agents.db"
+        if db.is_file():
+            try:
+                conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+                try:
+                    row = conn.execute("select coalesce(max(id), 0) from agent_messages").fetchone()
+                    self._last_id = int(row[0])
+                    self._norm.seen_user.update(a for (a,) in conn.execute("select distinct session_id from agent_messages"))
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                log.warning("could not skip existing agent history: %s", exc)
+
     # -- thread control
     def start(self) -> None:
         self._thread = threading.Thread(target=self._loop, name=f"activity-{self.scan_id}", daemon=True)

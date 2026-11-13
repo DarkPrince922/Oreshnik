@@ -21,6 +21,20 @@ class ScanCreate(BaseModel):
         return v.strip() or None if v else None
 
 
+class ScanContinue(BaseModel):
+    """Continue a finished scan (`strix --resume`). Targets and mode come from the scan being continued."""
+
+    instruction: str | None = Field(default=None, max_length=10000)
+    # Strix's budget limit is cumulative for the whole run, not per continuation.
+    max_budget: float | None = Field(default=None, gt=0, le=10000, description="USD, total for the whole run")
+    llm_profile_id: int | None = None
+
+    @field_validator("instruction")
+    @classmethod
+    def _blank_instruction(cls, v: str | None) -> str | None:
+        return v.strip() or None if v else None
+
+
 class FindingBrief(BaseModel):
     id: int
     vuln_id: str
@@ -46,6 +60,7 @@ class ScanOut(BaseModel):
     owner_email: str
     runner_id: int | None
     runner_name: str | None
+    runner_kind: str | None = None
     llm_profile_id: int | None
     llm_profile_name: str | None
     targets: list[str]
@@ -64,6 +79,9 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     severity_counts: dict[str, int]
     findings_total: int
+    parent_scan_id: int | None = None
+    cost_base: float | None = None  # what the parent had cost; `cost` is cumulative across a resume
+    continuations: list[int] = []   # scans that continue this one (visible to the viewer)
 
 
 class ScanList(BaseModel):

@@ -70,6 +70,15 @@ class Scan(Base):
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # Continuation of an earlier scan (`strix --resume`): the parent, the Strix run it continues, and what the
+    # parent had already cost. Strix's cost is cumulative across a resume, so this scan's own spend is
+    # `cost - cost_base`.
+    parent_scan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    resume_run_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cost_base: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

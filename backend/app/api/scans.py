@@ -8,7 +8,7 @@ from typing import Literal
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, select, true, update
+from sqlalchemy import func, or_, select, true, update
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -26,6 +26,7 @@ from app.schemas.scan import (
     FindingOut,
     LogPage,
     ReportOut,
+    ScanContinue,
     ScanCreate,
     ScanList,
     ScanOut,
@@ -42,6 +43,7 @@ from app.services.scan_files import (
     scan_dir,
     tail_from,
 )
+from app.services.resume import ResumeError, check_resumable
 from app.services.targets import TargetKind, classify_all
 from app.worker.tasks import scan_run
 
@@ -77,13 +79,27 @@ def _severity_counts(db: Session, scan_ids: list[int]) -> dict[int, dict[str, in
     return counts
 
 
-def _out(scan: Scan, viewer: User, counts: dict[str, int]) -> ScanOut:
+def _continuations(db: Session, viewer: User, scan_ids: list[int]) -> dict[int, list[int]]:
+    """Scans that continue each of `scan_ids`, limited to the ones the viewer may see."""
+    out: dict[int, list[int]] = {i: [] for i in scan_ids}
+    if not scan_ids:
+        return out
+    rows = db.execute(
+        select(Scan.parent_scan_id, Scan.id).where(Scan.parent_scan_id.in_(scan_ids), _visible(viewer)).order_by(Scan.id)
+    )
+    for parent_id, child_id in rows:
+        out[parent_id].append(child_id)
+    return out
+
+
+def _out(scan: Scan, viewer: User, counts: dict[str, int], continuations: list[int] | None = None) -> ScanOut:
     return ScanOut(
         id=scan.id,
         user_id=scan.user_id,
         owner_email=scan.user.email,
         runner_id=scan.runner_id,
         runner_name=scan.runner.name if scan.runner else None,
+        runner_kind=scan.runner.kind.value if scan.runner else None,
         llm_profile_id=scan.llm_profile_id,
         llm_profile_name=scan.llm_profile.name if scan.llm_profile else None,
         targets=scan.targets,
@@ -102,11 +118,14 @@ def _out(scan: Scan, viewer: User, counts: dict[str, int]) -> ScanOut:
         finished_at=scan.finished_at,
         severity_counts=counts,
         findings_total=sum(counts.values()),
+        parent_scan_id=scan.parent_scan_id,
+        cost_base=scan.cost_base,
+        continuations=continuations or [],
     )
 
 
 def _out_one(db: Session, scan: Scan, viewer: User) -> ScanOut:
-    return _out(scan, viewer, _severity_counts(db, [scan.id])[scan.id])
+    return _out(scan, viewer, _severity_counts(db, [scan.id])[scan.id], _continuations(db, viewer, [scan.id])[scan.id])
 
 
 # ── create / list / read ─────────────────────────────────────────────────
@@ -178,7 +197,10 @@ def create_scan(
     )
     db.add(scan)
     db.commit()
+    return _enqueue(db, scan, user)
 
+
+def _enqueue(db: Session, scan: Scan, user: User) -> ScanOut:
     try:
         scan_run.delay(scan.id)
     except Exception as exc:  # broker down
@@ -190,8 +212,91 @@ def create_scan(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Очередь задач недоступна, скан не запущен")
 
     db.expire_all()  # an eager/fast worker may already have finished the scan
-    scan = db.get(Scan, scan.id)
-    return _out_one(db, scan, user)
+    return _out_one(db, db.get(Scan, scan.id), user)
+
+
+@router.post("/{scan_id}/continue", response_model=ScanOut, status_code=status.HTTP_201_CREATED)
+def continue_scan(
+    scan_id: int, body: ScanContinue, user: User = Depends(require_operator), db: Session = Depends(get_db)
+) -> ScanOut:
+    """Continue a finished (or stopped) scan with new instructions — `strix --resume`.
+
+    Creates a NEW scan that works on a copy of the parent's run: Strix keeps every agent's history and
+    the findings so far, and hands the new instruction to the root agent. The parent stays untouched.
+    """
+    parent = _get_visible(db, user, scan_id)
+    if parent.status not in FINAL_STATUSES:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Скан ещё выполняется — продолжить можно только завершённый")
+    try:
+        check_resumable(parent.id, parent.run_name)
+    except ResumeError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+
+    runner = parent.runner
+    if runner is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Раннер этого скана удалён")
+    if runner.kind == RunnerKind.ssh:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "SSH-раннеры пока не поддерживаются")
+
+    # A scan that finished on its own has nothing left to do without a new instruction; a stopped or failed
+    # one can simply be picked up again.
+    if parent.status in (ScanStatus.succeeded, ScanStatus.vulns_found) and not body.instruction:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Опишите, что агентам делать дальше")
+
+    # The key is personal: use one of YOUR profiles (the parent's only if it is yours).
+    profile: LLMProfile | None = None
+    if body.llm_profile_id is not None:
+        profile = db.scalar(select(LLMProfile).where(LLMProfile.id == body.llm_profile_id, LLMProfile.user_id == user.id))
+        if profile is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "LLM-профиль не найден")
+    elif runner.kind != RunnerKind.mock:
+        if parent.llm_profile is not None and parent.llm_profile.user_id == user.id:
+            profile = parent.llm_profile
+        else:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Выберите свой LLM-профиль")
+
+    # Strix compares the budget with the cost of the WHOLE run, so a limit at or below what was already
+    # spent would stop the continuation immediately.
+    if body.max_budget is not None and parent.cost is not None and body.max_budget <= parent.cost:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Лимит бюджета общий для всего прогона, а уже потрачено ${parent.cost:.2f}. Укажите больше или оставьте пустым.",
+        )
+
+    # Strix names the sandbox containers after the run, so one run must never be active twice.
+    busy = db.scalar(
+        select(Scan.id)
+        .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == parent.run_name, Scan.run_name == parent.run_name))
+        .limit(1)
+    )
+    if busy is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Этот прогон уже продолжается в скане #{busy}")
+
+    active = db.scalar(
+        select(func.count()).select_from(Scan).where(Scan.user_id == user.id, Scan.status.in_(ACTIVE_STATUSES))
+    )
+    if active >= settings.max_active_scans_per_user:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Уже запущено сканов: {active}. Лимит — {settings.max_active_scans_per_user}; дождитесь завершения или отмените лишние.",
+        )
+
+    child = Scan(
+        user_id=user.id,
+        runner_id=runner.id,
+        llm_profile_id=profile.id if profile else None,
+        targets=list(parent.targets),
+        scan_mode=parent.scan_mode,
+        instruction=body.instruction,
+        max_budget=body.max_budget,
+        status=ScanStatus.queued,
+        parent_scan_id=parent.id,
+        resume_run_name=parent.run_name,
+        cost_base=parent.cost or 0.0,
+    )
+    db.add(child)
+    db.commit()
+    return _enqueue(db, child, user)
 
 
 @router.get("", response_model=ScanList)
@@ -207,8 +312,9 @@ def list_scans(
         where.append(Scan.status == status_filter)
     total = db.scalar(select(func.count()).select_from(Scan).where(*where))
     scans = db.scalars(select(Scan).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)).all()
-    counts = _severity_counts(db, [s.id for s in scans])
-    return ScanList(items=[_out(s, user, counts[s.id]) for s in scans], total=total, limit=limit, offset=offset)
+    ids = [s.id for s in scans]
+    counts, children = _severity_counts(db, ids), _continuations(db, user, ids)
+    return ScanList(items=[_out(s, user, counts[s.id], children[s.id]) for s in scans], total=total, limit=limit, offset=offset)
 
 
 @router.get("/{scan_id}", response_model=ScanOut)
@@ -243,6 +349,11 @@ def delete_scan(scan_id: int, user: User = Depends(require_operator), db: Sessio
     scan = _get_visible(db, user, scan_id)
     if scan.status in ACTIVE_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, "Скан ещё выполняется — сначала отмените его")
+    waiting = db.scalar(
+        select(Scan.id).where(Scan.parent_scan_id == scan_id, Scan.status.in_(ACTIVE_STATUSES)).limit(1)
+    )
+    if waiting is not None:  # it copies this scan's run directory when it starts
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Скан #{waiting} продолжает этот скан — дождитесь его завершения")
     db.delete(scan)
     db.commit()
     remove_scan_dir(scan_id)

@@ -14,6 +14,8 @@ class ScanSpec:
     work_dir: Path                      # cwd of the run; Strix creates strix_runs/ inside it
     run_label: str                      # tags sandbox containers so they can be found and removed
     timeout_seconds: int | None = None
+    # Name of the Strix run to continue (`--resume`); its directory is already in work_dir/strix_runs/.
+    resume_run: str | None = None
     # Secret environment for the run (STRIX_LLM / LLM_API_KEY / LLM_API_BASE). Never logged.
     env: dict[str, str] = field(default_factory=dict, repr=False)
 

@@ -16,6 +16,7 @@ def decide(
     early_error: str | None,
     timeout_minutes: int,
     last_line: str = "",
+    results_are_fresh: bool = True,
 ) -> tuple[ScanStatus, str | None]:
     if result.cancelled:
         return ScanStatus.cancelled, "Остановлен пользователем"
@@ -39,7 +40,10 @@ def decide(
             detail = None
         return (ScanStatus.vulns_found if found else ScanStatus.succeeded), detail
 
-    if code == 2 and found:
+    # `results_are_fresh` is False for a continued scan whose run.json was never touched: the findings in
+    # the directory are the parent's, so an exit code 2 (which argparse also uses for startup errors) must
+    # not be taken as "this run found vulnerabilities".
+    if code == 2 and found and results_are_fresh:
         return ScanStatus.vulns_found, None
 
     detail = f"Strix завершился с кодом {code}"

@@ -67,6 +67,36 @@ FINDINGS = [
 
 print("Strix fake 1.7.0 starting", flush=True)
 
+resume = next((a.split("=", 1)[1] for a in argv if a.startswith("--resume=")), None)
+if resume:
+    # What the real CLI does (strix 1.7.0): --resume needs an existing run in ./strix_runs and refuses --target.
+    if any(a.startswith(("--target=", "-t")) for a in argv):
+        print("strix: error: Cannot combine --resume with --target/--target-list.", flush=True)
+        sys.exit(2)
+    run_dir = Path("strix_runs") / resume
+    if not (run_dir / "run.json").exists():
+        print(f"strix: error: --resume {resume}: no such run (missing {run_dir}/run.json)", flush=True)
+        sys.exit(2)
+    if mode.startswith("startup_error"):
+        print("strix: error: startup problem after loading the run", flush=True)
+        sys.exit(2)  # run.json untouched: nothing actually ran
+    import sqlite3
+    record = json.loads((run_dir / "run.json").read_text())
+    findings = json.loads((run_dir / "vulnerabilities.json").read_text()) if (run_dir / "vulnerabilities.json").exists() else []
+    findings.append({"id": f"vuln-{len(findings) + 1:04d}", "title": "Found while continuing", "severity": "high", "timestamp": now(),
+                     "target": "https://example.com", "description": mode})
+    (run_dir / "vulnerabilities.json").write_text(json.dumps(findings))
+    record.update(status="completed", end_time=now())
+    record["llm_usage"] = {**record.get("llm_usage", {}), "cost": 0.84, "total_tokens": 300}  # cumulative, like Strix
+    (run_dir / "run.json").write_text(json.dumps(record))
+    conn = sqlite3.connect(run_dir / ".state" / "agents.db", isolation_level=None)
+    conn.execute("INSERT INTO agent_messages (session_id, message_data) VALUES ('root', ?)", (json.dumps({"role": "user", "content": mode}),))
+    conn.execute("INSERT INTO agent_messages (session_id, message_data) VALUES ('root', ?)",
+                 (json.dumps({"role": "assistant", "content": [{"type": "output_text", "text": "continuing as asked"}]}),))
+    conn.close()
+    print(f"Resumed {resume}: {len(findings)} findings in total", flush=True)
+    sys.exit(2)
+
 if mode == "ok_clean":
     write_run("completed")
     write_agents()
@@ -74,6 +104,7 @@ if mode == "ok_clean":
     sys.exit(0)
 if mode == "ok_findings":
     write_run("completed", FINDINGS)
+    write_agents()
     print("done: 3 findings", flush=True)
     sys.exit(2)
 if mode == "fail":
@@ -96,6 +127,10 @@ if mode == "ansi":
     sys.exit(0)
 
 # long-running modes -------------------------------------------------------
+if mode not in ("slow", "ignore_sigint", "spawn_child"):
+    # An unrecognised mode is a bug in the test, not a reason to hang the suite.
+    print(f"fake strix: unknown mode {mode!r}", flush=True)
+    sys.exit(3)
 write_run("running")
 
 if mode == "spawn_child":

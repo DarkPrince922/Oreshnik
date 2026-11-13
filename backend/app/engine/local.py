@@ -55,7 +55,11 @@ class LocalRunner:
     def build_argv(self, spec: ScanSpec) -> list[str]:
         # `--opt=value` form: a value starting with "-" can never be parsed as an option.
         argv = [self.strix_bin, "-n", "-m", spec.scan_mode]
-        argv += [f"--target={t}" for t in spec.targets]
+        if spec.resume_run:
+            # Strix refuses --resume together with --target: the targets come from the run being continued.
+            argv.append(f"--resume={spec.resume_run}")
+        else:
+            argv += [f"--target={t}" for t in spec.targets]
         if spec.instruction:
             argv.append(f"--instruction-file={INSTRUCTION_NAME}")
         if spec.max_budget:

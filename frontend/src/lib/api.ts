@@ -132,6 +132,7 @@ export interface Scan {
   owner_email: string;
   runner_id: number | null;
   runner_name: string | null;
+  runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
   targets: string[];
@@ -150,6 +151,10 @@ export interface Scan {
   finished_at: string | null;
   severity_counts: Partial<Record<Severity, number>>;
   findings_total: number;
+  parent_scan_id: number | null;
+  /** What the parent had cost: `cost` is cumulative across a continuation. */
+  cost_base: number | null;
+  continuations: number[];
 }
 
 export interface ScanList {
@@ -301,3 +306,12 @@ export interface ActivityPage {
 
 export const getActivity = async (id: number, cursor: number) =>
   (await api.get<ActivityPage>(`/api/scans/${id}/activity`, { params: { cursor } })).data;
+
+export interface ContinueInput {
+  instruction: string | null;
+  max_budget: number | null;
+  llm_profile_id: number | null;
+}
+/** Continue a finished/stopped scan (`strix --resume`): creates a NEW scan that works on a copy of its run. */
+export const continueScan = async (id: number, body: ContinueInput) =>
+  (await api.post<Scan>(`/api/scans/${id}/continue`, body)).data;

@@ -138,9 +138,12 @@ const TEXT_META: Record<TextItem["kind"], { label: string; box: string }> = {
   system: { label: "Система", box: "border-signal-warn/25 bg-signal-warn/5" },
 };
 
+// A plain user turn after an agent's task is what `strix --resume --instruction` injects into the root agent.
+const USER_INSTRUCTION = { label: "Инструкция пользователя", box: "border-accent/40 bg-accent/10" };
+
 function Talk({ item, agents, start }: { item: TextItem; agents: AgentInfo[]; start: string | undefined }) {
   const [open, setOpen] = useState(false);
-  const meta = TEXT_META[item.kind];
+  const meta = item.kind === "message" && item.role === "user" ? USER_INSTRUCTION : TEXT_META[item.kind];
   const long = item.text.length > 600 || item.text.split("\n").length > 8;
   return (
     <div className={clsx("rounded-xl border px-4 py-3", meta.box)}>

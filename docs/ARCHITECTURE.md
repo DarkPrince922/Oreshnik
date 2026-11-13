@@ -306,3 +306,45 @@ between the sidebar and the content and between the content and the right edge i
 1024 px column left 320 px (1920) / 640 px (2560) empty on each side. Cards (LLM profiles, runners) share the row evenly and are
 capped at 44 rem each; reading-width content keeps a sensible measure (report 56 rem, finding text 64 rem). The log and the
 agent feed are sized from the viewport height (`100vh − 29rem`, at least 28–32 rem) so a large monitor shows more of the process.
+
+## 13. Continuing a scan with new instructions ("Продолжить…")
+
+Strix has no way to talk to a **running** headless scan (`-n` reads its instruction only at start; the interactive TUI can message
+agents, but it talks to the process over a private socket). What it does have is **`--resume <run>`**, and that is what the panel
+uses — for scans that are *finished or stopped* (verified against strix-agent 1.7.0):
+
+| Fact (source) | Consequence |
+|---|---|
+| `--resume NAME` loads `./strix_runs/NAME/{run.json, .state/agents.json, .state/agents.db}` and **refuses `--target`** | the panel passes `--resume=NAME` and no targets; the targets come from the run |
+| a new `--instruction` on resume is injected into the root agent's session as a plain, high-priority *user* message, and the agent loop restarts (`core/runner.py`: "otherwise … silently ignored") | the instruction is what makes a *finished* scan do more work |
+| findings, usage and agent histories are restored from the run directory | results and cost of a continuation are **cumulative** |
+| the budget limit is compared with the **whole** run's cost (`recomputed_budget_flags`: `cost >= max_budget` → stop) | a limit at or below what was already spent stops the continuation at once → refused up front |
+| sandbox containers are named after the run; repo clones live in `/tmp/strix_repos/<run>` | one run must never be active twice |
+
+**Model.** A continuation is a **new scan** (`POST /api/scans/{id}/continue`, columns `parent_scan_id`, `resume_run_name`,
+`cost_base`). The parent's run directory is **copied** into the new scan's own working directory (`services/resume.py`, symlinks
+copied as links, never followed), so the parent keeps its results exactly as they were, and one scan can be continued in several
+directions. `cost - cost_base` is what the continuation itself cost.
+
+**Rules.**
+- Only finished scans (succeeded / vulns_found / failed / cancelled) that still have their run files can be continued; admin or the
+  owning operator, never a viewer. The child belongs to whoever started it and needs **that** user's LLM profile (an admin does not
+  inherit an operator's key). Mock runs need none.
+- A scan that finished on its own (`succeeded` / `vulns_found`) needs a new instruction; a stopped or failed one can simply resume.
+- At most one active scan per Strix run (409 "уже продолжается в скане #N"); the parent cannot be deleted while a continuation
+  still needs it. The per-user active-scan limit applies.
+- **Exit code 2 safeguard.** A continued run starts out holding the parent's findings, and argparse also exits with 2. So
+  "vulnerabilities found" is only believed if Strix really touched the run (`run.json` changed); otherwise it is a failure.
+- The activity feed of a continuation **starts after the parent's history** (`ActivityTailer.skip_existing`): you see the injected
+  instruction first, labelled "Инструкция пользователя", then what the agents did about it; the roster still lists every agent.
+
+**UI.** A "Продолжить…" button on finished scans (owner/admin): a dialog explaining that a new scan is created, the instruction
+(required or optional as above), LLM profile (real runners), and a *total* budget limit with the amount already spent. The new scan
+links back to its parent ("↻ Продолжение скана #N"), the parent lists its continuations, and the scan list marks them ("↻ из #N").
+
+**Not verified:** a real `--resume` of a **completed** run on a machine with Docker and an LLM. The argument handling was checked
+against the real CLI, the resume code path was read, and the whole flow was exercised end to end with a fake `strix` that reproduces
+the CLI contract and with the simulated runner — but what the root agent actually *does* with the injected instruction after it had
+already finished is up to the model.
+**Known limit:** repository targets are cloned to `/tmp/strix_repos/<run>` (outside the run directory); if the worker container was
+recreated since the parent ran, Strix itself refuses the resume with a clear message ("cloned repo … is missing").
