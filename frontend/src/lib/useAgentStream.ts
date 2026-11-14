@@ -3,21 +3,24 @@ import { useEffect, useState } from "react";
 import { apiWsUrl, getToken, notifyUnauthorized, type AgentEvent, type AgentSessionStatus } from "./api";
 
 export type AgentStreamState = "connecting" | "live" | "error";
+export type LiveItems = Record<string, Record<string, unknown>>;
 
 /**
- * Live events of an agent session over WebSocket (protocol: backend/app/api/agent.py).
+ * Live view of an agent session over WebSocket (protocol: backend/app/api/agent.py).
  *
- * Unlike a scan the stream never "ends" — the session waits for the next message — so the socket stays open and a drop is
- * always followed by a reconnect that resumes from the next event we have not seen. Events carry a sequence number, so a
- * replayed one is ignored and nothing is lost or shown twice.
+ * Two kinds of frames: `event` (history; numbered, so a replayed one is ignored and nothing is lost or shown twice after a reconnect) and
+ * `live` / `live_end` (an item still being written, as it is so far, and the end of it). Unlike a scan the stream never "ends" — the session
+ * waits for the next message — so the socket stays open and a drop is always followed by a reconnect that resumes from the next unseen event.
  */
 export function useAgentStream(sessionId: number | null) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [live, setLive] = useState<LiveItems>({});
   const [status, setStatus] = useState<AgentSessionStatus>("idle");
   const [state, setState] = useState<AgentStreamState>("connecting");
 
   useEffect(() => {
     setEvents([]);
+    setLive({});
     setStatus("idle");
     if (sessionId === null) return;
     setState("connecting");
@@ -28,25 +31,34 @@ export function useAgentStream(sessionId: number | null) {
     let next = 0;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
-    let pending: AgentEvent[] = [];
+    let pendingEvents: AgentEvent[] = [];
+    let pendingLive: LiveItems | null = null; // the latest snapshots, applied at the next flush
 
-    // A long history replays in a burst: render at most ~12 times a second.
+    // A long history replays in a burst and snapshots arrive many times a second: render at most ~12 times a second.
     const flush = () => {
       flushTimer = undefined;
-      const batch = pending;
-      pending = [];
+      const batch = pendingEvents;
+      pendingEvents = [];
       if (batch.length) setEvents((old) => old.concat(batch));
+      if (pendingLive) {
+        setLive(pendingLive);
+        pendingLive = null;
+      }
     };
+    const schedule = () => {
+      flushTimer ??= setTimeout(flush, 80);
+    };
+    let current: LiveItems = {};
 
     const connect = () => {
       if (disposed) return;
       setState("connecting");
-      const ws = new WebSocket(apiWsUrl(`/api/agent/sessions/${sessionId}/ws`));
+      const ws = new WebSocket(apiWsUrl(`${"/api/agent/sessions"}/${sessionId}/ws`));
       socket = ws;
       ws.onopen = () => ws.send(JSON.stringify({ token: getToken(), from: next }));
       ws.onmessage = (message) => {
         if (disposed || socket !== ws) return; // a connection we already gave up on must not feed the list
-        let frame: { type?: string; seq?: number; kind?: string; payload?: Record<string, unknown>; status?: AgentSessionStatus };
+        let frame: { type?: string; seq?: number; kind?: string; key?: string; payload?: Record<string, unknown>; status?: AgentSessionStatus };
         try {
           frame = JSON.parse(message.data);
         } catch {
@@ -58,12 +70,23 @@ export function useAgentStream(sessionId: number | null) {
           setStatus(frame.status);
         } else if (frame.type === "event" && typeof frame.seq === "number" && frame.seq === next && typeof frame.kind === "string") {
           next = frame.seq + 1;
-          pending.push({ seq: frame.seq, kind: frame.kind, payload: frame.payload ?? {} });
-          flushTimer ??= setTimeout(flush, 80);
+          pendingEvents.push({ seq: frame.seq, kind: frame.kind, payload: frame.payload ?? {} });
+          schedule();
+        } else if (frame.type === "live" && typeof frame.key === "string") {
+          current = { ...current, [frame.key]: frame.payload ?? {} };
+          pendingLive = current;
+          schedule();
+        } else if (frame.type === "live_end" && typeof frame.key === "string") {
+          const { [frame.key]: _gone, ...rest } = current;
+          current = rest;
+          pendingLive = current;
+          schedule();
         }
       };
       ws.onclose = (event) => {
         if (disposed) return;
+        current = {}; // what was being written is asked for again by the next connection
+        pendingLive = current;
         if (event.code === 4401) {
           notifyUnauthorized();
           setState("error");
@@ -87,5 +110,5 @@ export function useAgentStream(sessionId: number | null) {
     };
   }, [sessionId]);
 
-  return { events, status, state };
+  return { events, live, status, state };
 }

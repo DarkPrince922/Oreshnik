@@ -93,6 +93,11 @@ services:
     build: ./agentd
     environment:
       AGENT_TOKEN: ${AGENT_TOKEN:-}
+      AGENT_IDLE_SECONDS: ${AGENT_IDLE_SECONDS:-900}
+      AGENT_MAX_PROCESSES: ${AGENT_MAX_PROCESSES:-8}
+      AGENT_APPROVAL_TIMEOUT_SECONDS: ${AGENT_APPROVAL_TIMEOUT_SECONDS:-900}
+      AGENT_MAX_UPLOAD_MB: ${AGENT_MAX_UPLOAD_MB:-50}
+      AGENT_MAX_ARCHIVE_MB: ${AGENT_MAX_ARCHIVE_MB:-300}
     volumes:
       - agent_data:/data/agent
     networks: [agentnet]

@@ -471,11 +471,25 @@ def test_the_settings_can_be_changed_between_messages(client, wired):
     assert first["seen"]["approvalPolicy"] == "never" and first["seen"].get("developerInstructions") is None
     r = client.patch(f"/api/agent/sessions/{s['id']}", json={"instructions": " Отвечай по-русски. ", "reasoning_effort": "high", "approval_mode": "ask", "title": "Новое имя"}, headers=h)
     assert r.status_code == 200 and r.json()["instructions"] == "Отвечай по-русски." and r.json()["reasoning_effort"] == "high" and r.json()["title"] == "Новое имя"
+    assert load(s["id"]).thread_instructions is None  # the conversation does not have them yet
     second = report(client, h, s["id"])
-    assert second["seen"]["effort"] == "high" and second["seen"]["approvalPolicy"] == "untrusted" and second["seen"]["developerInstructions"] == "Отвечай по-русски."
-    assert second["pid"] != first["pid"] and second["seen"]["method"] == "thread/resume"  # a new system prompt needs a fresh process, on the same thread
+    assert second["seen"]["effort"] == "high" and second["seen"]["approvalPolicy"] == "untrusted"
+    # Codex ignores new instructions on a thread that exists: they go inside the message, and nothing is restarted
+    assert "Отвечай по-русски." in second["seen"]["lastPrompt"] and second["seen"]["lastPrompt"].endswith("report") and second["pid"] == first["pid"]
+    assert load(s["id"]).thread_instructions == "Отвечай по-русски."
+    third = report(client, h, s["id"])
+    assert third["seen"]["lastPrompt"] == "report"  # said once: the conversation has it now
     cleared = client.patch(f"/api/agent/sessions/{s['id']}", json={"instructions": "", "reasoning_effort": ""}, headers=h).json()
     assert cleared["instructions"] is None and cleared["reasoning_effort"] is None
+    assert "прежние свои инструкции больше не действуют" in report(client, h, s["id"])["seen"]["lastPrompt"] and load(s["id"]).thread_instructions is None
+
+
+def test_instructions_given_when_the_session_is_created_are_in_the_thread_from_its_start(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), instructions="С самого начала.")
+    info = report(client, h, s["id"])
+    assert info["seen"]["developerInstructions"] == "С самого начала." and info["seen"]["lastPrompt"] == "report"
+    assert load(s["id"]).thread_instructions == "С самого начала."
 
 
 def test_effort_and_approval_changes_do_not_restart_the_process(client, wired):
@@ -590,6 +604,7 @@ def test_a_fork_has_the_history_the_files_and_the_settings(client, wired):
     assert c["id"] != s["id"] and c["title"].endswith("(копия)") and c["instructions"] == "Кратко." and c["approval_mode"] == "ask" and c["status"] == "idle"
     assert [(e.seq, e.kind) for e in events(c["id"])] == [(e.seq, e.kind) for e in events(s["id"])]
     assert load(c["id"]).thread_id == load(s["id"]).thread_id and load(c["id"]).key != load(s["id"]).key
+    assert load(c["id"]).thread_instructions == load(s["id"]).thread_instructions == "Кратко."
     listing = client.get(f"/api/agent/sessions/{c['id']}/files", headers=h).json()
     assert "hello.txt" in [e["name"] for e in listing["entries"]]
     # the copy goes on from the same conversation, and the original is untouched

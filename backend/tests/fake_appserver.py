@@ -196,6 +196,7 @@ def handle(message: dict) -> None:
             if params.get(k) is not None:
                 state["seen"][k] = params[k]
         turn_id = new_id("turn")
+        state["seen"]["lastPrompt"] = text
         state["steers"] = []
         send({"id": rid, "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}}})
         threading.Thread(target=run_turn, args=(params["threadId"], turn_id, text, params), daemon=True).start()

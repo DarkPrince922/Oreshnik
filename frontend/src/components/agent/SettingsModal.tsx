@@ -1,0 +1,98 @@
+import clsx from "clsx";
+import { useEffect, useState, type FormEvent } from "react";
+
+import { REASONING_EFFORTS, errorMessage, updateAgentSession, type AgentSession, type ApprovalMode } from "../../lib/api";
+import { Button, ErrorNote, Field, Modal } from "../ui";
+
+const EFFORT_LABEL: Record<string, string> = { minimal: "минимальная", low: "низкая", medium: "средняя", high: "высокая", xhigh: "максимальная" };
+
+/** Settings of one session: its own system prompt, how hard the model thinks, whether the agent asks before acting. */
+export default function SettingsModal({ open, session, onClose, onSaved }: { open: boolean; session: AgentSession; onClose: () => void; onSaved: (s: AgentSession) => void }) {
+  const [title, setTitle] = useState(session.title);
+  const [instructions, setInstructions] = useState(session.instructions ?? "");
+  const [effort, setEffort] = useState(session.reasoning_effort ?? "");
+  const [mode, setMode] = useState<ApprovalMode>(session.approval_mode);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setTitle(session.title);
+    setInstructions(session.instructions ?? "");
+    setEffort(session.reasoning_effort ?? "");
+    setMode(session.approval_mode);
+    setError(null);
+  }, [open, session]);
+
+  const changedPrompt = instructions.trim() !== (session.instructions ?? "");
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await updateAgentSession(session.id, { title: title.trim() || session.title, instructions: instructions.trim(), reasoning_effort: effort, approval_mode: mode });
+      onSaved(saved);
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Настройки сессии" wide>
+      <form onSubmit={submit} className="space-y-4">
+        <Field label="Название">
+          <input className="field" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+        </Field>
+
+        <Field
+          label="Свои инструкции (системный промпт)"
+          hint={`Что агент должен помнить всегда: стиль ответа, правила, контекст проекта. Для новой сессии они закладываются в начало разговора; если измените позже, агент получит их с вашим следующим сообщением (прежние отменяются), разговор и файлы сохраняются. ${instructions.length}/20000`}
+        >
+          <textarea className="field min-h-[8rem] font-mono text-xs" value={instructions} maxLength={20000} onChange={(e) => setInstructions(e.target.value)} placeholder="Например: отвечай по-русски, перед правкой кода показывай план, тесты запускай через pytest." />
+        </Field>
+        {changedPrompt && session.turn_count > 0 && <p className="text-[11px] text-signal-warn">Агент получит новые инструкции в начале вашего следующего сообщения: он увидит, что прежние отменены.</p>}
+
+        <Field label="Глубина размышлений" hint="Как долго модель думает над каждым ответом. «По умолчанию» — как решит сама модель; поддерживают не все модели и шлюзы.">
+          <select className="field" value={effort} onChange={(e) => setEffort(e.target.value)}>
+            <option value="">по умолчанию</option>
+            {REASONING_EFFORTS.map((x) => (
+              <option key={x} value={x}>
+                {EFFORT_LABEL[x]}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <div>
+          <span className="mb-1.5 block text-xs font-medium text-slate-400">Подтверждения</span>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(
+              [
+                ["auto", "Без вопросов", "Агент сам выполняет команды и правит файлы в своём контейнере."],
+                ["ask", "Спрашивать", "Перед командами и правками файлов агент ждёт вашего «Разрешить»."],
+              ] as const
+            ).map(([value, label, hint]) => (
+              <button key={value} type="button" onClick={() => setMode(value)} className={clsx("rounded-xl border p-3 text-left transition-colors", mode === value ? "border-accent/50 bg-accent/10" : "border-white/10 hover:bg-white/5")}>
+                <span className="block text-sm text-slate-100">{label}</span>
+                <span className="mt-0.5 block text-[11px] leading-relaxed text-slate-500">{hint}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <ErrorNote message={error} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" onClick={onClose}>
+            Отмена
+          </Button>
+          <Button type="submit" variant="primary" loading={busy}>
+            Сохранить
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}

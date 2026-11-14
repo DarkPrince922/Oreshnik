@@ -1,128 +1,77 @@
 import clsx from "clsx";
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
-import Markdown from "../components/Markdown";
+import { FeedStep, type Answer } from "../components/agent/Feed";
+import FilesModal from "../components/agent/FilesModal";
+import SettingsModal from "../components/agent/SettingsModal";
 import ModelSelect from "../components/ModelSelect";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, PageHeader, Spinner } from "../components/ui";
+import { buildFeed, canSend, lastStepRunning, readComposer, turnFinished, usableProfiles, waitingForUser } from "../lib/agentModel";
 import {
+  answerAgentApproval,
   createAgentSession,
   deleteAgentSession,
   errorMessage,
+  forkAgentSession,
   getAgentHealth,
   listAgentSessions,
   listProfiles,
+  runAgentAction,
   sendAgentMessage,
+  steerAgentTurn,
   stopAgentTurn,
   type AgentSession,
   type LLMProfile,
 } from "../lib/api";
-import { buildFeed, canSend, formatTokens, lastStepRunning, turnFinished, usableProfiles, type FeedEntry } from "../lib/agentModel";
 import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
 
-function Pre({ children, className }: { children: string; className?: string }) {
+function MenuItem({ children, onClick, danger = false, disabled = false }: { children: string; onClick: () => void; danger?: boolean; disabled?: boolean }) {
   return (
-    <pre className={clsx("max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-black/40 p-3 font-mono text-[11px] leading-relaxed text-slate-300", className)}>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx("block w-full px-3 py-2 text-left text-xs hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40", danger ? "text-signal-bad" : "text-slate-200")}
+    >
       {children}
-    </pre>
+    </button>
   );
 }
 
-function Step({ entry }: { entry: FeedEntry }) {
-  const [open, setOpen] = useState(false);
-  switch (entry.type) {
-    case "user":
-      return (
-        <div className="ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-accent/20 bg-accent/10 px-4 py-2.5 text-sm text-slate-100">
-          {entry.text}
-        </div>
-      );
-    case "message":
-      return (
-        <div className="max-w-[92%] text-sm">
-          <Markdown>{entry.text}</Markdown>
-        </div>
-      );
-    case "reasoning":
-      return <p className="max-w-[92%] whitespace-pre-wrap break-words text-xs italic text-slate-500">{entry.text}</p>;
-    case "command": {
-      const failed = entry.exitCode !== null && entry.exitCode !== 0;
-      return (
-        <div className="max-w-[92%] rounded-xl border border-white/5 bg-ink-900/50 p-3">
-          <button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => setOpen((o) => !o)}>
-            {entry.running ? <Spinner className="h-3 w-3" /> : <span className={clsx("text-xs", failed ? "text-signal-bad" : "text-signal-ok")}>{failed ? "✕" : "✓"}</span>}
-            <code className="min-w-0 flex-1 truncate font-mono text-xs text-slate-200">$ {entry.command}</code>
-            {entry.exitCode !== null && entry.exitCode !== 0 && <span className="font-mono text-[11px] text-signal-bad">код {entry.exitCode}</span>}
-          </button>
-          {(open || entry.running) && entry.output && <Pre className="mt-2">{entry.output}</Pre>}
-          {open && !entry.output && <p className="mt-2 text-[11px] text-slate-600">Вывода нет.</p>}
-        </div>
-      );
-    }
-    case "files":
-      return (
-        <div className="max-w-[92%] rounded-xl border border-white/5 bg-ink-900/50 p-3 text-xs">
-          <div className="mb-1 flex items-center gap-2 text-slate-400">
-            {entry.running && <Spinner className="h-3 w-3" />}
-            Правки файлов
-          </div>
-          <ul className="space-y-0.5 font-mono text-[11px] text-slate-300">
-            {entry.changes.map((c, i) => (
-              <li key={i}>
-                <span className="mr-2 text-slate-500">{c.kind}</span>
-                {c.path}
-              </li>
-            ))}
-          </ul>
-        </div>
-      );
-    case "todo":
-      return (
-        <ul className="max-w-[92%] space-y-0.5 rounded-xl border border-white/5 bg-ink-900/50 p-3 text-xs">
-          {entry.items.map((t, i) => (
-            <li key={i} className={clsx(t.completed ? "text-slate-500 line-through" : "text-slate-300")}>
-              {t.completed ? "☑" : "☐"} {t.text}
-            </li>
-          ))}
-        </ul>
-      );
-    case "tool":
-      return (
-        <div className="flex max-w-[92%] items-center gap-2 rounded-xl border border-white/5 bg-ink-900/50 px-3 py-2 text-xs text-slate-400">
-          {entry.running && <Spinner className="h-3 w-3" />}
-          <span className="font-mono text-slate-300">{entry.title}</span>
-          {entry.detail && <span className="min-w-0 truncate text-slate-500">{entry.detail}</span>}
-        </div>
-      );
-    case "notice":
-      return (
-        <p className={clsx("max-w-[92%] whitespace-pre-wrap break-words text-xs", entry.tone === "bad" ? "text-signal-bad" : entry.tone === "warn" ? "text-signal-warn" : "text-slate-600")}>
-          {entry.text}
-        </p>
-      );
-    case "usage":
-      return (
-        <p className="text-[10px] text-slate-600">
-          токенов: {formatTokens(entry.inputTokens)} на входе · {formatTokens(entry.outputTokens)} на выходе
-        </p>
-      );
-  }
-}
-
-function Chat({ session, profileAvailable, onChanged }: { session: AgentSession; profileAvailable: boolean; onChanged: () => void }) {
-  const { events, status, state } = useAgentStream(session.id);
-  const feed = buildFeed(events);
-  const [text, setText] = useState("");
+function Chat({
+  session,
+  profileAvailable,
+  initialDraft,
+  onChanged,
+  onForked,
+}: {
+  session: AgentSession;
+  profileAvailable: boolean;
+  initialDraft: string;
+  onChanged: () => void;
+  onForked: (s: AgentSession) => void;
+}) {
+  const { events, live, status, state } = useAgentStream(session.id);
+  const feed = buildFeed(events, live);
+  const [text, setText] = useState(initialDraft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [menu, setMenu] = useState(false);
+  const [settings, setSettings] = useState(false);
+  const [files, setFiles] = useState(false);
+  const [current, setCurrent] = useState(session);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+
+  useEffect(() => setCurrent(session), [session]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [events.length, status]);
+  }, [events.length, live, status]);
 
   // The list on the left shows the status too: refresh it when a turn starts or ends.
   const prevStatus = useRef(status);
@@ -131,20 +80,52 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
     prevStatus.current = status;
   }, [status, onChanged]);
 
-  const send = async (e?: FormEvent) => {
-    e?.preventDefault();
-    if (!canSend({ text, status, profileAvailable }) || busy) return;
+  const running = status === "running";
+  const waiting = waitingForUser(feed);
+  const composer = readComposer(text, status);
+
+  const attempt = async (fn: () => Promise<unknown>, clear = true) => {
     setBusy(true);
     setError(null);
     try {
-      await sendAgentMessage(session.id, text.trim());
-      setText("");
+      await fn();
+      if (clear) setText("");
       stick.current = true;
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  const doFork = () =>
+    attempt(async () => {
+      onForked(await forkAgentSession(session.id));
+    }, false);
+
+  const send = async (e?: FormEvent) => {
+    e?.preventDefault();
+    if (busy || composer.kind === "empty") return;
+    switch (composer.kind) {
+      case "message":
+        return attempt(() => sendAgentMessage(session.id, composer.text));
+      case "steer":
+        return attempt(() => steerAgentTurn(session.id, composer.text));
+      case "shell":
+        return attempt(() => runAgentAction(session.id, { action: "shell", command: composer.command }));
+      case "action":
+        if (composer.action === "fork") return doFork();
+        if (composer.action === "review") {
+          const target = composer.argument ? ({ type: "baseBranch", branch: composer.argument } as const) : undefined;
+          return attempt(() => runAgentAction(session.id, { action: "review", target }));
+        }
+        return attempt(() => runAgentAction(session.id, { action: composer.action as "compact" | "revert" }));
+    }
+  };
+
+  const action = (fn: () => Promise<unknown>) => {
+    setMenu(false);
+    void attempt(fn, false);
   };
 
   const stop = async () => {
@@ -155,25 +136,65 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
     }
   };
 
-  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send();
+  const answer: Answer = async (requestId, decision, answers) => {
+    try {
+      await answerAgentApproval(session.id, requestId, decision, answers);
+    } catch (err) {
+      throw new Error(errorMessage(err));
+    }
   };
 
-  const running = status === "running";
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      void send();
+    }
+  };
+
+  const sendable = canSend({ text, status, profileAvailable });
+  const placeholder = waiting
+    ? "Агент ждёт вашего ответа выше…"
+    : running
+      ? "Агент работает. Напишите — это дополнит ход. «Стоп» — прервать"
+      : "Что сделать?  !команда — выполнить самому · /compact /review /undo /fork";
+
   return (
-    <Card className="flex h-[calc(100vh-14rem)] min-h-[28rem] flex-col">
+    <Card className="flex h-[calc(100vh-14rem)] min-h-[30rem] flex-col">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 px-5 py-3">
         <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold text-white">{session.title}</h2>
-          <p className="text-[11px] text-slate-500">профиль: {session.llm_profile_name ?? "удалён"}{session.llm_model ? ` · ${session.llm_model}` : ""}</p>
+          <h2 className="truncate text-sm font-semibold text-white">{current.title}</h2>
+          <p className="truncate text-[11px] text-slate-500">
+            {current.llm_profile_name ?? "профиль удалён"}
+            {current.llm_model ? ` · ${current.llm_model}` : ""}
+            {current.approval_mode === "ask" ? " · спрашивает" : ""}
+            {current.instructions ? " · свои инструкции" : ""}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="relative flex items-center gap-2">
           {state !== "live" && <Badge tone={state === "error" ? "bad" : "warn"}>{state === "error" ? "нет связи" : "подключение…"}</Badge>}
-          {running && <Badge tone="accent">{turnFinished(feed) ? "завершается…" : "думает…"}</Badge>}
+          {running && <Badge tone={waiting ? "warn" : "accent"}>{waiting ? "ждёт ответа" : turnFinished(feed) ? "завершается…" : "работает…"}</Badge>}
           {running && (
-            <Button variant="danger" className="px-3 py-1.5 text-xs" onClick={stop} disabled={session.cancel_requested}>
+            <Button variant="danger" className="px-3 py-1.5 text-xs" onClick={stop} disabled={current.cancel_requested}>
               Стоп
             </Button>
+          )}
+          <Button className="px-3 py-1.5 text-xs" onClick={() => setFiles(true)}>
+            Файлы
+          </Button>
+          <Button className="px-3 py-1.5 text-xs" onClick={() => setMenu((m) => !m)} aria-label="Действия">
+            ⋯
+          </Button>
+          {menu && (
+            <>
+              <button type="button" aria-label="Закрыть меню" className="fixed inset-0 z-10 cursor-default" onClick={() => setMenu(false)} />
+              <div className="absolute right-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-xl border border-white/10 bg-ink-900 shadow-xl">
+                <MenuItem onClick={() => { setMenu(false); setSettings(true); }}>Настройки сессии…</MenuItem>
+                <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "compact" }))}>Сжать контекст</MenuItem>
+                <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "review" }))}>Код-ревью изменений</MenuItem>
+                <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "revert" }))}>Откатить последний ход</MenuItem>
+                <MenuItem disabled={running} onClick={() => action(doFork)}>Ответвить копию сессии</MenuItem>
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -187,12 +208,12 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
         className="flex-1 space-y-3 overflow-y-auto px-5 py-4"
       >
         {feed.length === 0 && state === "live" && (
-          <p className="pt-10 text-center text-sm text-slate-500">Напишите задачу — агент будет выполнять команды и править файлы в своём контейнере.</p>
+          <p className="pt-10 text-center text-sm text-slate-500">Напишите задачу — агент будет выполнять команды и править файлы в своём контейнере. Файлы сессии — по кнопке «Файлы».</p>
         )}
         {feed.map((entry) => (
-          <Step key={entry.key} entry={entry} />
+          <FeedStep key={entry.key} entry={entry} answer={answer} />
         ))}
-        {running && !lastStepRunning(feed) && !turnFinished(feed) && <Spinner className="h-3.5 w-3.5" />}
+        {running && !lastStepRunning(feed) && !turnFinished(feed) && !waiting && <Spinner className="h-3.5 w-3.5" />}
       </div>
 
       <form onSubmit={send} className="border-t border-white/5 p-4">
@@ -205,19 +226,25 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
             onKeyDown={onKey}
             rows={2}
             maxLength={50000}
-            placeholder={running ? "Агент отвечает… можно нажать «Стоп»" : "Что сделать? (Ctrl+Enter — отправить)"}
+            placeholder={placeholder}
             className="min-h-[3.25rem] flex-1 resize-y rounded-xl border border-white/10 bg-ink-900/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-accent/50"
           />
-          <Button type="submit" variant="primary" loading={busy} disabled={!canSend({ text, status, profileAvailable })}>
-            Отправить
+          <Button type="submit" variant="primary" loading={busy} disabled={!sendable}>
+            {running ? "Дополнить" : "Отправить"}
           </Button>
         </div>
+        <p className="mt-1.5 text-[10px] text-slate-600">Enter — отправить, Shift+Enter — новая строка{composer.kind === "shell" ? " · будет выполнено как команда, без участия модели" : ""}</p>
       </form>
+
+      <SettingsModal open={settings} session={current} onClose={() => setSettings(false)} onSaved={(s) => { setCurrent(s); onChanged(); }} />
+      <FilesModal open={files} session={current} onClose={() => setFiles(false)} />
     </Card>
   );
 }
 
 export default function Agent() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [sessions, setSessions] = useState<AgentSession[] | null>(null);
   const [profiles, setProfiles] = useState<LLMProfile[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -225,8 +252,10 @@ export default function Agent() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [choice, setChoice] = useState<Choice | null>(null);
-  const profileId = choice?.profileId ?? null;
   const [saving, setSaving] = useState(false);
+  // From «Разобрать в агенте» on a scan page: which session to open and the task proposed for it.
+  const incoming = (location.state ?? null) as { sessionId?: number; draft?: string } | null;
+  const [draft] = useState<{ sessionId: number; text: string } | null>(incoming?.sessionId && incoming.draft ? { sessionId: incoming.sessionId, text: incoming.draft } : null);
 
   const refresh = useCallback(async () => {
     try {
@@ -244,16 +273,23 @@ export default function Agent() {
     getAgentHealth().then(setHealth).catch(() => setHealth({ ok: false, detail: "Не удалось проверить агента" }));
   }, [refresh]);
 
+  useEffect(() => {
+    if (incoming?.sessionId && sessions?.some((s) => s.id === incoming.sessionId)) {
+      setSelected(incoming.sessionId);
+      navigate(location.pathname, { replace: true, state: null }); // the draft is taken once
+    }
+  }, [incoming?.sessionId, sessions, navigate, location.pathname]);
+
   const usable = usableProfiles(profiles);
   const current = sessions?.find((s) => s.id === selected) ?? null;
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    if (profileId === null) return;
+    if (!choice) return;
     setSaving(true);
     setError(null);
     try {
-      const s = await createAgentSession({ title: "", llm_profile_id: profileId, llm_model: modelToSend(usable, choice) });
+      const s = await createAgentSession({ title: "", llm_profile_id: choice.profileId, llm_model: modelToSend(usable, choice) });
       setCreating(false);
       await refresh();
       setSelected(s.id);
@@ -278,7 +314,7 @@ export default function Agent() {
     <div>
       <PageHeader
         title="Агент"
-        subtitle="Кодинг-агент Codex в изолированном контейнере: даёте задачу словами, видите каждую команду и правку"
+        subtitle="Кодинг-агент Codex в изолированном контейнере: задача словами, а команды, правки и ответ — по мере появления"
         action={
           <div className="flex items-center gap-3">
             {health && <Badge tone={health.ok ? "ok" : "bad"}>{health.detail}</Badge>}
@@ -302,7 +338,7 @@ export default function Agent() {
       ) : sessions.length === 0 ? (
         <EmptyState
           title="Сессий пока нет"
-          text="Создайте сессию: выберите профиль LLM (OpenAI, Grok или custom с Responses API) и поставьте агенту задачу."
+          text="Создайте сессию: выберите модель (OpenAI, Grok или custom с Responses API) и поставьте агенту задачу. Скан можно разобрать в агенте со страницы самого скана."
         />
       ) : (
         <div className="grid gap-5 lg:grid-cols-[18rem_1fr]">
@@ -318,7 +354,7 @@ export default function Agent() {
                   <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setSelected(s.id)}>
                     <span className="block truncate text-sm text-slate-100">{s.title}</span>
                     <span className="text-[11px] text-slate-500">
-                      {s.status === "running" ? "отвечает…" : `ходов: ${s.turn_count}`}
+                      {s.status === "running" ? "работает…" : `ходов: ${s.turn_count}`}
                       {s.last_error && <span className="text-signal-bad"> · ошибка</span>}
                     </span>
                   </button>
@@ -335,7 +371,19 @@ export default function Agent() {
               </motion.div>
             ))}
           </div>
-          {current && <Chat key={current.id} session={current} profileAvailable={current.llm_profile_id !== null} onChanged={refresh} />}
+          {current && (
+            <Chat
+              key={current.id}
+              session={current}
+              profileAvailable={current.llm_profile_id !== null}
+              initialDraft={draft?.sessionId === current.id ? draft.text : ""}
+              onChanged={refresh}
+              onForked={async (s) => {
+                await refresh();
+                setSelected(s.id);
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -343,23 +391,22 @@ export default function Agent() {
         <form onSubmit={create} className="space-y-4">
           {usable.length === 0 ? (
             <p className="text-sm text-slate-400">
-              Нужен профиль LLM с OpenAI, Grok или custom (OpenAI-совместимый endpoint с Responses API). Профили Claude агент не поддерживает —
-              Codex говорит только на Responses API.
+              Нужен профиль LLM с OpenAI, Grok или custom (OpenAI-совместимый endpoint с Responses API). Профили Claude агент не поддерживает — Codex говорит только на Responses API.
             </p>
           ) : (
-            <Field label="Модель" hint="Любая модель вашего профиля (OpenAI, Grok или custom с Responses API). Ключ из профиля уходит в контейнер агента вместе с каждым сообщением и нигде не сохраняется там.">
+            <Field label="Модель" hint="Любая модель вашего профиля. Ключ из профиля уходит в контейнер агента вместе с каждым сообщением и нигде не сохраняется там.">
               <ModelSelect profiles={usable} value={choice} onChange={setChoice} required label="Модель" />
             </Field>
           )}
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Агент выполняет команды без подтверждений — внутри своего контейнера, без доступа к базе, Docker и секретам панели. Всё, что он
-            делает, видно в ленте.
+            По умолчанию агент выполняет команды без вопросов — внутри своего контейнера, без доступа к базе, Docker и секретам панели. Режим «спрашивать», свои инструкции и глубину
+            размышлений можно включить в настройках сессии.
           </p>
           <div className="flex justify-end gap-2">
             <Button type="button" onClick={() => setCreating(false)}>
               Отмена
             </Button>
-            <Button type="submit" variant="primary" loading={saving} disabled={profileId === null || usable.length === 0}>
+            <Button type="submit" variant="primary" loading={saving} disabled={!choice || usable.length === 0}>
               Создать
             </Button>
           </div>

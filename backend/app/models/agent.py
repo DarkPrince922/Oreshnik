@@ -47,6 +47,9 @@ class AgentSession(Base):
     thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # Codex's own id; set by the first turn
     # Settings of the session itself, editable between messages and applied to the next one:
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)           # its own system prompt (Codex «developer instructions»)
+    # What the conversation's thread actually has as instructions (Codex ignores new ones on an existing thread; a change is sent inside
+    # the next message and recorded here). None = none.
+    thread_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)  # how hard the model thinks; None = the model's default
     approval_mode: Mapped[str] = mapped_column(String(8), default="auto")             # auto: no questions · ask: approve commands and file changes
     turn_count: Mapped[int] = mapped_column(Integer, default=0)

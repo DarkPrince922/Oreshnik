@@ -857,6 +857,10 @@ profiles are left to Strix. The admin setting `STRIX_API_TYPE` = `auto` (default
 
 ## 20. «Агент»: Codex CLI in an isolated container, driven from the panel
 
+> **Since §23 the agent runs on `codex app-server`, not on `codex exec --json`.** What is said below about one `exec` process per turn, the
+> `exec` event format and a process that lingers after a turn is superseded by §23; the isolation, the key handling, the gateway handling
+> (function tools only, the compat proxy) and the image/health notes still apply as written.
+
 A chat with an open-source coding agent ([Codex CLI](https://github.com/openai/codex), Apache-2.0) inside the panel: the operator
 writes a task in plain words and sees every command, file edit and answer as a feed of steps, can add messages and stop it.
 (Claude Code is not open source, so it is not an option; goose, opencode and Kimi CLI were considered — Codex was chosen.)
@@ -1040,3 +1044,86 @@ A profile used to hold one model; «Загрузить модели» only sugge
   left the list later is tried anyway and the provider's own error is shown in the chat.
 
 Tests: `tests/test_llm_models.py` (30: list cleaning and storage, load/refresh, choosing for scans of different providers, refusals, what Strix is given, continuing, schedules), `src/lib/modelChoice.test.ts` (14).
+
+
+## 23. «Агент» on `codex app-server`: a live chat, control of the turn, files, questions, scans
+
+The agent used to be one `codex exec --json` process per message: only finished steps came back, nothing could be changed during a turn. It now talks to
+**`codex app-server`** (the protocol Codex's own IDE extension uses; JSON-RPC, one JSON object per line over the process's stdio; `agentd/rpc.py`).
+Everything below was **run against the real Codex 0.169.0** (a stand-in model endpoint that streams like a real one), not only read from its schema:
+`thread/start|resume|fork|revert`, `turn/start|steer|interrupt`, `thread/compact/start`, `thread/shellCommand`, `review/start`, the deltas
+(`item/agentMessage/delta`, `item/commandExecution/outputDelta`, …), `turn/diff/updated`, `turn/plan/updated`, `thread/tokenUsage/updated` and the server
+requests `item/commandExecution|fileChange/requestApproval`, `item/tool/requestUserInput`. A scripted run of 18 such checks through the final agentd passes.
+
+### Processes and sessions
+
+One `codex app-server` per session, started with the first message, ended after `AGENT_IDLE_SECONDS` (900) without work or when
+`AGENT_MAX_PROCESSES` (8) is reached (the longest idle one makes room; if none is idle the new turn is refused with a reason). The conversation lives in the session's
+`CODEX_HOME`, so the next message `thread/resume`s it; a thread whose files are gone is replaced by a new one instead of refusing to answer. A changed endpoint, key or tool set
+restarts the process; a changed effort, model or approval mode does not (they go with `turn/start`). The old process's last words never reach a new turn
+(callbacks are bound to the process that made them — a bug found by a test).
+
+### What the page gets (the events)
+
+agentd turns Codex's notifications into a small stream of its own, and keeps the old `codex exec` item shapes so one feed renders both:
+
+| | stored (`agent_events`, in order, never changes) | live (`agent_live`, one row per unfinished item, dropped when it finishes) |
+|---|---|---|
+| messages, reasoning | the finished item | the text so far (throttled to ~7 per second) |
+| commands | the finished item: command as typed, output, exit code, status | the output so far |
+| file changes | each file's own diff | — |
+| the turn | `turn.started`, `turn.diff` (unified `git diff`), `turn.plan`, `turn.completed` (+ token usage of the turn) | the diff and plan so far |
+| questions | `approval.requested`, `approval.resolved` | — |
+
+The WebSocket sends `event` frames (numbered, a reconnect resumes from the next unseen one) and `live` / `live_end` frames. A live snapshot never replaces a finished
+item on the page (the finished one arrives first). Streaming output of a command, not only its end, is visible while it runs.
+
+### Controlling a turn
+
+**Stop** (`turn/interrupt`; also when the panel hangs up or the time limit passes), **add an instruction** to the running turn (`turn/steer`; shown in the feed as "добавлено по ходу"),
+**compact** the conversation, **review** the changes (`review/start`; needs a git repository, so every working folder is `git init`ed), **run a command yourself**
+(`!ls`, `thread/shellCommand`, no model involved), **undo the last turn** (`thread/revert`) and **fork** the session. Slash commands in the box: `/compact`, `/review`, `/undo`, `/fork`.
+Two of these are easy to misread: *undo removes the turn from the **conversation**, not from the **files*** (checked: Codex's revert is history only; the page says so), and a fork is a copy of the folder
+and the conversation under a new key (the source session must be idle).
+
+### Questions to the user («Подтверждения»)
+
+Per session: **«Без вопросов»** (`approvalPolicy never`, as before) or **«Спрашивать»** (`untrusted`, with the sandbox mode `danger-full-access` because the container is the sandbox:
+Codex then asks before commands it does not know to be safe and before every file change). The page shows a card with the command (as typed) or a pointer to the change; **Разрешить / Разрешить на сессию / Отклонить**.
+The agent can also ask a question (`request_user_input`): options and/or a free answer, secret answers as a password field. An unanswered question is declined after `AGENT_APPROVAL_TIMEOUT_SECONDS`;
+**Stop** cancels pending questions first (an interrupt would never reach a turn that waits). Requests the panel cannot answer (MCP elicitation, dynamic tools) are refused with an error; extra
+**permissions are never granted**.
+
+### Settings and the system prompt
+
+Per session and editable: title, **its own instructions**, **reasoning effort** (minimal…xhigh), approval mode. *Found on the real Codex:* on `thread/resume` the new `developerInstructions` are
+**ignored** (the old text stays in the thread; `baseInstructions` would replace Codex's whole built-in prompt). So instructions are given when a thread is created, and when you change them later agentd
+puts "the instructions changed, ONLY these apply now (the previous are cancelled): …" in front of the next message — once; the panel remembers what the thread has (`thread_instructions`).
+
+### The session's files
+
+Folder browser, text preview (first 1 MB; binary files are described), download, upload (raw body, `AGENT_MAX_UPLOAD_MB`), `git clone --depth 1` of a plain **https** link (protocols are closed
+on purpose: no `file://`, `ext::`, ssh; credentials in the URL are refused), the whole folder as a zip (without `.git`, `AGENT_MAX_ARCHIVE_MB`). Every path is resolved first and refused unless its **real** location
+is inside the session's folder (the agent can make symbolic links; links are tested). The panel only checks that the session is yours and passes the request on (streams, not buffers).
+
+### «Разобрать в агенте» (from a scan)
+
+The button on a finished scan creates a session whose folder already holds `scan/README.md` (targets, mode, status, the scan's own instruction), `scan/findings.json` (the findings the panel stored),
+and, if Strix left them, `report.md`, `vulnerabilities.json`, `findings.sarif`, `vulnerabilities/*.md` (limits: 5 MB per file, 30 MB, 200 files), plus a proposed first message that the user reads and sends.
+An operator can do this only for their own scans, an admin for any; the model is chosen from the user's profiles as everywhere. The target's source code is not fetched automatically: clone it in «Файлы».
+
+### Limits, honestly
+
+- `app-server` is marked **experimental** by Codex; only 0.169.0 was checked, and the version is pinned in the image. A newer Codex may change the protocol.
+- **Sessions of different users share one container and one Unix user.** The container hides the panel's secrets, but an agent could read another session's folder (and its parent process's environment, `AGENT_TOKEN` included).
+  Treat the agent container as one trust domain: do not give «Агент» to people who must not see each other's work. (Separate containers per user would fix it; not built.)
+- No disk quota per session besides the upload and archive limits; a runaway agent can fill the volume.
+- Not run for real: the `agent` image and compose (no Docker daemon where this was written), a real model, and a real gateway with the full flow (the gateway cases are covered by the earlier checks in this document).
+
+### Tests
+
+`tests/test_agentd.py` (87) runs agentd as a real uvicorn against `tests/fake_appserver.py` (it speaks the recorded protocol): input checking, live text, what Codex is started and told, process reuse and restart,
+approvals (command, file change, question; decline; late and wrong answers; timeout), steer, stop, a hung-up client, timeout, compact/shell/review/revert, fork, every file call incl. symlink escapes, limits, clone validation, health, the compat proxy.
+`tests/test_agentd_normalize.py` (14) — the pure translation. `tests/test_agent.py` (57) — the panel's API through the worker to agentd: ownership of everything, history and live snapshots, the socket (live, late client, `live_end`),
+questions, steering, stopping, settings and the instructions hand-over, actions, undo one after another, fork, files, scans, gateways. Frontend: `agentModel.test.ts` (28; feed, live overlay, questions, undo, composer commands),
+`diff.test.ts` (11), `files.test.ts`.

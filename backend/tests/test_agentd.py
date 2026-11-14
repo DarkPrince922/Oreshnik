@@ -172,7 +172,7 @@ def test_unsafe_or_incomplete_input_is_refused(agentd, over):
 
 def test_a_turn_streams_the_answer_as_it_is_written_and_then_the_finished_item(agentd):
     events = agentd.turn("hello")
-    assert kinds(events)[:2] == ["thread.started", "turn.started"] and kinds(events)[-2:] == ["turn.completed", "agentd.exit"]
+    assert kinds(events)[:3] == ["thread.started", "thread.instructions", "turn.started"] and kinds(events)[-2:] == ["turn.completed", "agentd.exit"]
     lives = [e["item"]["text"] for e in events if e["type"] == "live" and e["item"]["type"] == "agent_message"]
     assert lives and all(a in b for a, b in zip(lives, lives[1:]))  # a snapshot only ever grows
     final = [e for e in events if e["type"] == "item.completed" and e["item"]["type"] == "agent_message"]
@@ -221,18 +221,59 @@ def test_the_same_process_serves_the_next_message_and_the_thread_goes_on(agentd)
     assert len(threads) == 1
 
 
-def test_a_changed_system_prompt_restarts_the_process_and_resumes_the_same_thread(agentd):
+def instructions_events(events: list[dict]) -> list:
+    return [e["instructions"] for e in events if e["type"] == "thread.instructions"]
+
+
+def test_a_new_thread_starts_with_the_instructions_and_the_panel_is_told(agentd):
+    events = agentd.turn("report", instructions="одно", applied_instructions=None)
+    assert instructions_events(events) == ["одно"]
+    seen = json.loads(next(e["item"]["text"] for e in events if e["type"] == "item.completed"))["seen"]
+    assert seen["developerInstructions"] == "одно" and seen["lastPrompt"] == "report"  # given at the start, not repeated in the message
+
+
+def test_unchanged_instructions_are_not_repeated(agentd):
+    agentd.turn("hello", instructions="одно")
+    events = agentd.turn("report", instructions="одно", applied_instructions="одно")
+    assert instructions_events(events) == []
+    assert json.loads(next(e["item"]["text"] for e in events if e["type"] == "item.completed"))["seen"]["lastPrompt"] == "report"
+
+
+def test_changed_instructions_are_handed_over_in_the_next_message_without_a_restart(agentd):
+    """Checked with the real Codex: on a thread that exists it ignores new developer instructions, so the change travels in the message."""
     first = agentd.report(instructions="одно")
-    thread = next(e["thread_id"] for e in agentd.turn("hello", instructions="одно") if e["type"] == "thread.started")
-    second = agentd.report(instructions="другое")
-    assert first["pid"] != second["pid"]
-    assert second["seen"]["method"] == "thread/resume" and second["seen"]["developerInstructions"] == "другое"
-    assert next(e["thread_id"] for e in agentd.turn("hello", instructions="другое") if e["type"] == "thread.started") == thread
+    events = agentd.turn("report", instructions="другое", applied_instructions="одно")
+    info = json.loads(next(e["item"]["text"] for e in events if e["type"] == "item.completed"))
+    prompt = info["seen"]["lastPrompt"]
+    assert "ТОЛЬКО эти (прежние отменены)" in prompt and "другое" in prompt and prompt.endswith("\n\nreport")
+    assert instructions_events(events) == ["другое"] and info["pid"] == first["pid"]  # the same process: nothing restarted
+
+
+def test_cleared_instructions_are_cancelled_in_the_next_message(agentd):
+    agentd.turn("hello", instructions="одно")
+    events = agentd.turn("report", instructions="", applied_instructions="одно")
+    prompt = json.loads(next(e["item"]["text"] for e in events if e["type"] == "item.completed"))["seen"]["lastPrompt"]
+    assert "прежние свои инструкции больше не действуют" in prompt and instructions_events(events) == [None]
+
+
+def test_only_a_message_carries_the_change(agentd):
+    agentd.turn("hello", instructions="одно")
+    assert instructions_events(agentd.turn(action="shell", prompt="ls", instructions="другое", applied_instructions="одно")) == []
+    assert instructions_events(agentd.turn("hello", instructions="другое", applied_instructions="одно")) == ["другое"]  # it waited for a message
+
+
+def test_a_process_restart_does_not_resend_instructions_the_thread_already_has(agentd):
+    agentd.turn("hello", instructions="одно")
+    events = agentd.turn("report", instructions="одно", applied_instructions="одно", normalize_responses=True)  # a different endpoint setup restarts the process
+    info = json.loads(next(e["item"]["text"] for e in events if e["type"] == "item.completed"))
+    assert info["seen"]["method"] == "thread/resume" and info["seen"]["lastPrompt"] == "report" and instructions_events(events) == []
 
 
 def test_a_lost_thread_is_replaced_instead_of_refusing_to_answer(agentd):
-    report = agentd.report(thread_id="gone-forever")
-    assert report["seen"]["method"] == "thread/start"
+    events = agentd.turn("report", thread_id="gone-forever", instructions="нужное", applied_instructions="нужное")
+    info = json.loads(next(e["item"]["text"] for e in events if e["type"] == "item.completed"))
+    assert info["seen"]["method"] == "thread/start" and info["seen"]["developerInstructions"] == "нужное"
+    assert instructions_events(events) == ["нужное"]  # a new thread: the instructions go in at its start, and the panel is told
 
 
 def test_the_effort_and_the_approval_mode_change_between_messages_without_a_restart(agentd):
@@ -457,7 +498,7 @@ def test_a_review_target_is_passed_on_in_the_form_codex_wants(agentd):
 
 def test_undoing_the_last_turn(agentd):
     events = agentd.turn(action="revert", prompt="", revert_before="turn-1")
-    assert kinds(events) == ["thread.started", "thread.reverted", "agentd.exit"]  # no turn to wait for: it is over at once
+    assert kinds(events) == ["thread.started", "thread.instructions", "thread.reverted", "agentd.exit"]  # no turn to wait for: it is over at once
 
 
 # ── forking, files ─────────────────────────────────────────────────────────────────

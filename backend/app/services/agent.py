@@ -205,14 +205,14 @@ def forget_session(key: str) -> None:
 def stream_turn(
     *, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str, function_tools_only: bool = False,
     normalize_responses: bool = False, action: str = "message", instructions: str | None = None, effort: str | None = None,
-    approval_mode: str = "auto", review_target: dict | None = None, revert_before: str | None = None,
+    approval_mode: str = "auto", review_target: dict | None = None, revert_before: str | None = None, applied_instructions: str | None = None,
 ) -> Iterator[dict]:
     """The agent's events for one action, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
         "session_key": key, "action": action, "prompt": prompt, "thread_id": thread_id, "model": model, "base_url": base_url,
         "api_key": api_key, "timeout_seconds": settings.agent_turn_timeout_seconds,
         "function_tools_only": function_tools_only, "normalize_responses": normalize_responses,
-        "instructions": instructions, "effort": effort, "approval_mode": approval_mode,
+        "instructions": instructions, "applied_instructions": applied_instructions, "effort": effort, "approval_mode": approval_mode,
         "review_target": review_target, "revert_before": revert_before,
     }
     timeout = httpx.Timeout(60.0, read=settings.agent_turn_timeout_seconds + 60.0)
@@ -247,6 +247,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             return
         key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
         instructions, effort, approval_mode = session.instructions, session.reasoning_effort, session.approval_mode or "auto"
+        applied_instructions = session.thread_instructions
         profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
 
     error: str | None = None
@@ -258,7 +259,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         for event in stream_turn(
             key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key, action=action,
             function_tools_only=function_tools_only(profile), normalize_responses=normalize_responses(profile),
-            instructions=instructions, effort=effort, approval_mode=approval_mode,
+            instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
             review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
         ):
             error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
@@ -295,6 +296,8 @@ def _handle_event(db_factory: Callable[[], Session], session_id: int, event: dic
             elif event.get("code") not in (0, None) and error is None:
                 stderr = str(event.get("stderr", "")).strip()
                 error = stderr[-500:] or f"Агент завершился с кодом {event.get('code')}"
+        elif etype == "thread.instructions":
+            db.get(AgentSession, session_id).thread_instructions = (event.get("instructions") or None)
         elif etype == "thread.started":
             if isinstance(event.get("thread_id"), str):
                 db.get(AgentSession, session_id).thread_id = event["thread_id"]

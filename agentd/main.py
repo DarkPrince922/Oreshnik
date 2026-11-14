@@ -100,6 +100,9 @@ class Turn(BaseModel):
     # `cached_tokens` out and Codex then treats the finished answer as a dropped stream: it asks again up to 5 times and fails.
     normalize_responses: bool = False
     instructions: str | None = Field(default=None, max_length=20_000)   # the session's own system prompt (Codex "developer instructions")
+    # What the conversation already has as instructions (the panel remembers it). Codex ignores new developer instructions on a thread that
+    # exists, so a change is handed over inside the next message instead (see `instructions_notice`).
+    applied_instructions: str | None = Field(default=None, max_length=20_000)
     effort: str | None = None                                           # reasoning effort of the model
     approval_mode: Literal["auto", "ask"] = "auto"                      # ask: Codex asks before commands and file changes
     review_target: dict | None = None
@@ -178,6 +181,7 @@ class Session:
     server: AppServer | None = None
     fingerprint: str = ""
     thread_id: str | None = None
+    thread_new: bool = False               # the thread was created by the last `ensure_server` (so it got the instructions at its start)
     # the turn in progress
     busy: bool = False
     busy_since: float = 0.0
@@ -255,8 +259,9 @@ def spawn_argv(turn: Turn, base_url: str) -> list[str]:
 
 
 def fingerprint(turn: Turn) -> str:
-    """What cannot change under a running process: the endpoint, the key, the tool set and the system prompt. A change restarts it."""
-    raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses, turn.instructions or ""])
+    """What cannot change under a running process: the endpoint, the key and the tool set. A change restarts it. (Not the system prompt:
+    a thread that exists keeps the one it was started with, however often the process is restarted.)"""
+    raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -313,19 +318,19 @@ async def ensure_server(session: Session, turn: Turn) -> None:
         await server.start()
         await server.request("initialize", {"clientInfo": {"name": "oreshnik", "title": "Oreshnik", "version": "1"}}, timeout=30)
         server.notify("initialized")
-        params: dict[str, Any] = {
-            "cwd": str(session.workdir), "approvalPolicy": approval_policy(turn), "sandbox": "danger-full-access", "model": turn.model,
-            "developerInstructions": turn.instructions or None,
-        }
+        params: dict[str, Any] = {"cwd": str(session.workdir), "approvalPolicy": approval_policy(turn), "sandbox": "danger-full-access", "model": turn.model}
         thread_id = session.thread_id or turn.thread_id
         result = None
+        session.thread_new = False
         if thread_id:
             try:
                 result = await server.request("thread/resume", {"threadId": thread_id, **params}, timeout=60)
             except RpcError:
                 result = None  # the thread's files are gone (the container was rebuilt): start over rather than refuse to answer
         if result is None:
-            result = await server.request("thread/start", params, timeout=60)
+            # Only a NEW thread takes developer instructions (checked with the real Codex: on `thread/resume` they are ignored).
+            result = await server.request("thread/start", {**params, "developerInstructions": turn.instructions or None}, timeout=60)
+            session.thread_new = True
         session.thread_id = result["thread"]["id"]
         session.fingerprint = fp
     except BaseException:
@@ -507,12 +512,25 @@ async def interrupt(session: Session) -> bool:
     return True
 
 
+def instructions_notice(turn: Turn) -> str:
+    """The text put before a message when the session's instructions changed after its conversation began."""
+    new = (turn.instructions or "").strip()
+    if not new:
+        return "[Инструкции сессии изменены: прежние свои инструкции больше не действуют, действуют только стандартные.]\n\n"
+    return f"[Инструкции сессии изменены. С этого момента действуют ТОЛЬКО эти (прежние отменены):\n{new}\n]\n\n"
+
+
 async def dispatch(session: Session, turn: Turn) -> None:
     """Hand the action to Codex. The answers come back as notifications into `session.sink`."""
     server, thread = session.server, session.thread_id
     assert server is not None and thread is not None
     if turn.action == "message":
-        params: dict[str, Any] = {"threadId": thread, "input": [{"type": "text", "text": turn.prompt, "text_elements": []}], "model": turn.model,
+        prompt = turn.prompt
+        wanted = (turn.instructions or "").strip()
+        if not session.thread_new and wanted != (turn.applied_instructions or "").strip():
+            prompt = instructions_notice(turn) + prompt                                    # the thread has older ones: say so in the message
+            session.emit({"type": "thread.instructions", "instructions": wanted or None})
+        params: dict[str, Any] = {"threadId": thread, "input": [{"type": "text", "text": prompt, "text_elements": []}], "model": turn.model,
                                   "approvalPolicy": approval_policy(turn)}
         if turn.effort:
             params["effort"] = turn.effort
@@ -610,7 +628,10 @@ async def run_turn(body: Turn) -> StreamingResponse:
     try:
         await ensure_server(session, body)
         queue.put_nowait(json.dumps({"type": "thread.started", "thread_id": session.thread_id}))
+        if session.thread_new:  # a thread that begins now begins with the instructions
+            queue.put_nowait(json.dumps({"type": "thread.instructions", "instructions": (body.instructions or "").strip() or None}))
         await dispatch(session, body)
+        session.thread_new = False
     except HTTPException:
         session.sink, session.busy = None, False
         raise

@@ -287,7 +287,7 @@ def fork_session(session_id: int, user: User = Depends(require_operator), db: Se
         raise HTTPException(status.HTTP_409_CONFLICT, f"Не больше {settings.max_agent_sessions_per_user} сессий: удалите ненужные")
     copy = AgentSession(
         key=new_session_key(), user_id=user.id, title=f"{source.title} (копия)"[:200], llm_profile_id=source.llm_profile_id, llm_model=source.llm_model,
-        thread_id=source.thread_id, instructions=source.instructions, reasoning_effort=source.reasoning_effort, approval_mode=source.approval_mode,
+        thread_id=source.thread_id, instructions=source.instructions, thread_instructions=source.thread_instructions, reasoning_effort=source.reasoning_effort, approval_mode=source.approval_mode,
         turn_count=source.turn_count, next_seq=source.next_seq,
     )
     try:

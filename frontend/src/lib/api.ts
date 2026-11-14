@@ -499,10 +499,12 @@ export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/
 
 // ── Агент ────────────────────────────────────────────────────────────────
 //
-// A chat with Codex CLI that runs in the isolated agent container (see backend/app/api/agent.py). Each message is one
-// "turn"; everything the agent does comes back as an ordered list of events, live over a WebSocket.
+// A chat with Codex CLI that runs in the isolated agent container (see backend/app/api/agent.py). Each message is one "turn"; what the agent
+// does comes back as an ordered history of events plus snapshots of what it is writing right now, live over a WebSocket.
 
 export type AgentSessionStatus = "idle" | "running";
+export type ApprovalMode = "auto" | "ask";
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
 export interface AgentSession {
   id: number;
@@ -511,6 +513,9 @@ export interface AgentSession {
   llm_profile_name: string | null;
   /** The model the session talks to: the one chosen, else the profile's default. */
   llm_model: string | null;
+  instructions: string | null;
+  reasoning_effort: string | null;
+  approval_mode: ApprovalMode;
   status: AgentSessionStatus;
   turn_count: number;
   last_error: string | null;
@@ -520,25 +525,101 @@ export interface AgentSession {
   updated_at: string;
 }
 
-/** One stored event: `kind` is "user" (the operator's message), "turn.error"/"turn.stopped" (the panel's own notes) or
- * what Codex emitted (thread.started, item.started/updated/completed, turn.completed, turn.failed, error). */
+/** One stored event: `kind` is "user", "action", "turn.started", "item.completed", "turn.diff", "turn.plan", "approval.requested/resolved",
+ * "turn.completed", "thread.reverted", "turn.error"/"turn.stopped" (the panel's own notes). */
 export interface AgentEvent {
   seq: number;
   kind: string;
   payload: Record<string, unknown>;
 }
 
+export interface AgentSessionInput {
+  title: string;
+  llm_profile_id: number;
+  llm_model?: string | null;
+  instructions?: string | null;
+  reasoning_effort?: string | null;
+  approval_mode?: ApprovalMode;
+}
+export interface AgentSettingsInput {
+  title?: string;
+  instructions?: string | null;
+  reasoning_effort?: string | null;
+  approval_mode?: ApprovalMode;
+}
+export type ReviewTarget = { type: "uncommittedChanges" } | { type: "baseBranch"; branch: string } | { type: "commit"; sha: string } | { type: "custom"; instructions: string };
+export type AgentActionInput =
+  | { action: "compact" }
+  | { action: "revert" }
+  | { action: "shell"; command: string }
+  | { action: "review"; target?: ReviewTarget };
+export type ApprovalDecision = "accept" | "accept_session" | "decline" | "cancel" | "answer";
+
+export interface AgentFileEntry {
+  name: string;
+  dir: boolean;
+  size: number | null;
+  modified: number;
+}
+export interface AgentFileListing {
+  path: string;
+  entries: AgentFileEntry[];
+}
+export interface AgentFilePreview {
+  binary: boolean;
+  size: number;
+  text: string | null;
+  truncated: boolean;
+}
+
+const A = "/api/agent/sessions";
 export const getAgentHealth = async () => (await api.get<{ ok: boolean; detail: string }>("/api/agent/health")).data;
-export const listAgentSessions = async () => (await api.get<AgentSession[]>("/api/agent/sessions")).data;
-export const createAgentSession = async (body: { title: string; llm_profile_id: number; llm_model?: string | null }) =>
-  (await api.post<AgentSession>("/api/agent/sessions", body)).data;
-export const getAgentSession = async (id: number) => (await api.get<AgentSession>(`/api/agent/sessions/${id}`)).data;
+export const listAgentSessions = async () => (await api.get<AgentSession[]>(A)).data;
+export const createAgentSession = async (body: AgentSessionInput) => (await api.post<AgentSession>(A, body)).data;
+export const getAgentSession = async (id: number) => (await api.get<AgentSession>(`${A}/${id}`)).data;
+export const updateAgentSession = async (id: number, body: AgentSettingsInput) => (await api.patch<AgentSession>(`${A}/${id}`, body)).data;
 export const deleteAgentSession = async (id: number) => {
-  await api.delete(`/api/agent/sessions/${id}`);
+  await api.delete(`${A}/${id}`);
 };
-export const sendAgentMessage = async (id: number, text: string) =>
-  (await api.post<AgentSession>(`/api/agent/sessions/${id}/messages`, { text })).data;
-export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`/api/agent/sessions/${id}/stop`)).data;
+export const sendAgentMessage = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/messages`, { text })).data;
+/** Add an instruction to the turn that is running now. */
+export const steerAgentTurn = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/steer`, { text })).data;
+export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/stop`)).data;
+export const runAgentAction = async (id: number, body: AgentActionInput) => (await api.post<AgentSession>(`${A}/${id}/actions`, body)).data;
+export const forkAgentSession = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/fork`, undefined, { timeout: 300_000 })).data;
+export const answerAgentApproval = async (id: number, requestId: string, decision: ApprovalDecision, answers?: Record<string, string | string[]>) => {
+  await api.post(`${A}/${id}/approvals/${encodeURIComponent(requestId)}`, { decision, answers: answers ?? null });
+};
+
+export const listAgentFiles = async (id: number, path = "") => (await api.get<AgentFileListing>(`${A}/${id}/files`, { params: { path } })).data;
+export const readAgentFile = async (id: number, path: string) => (await api.get<AgentFilePreview>(`${A}/${id}/files/content`, { params: { path } })).data;
+export const uploadAgentFile = async (id: number, path: string, file: File) =>
+  (await api.put<{ path: string; size: number }>(`${A}/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
+export const cloneIntoAgent = async (id: number, url: string) => (await api.post<{ path: string }>(`${A}/${id}/files/clone`, { url }, { timeout: 330_000 })).data;
+
+/** Save a file the panel serves behind the login: fetched with the token, then handed to the browser as a download. */
+async function saveBlob(url: string, params: Record<string, string>, filename: string): Promise<void> {
+  const response = await api.get<Blob>(url, { params, responseType: "blob", timeout: 600_000 });
+  const href = URL.createObjectURL(response.data);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
+export const downloadAgentFile = (id: number, path: string) => saveBlob(`${A}/${id}/files/download`, { path }, path.split("/").pop() || "file");
+export const downloadAgentArchive = (id: number, title: string) => saveBlob(`${A}/${id}/files/archive`, {}, `${title.replace(/[^\p{L}\p{N}._-]+/gu, "_") || "session"}.zip`);
+
+export interface AgentFromScan {
+  session: AgentSession;
+  /** The task proposed for the first message: the user reads it and sends it. */
+  draft: string;
+  files: number;
+}
+export const createAgentFromScan = async (scanId: number, body: { llm_profile_id: number; llm_model?: string | null }) =>
+  (await api.post<AgentFromScan>(`/api/agent/from-scan/${scanId}`, body, { timeout: 120_000 })).data;
 
 // ── Настройки ────────────────────────────────────────────────────────────
 //
