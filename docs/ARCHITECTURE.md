@@ -840,3 +840,439 @@ the real host's own `uname -a` and `id -un` output; a second task with a stub th
 before touching the host (a sentinel `touch` in the same script never ran); the real browser UI showed both runs,
 created a third through the form, and displayed its generated script; and an `operator` account was refused by the
 live API (403), not just by a unit test.
+
+### 18a. `STRIX_API_TYPE`: a custom gateway must not get the Responses route (HTTP 400 "This endpoint supports function tools only")
+
+Seen in a real scan: the pre-scan check passed (it always posts to `/chat/completions`) and the agent loop then failed with
+`openai.BadRequestError: 400 … This endpoint supports function tools only` from `agents/models/openai_responses.py`, i.e. from
+`POST /responses`. Read in `strix-agent` 1.7.0 (not run against the user's gateway): Strix chooses the route in `resolve_api_type` —
+`STRIX_API_TYPE` if set, otherwise **Responses when its LiteLLM catalog lists `/v1/responses` for the model name, chat completions
+for everything else**. On the Responses route it sends its file tools as native `custom`-type tools; on the chat-completions route
+`_custom_tool_as_function_tool` turns every tool into a plain function. A gateway that implements only function tools refuses the former.
+
+The panel never set `STRIX_API_TYPE` (and the runner's environment is a whitelist, so the worker's own value never reached Strix). Now
+`build_strix_env` (`services/llm.py::strix_api_type`) sets it for **both runners**: a `custom` profile gets `chat_completions`; other
+profiles are left to Strix. The admin setting `STRIX_API_TYPE` = `auto` (default) | `responses` | `chat_completions` overrides it for every profile —
+`responses` is for a gateway that really implements the whole Responses API. Tests: `tests/test_api_type.py`.
+
+## 20. «Агент»: Codex CLI in an isolated container, driven from the panel
+
+> **Since §23 the agent runs on `codex app-server`, not on `codex exec --json`.** What is said below about one `exec` process per turn, the
+> `exec` event format and a process that lingers after a turn is superseded by §23; the isolation, the key handling, the gateway handling
+> (function tools only, the compat proxy) and the image/health notes still apply as written.
+
+A chat with an open-source coding agent ([Codex CLI](https://github.com/openai/codex), Apache-2.0) inside the panel: the operator
+writes a task in plain words and sees every command, file edit and answer as a feed of steps, can add messages and stop it.
+(Claude Code is not open source, so it is not an option; goose, opencode and Kimi CLI were considered — Codex was chosen.)
+
+```
+Browser ──REST + WS──> FastAPI ──> Celery (queue `agent`) ──HTTP, token──> agentd (container `agent`) ──> codex exec --json
+                         │                │                                   own volume, own network, no secrets
+                      Postgres  <── events stored one by one ──┘
+```
+
+### Why a separate container (the decision that shapes everything)
+
+Codex is started with `--dangerously-bypass-approvals-and-sandbox`: the agent runs any command it likes, with no confirmation.
+Codex's own sandbox (bubblewrap) cannot run inside a container, so **the container is the sandbox**. `agent` therefore gets:
+no `docker.sock`, no `.env` (only `AGENT_TOKEN`), no route to Postgres and Redis (its own network `agentnet`; only the backend and
+`agent-worker` are on both), a read-only root filesystem, no capabilities, `no-new-privileges`, a pid and memory limit, and a non-root user.
+What it *can* do: write in its volume (`/data/agent/<session key>/work`), reach the internet (the model API, `git`, `pip`…).
+The worker running the panel's own code never executes what the agent produces.
+
+- The model's API key travels in the body of each turn (`panel → agent` over the internal network, not TLS) into the environment
+  of the Codex process only; it is never written to disk by agentd. The key is also **redacted from every stored event** should the
+  agent print it, and from agentd's stderr tail. Codex's own shell policy already hides variables named `*KEY*` from the commands.
+- agentd authenticates every request with `AGENT_TOKEN` (constant-time compare; an empty token refuses everything).
+  `AGENT_TOKEN` empty in the panel = the feature is off (`503`, nothing is sent anywhere).
+- Session keys, thread ids and model names are validated against strict patterns before they reach a path or an argv, the prompt is
+  passed after `--`, and `base_url` is written with TOML-safe quoting — none of the user's strings can become an option or a config key.
+
+### Turns, threads and history
+
+A *session* has a Codex thread id (`thread.started`). Every message is one *turn*: the first is `codex exec`, later ones
+`codex exec resume <thread>` — Codex carries the conversation itself (checked: the second request to the model contained the first
+turn's items). The session's `CODEX_HOME` and working directory live in the container's volume, so a thread survives a restart of agentd.
+`agent_events` stores what Codex printed (long strings cut at 20 000 characters, at most 20 000 events per session) plus the panel's own
+`user`, `turn.error`, `turn.stopped`. One turn at a time per session: the claim is a single conditional `UPDATE … WHERE status='idle'`.
+
+- **Live view** — `WS /api/agent/sessions/{id}/ws` (first frame `{token, from}`) replays from a sequence number and then tails the table;
+  a reconnect resumes from the next unseen event. Unlike a scan the socket stays open between turns.
+- **Stop** — `SIGINT` to the agent's process group, `SIGKILL` after a grace period. The same happens when the worker hangs up mid-turn
+  or a turn exceeds `AGENT_TURN_TIMEOUT_SECONDS` (default 30 minutes).
+- **Liveness** — a command that prints nothing for minutes must not look like a lost worker: agentd sends `agentd.ping` every 15 s and the
+  worker moves the session's heartbeat; `reap_stale_agent_turns` (beat, every minute) only ends a turn that stopped beating
+  for `AGENT_STALE_SECONDS` (300) and stops its process.
+- Turns run on their own Celery queue (`agent`, service `agent-worker`, `AGENT_CONCURRENCY`) so long chats cannot occupy scan slots.
+
+### Who can use it
+
+Admin and operator; viewers cannot. Sessions are private to their owner (an admin does not see other people's): the agent works with the
+owner's LLM key and its history may contain anything the owner pasted. Profiles: OpenAI, Grok (xAI has a Responses API) and custom
+(an OpenAI-compatible endpoint **that implements the Responses API**). **Claude profiles are refused with an explanation**: Codex speaks only the
+Responses API (`wire_api = "responses"`), and Anthropic's native API is a different protocol.
+
+### Checked against the real Codex (0.169.0) — and what was not
+
+Run for real against a fake Responses endpoint: provider and model via `-c model_providers.<id>={…}`, the key read from the env var named in
+`env_key` and sent as `Authorization: Bearer`, JSONL events (`thread.started`, `item.completed` with `agent_message` / `error`, `turn.started`,
+`turn.completed` with usage, `turn.failed`), `exec resume <thread_id>`, and that **`CODEX_HOME` must exist** (agentd creates it).
+**Not run:** a real model, and Codex with `--dangerously-bypass-approvals-and-sandbox` (blocked in the environment this was built in); the
+exact shape of `command_execution` / `file_change` items comes from Codex's documented JSONL format, and the page keeps any item it does not
+recognise as a generic step instead of dropping it. **Not built or run:** the `agent` image and the compose changes (no Docker daemon
+there) — try `docker compose up --build`, check `GET /api/agent/health` in the panel, and send one message.
+
+### Installing Codex in the image, and the health check (found on first real use)
+
+`@openai/codex` is a JS launcher; the real binary is the separate package `@openai/codex-linux-x64` (or `-arm64`), an **optional** dependency that npm
+silently skips when it cannot fetch it. The first image built that way started fine and then failed on the first message with
+`Missing optional dependency @openai/codex-linux-x64. Reinstall Codex`. `agentd/Dockerfile` now installs the platform package by name with
+`--include=optional` (checked here also with `NPM_CONFIG_OMIT=optional` set) and runs `codex --version`, so an unusable Codex fails the **build**.
+`GET /health` of agentd also really starts it (`codex --version`, remembered for a minute) instead of only looking for a file on the PATH, and the
+panel's badge on the «Агент» page shows the reason («Codex в контейнере агента не запускается: …»).
+
+### Gateways that accept only function tools (`AGENT_TOOLS`)
+
+A custom OpenAI-compatible gateway answered the agent with `400 This endpoint supports function tools only` (the same message Strix got, §18a). Run for real, Codex 0.169
+against a request-logging endpoint sends, by default, `function` tools **plus** a built-in `web_search` tool and a `namespace` tool (`multi_agent_v1`). With
+`-c web_search="disabled" --disable multi_agent` only `function` tools remain (`exec_command`, `write_stdin`, `request_user_input`, `view_image`, and the goal tools — switched off too with
+`--disable goals`, like `image_generation`, to keep the list short for the simpler models behind gateways); the same flags work for `exec resume` and the history still carries over.
+The panel sends `function_tools_only` with each turn: **on for `custom` and Grok profiles, off for OpenAI itself** (its API takes every tool type, and web search is useful there).
+The setting `AGENT_TOOLS` = `auto` (default) | `functions` | `full` overrides this for all profiles (also editable in «Настройки»). Not verified: that a particular gateway then works end to
+end — the request is function-only, but a model behind it still has to call tools through its Responses API.
+
+### A gateway whose final stream event Codex cannot parse (the compat proxy)
+
+Second real-gateway failure: the model answered, then `Reconnecting… 1/5 (stream disconnected before completion: failed to parse ResponseCompleted: missing field
+`cached_tokens`)` — the answer appeared again and again and the turn finally failed. Reproduced with the real Codex 0.169 against an endpoint whose `response.completed`
+carries `input_tokens_details` without `cached_tokens`: Codex cannot parse the final event, treats the finished stream as dropped and repeats the whole request (and the tokens are paid each time).
+For gateways (every profile but OpenAI's own) agentd now gives Codex the address of a small **compat proxy** inside its own process (`/compat/<per-turn token>/…`, loopback only,
+the token valid for that turn and then dropped) which forwards to the real endpoint and completes only the `usage` numbers of the final events (`cached_tokens`, `reasoning_tokens`,
+`total_tokens`; a chat-style `prompt_tokens` is mapped); every other line passes through unchanged, and the key is whatever Codex sends — nothing is stored.
+Checked with the real Codex through the proxy: one answer, `turn.completed`, no retries. The setting `AGENT_RESPONSE_FIX` («Исправлять ответы шлюза», on by default) switches it off.
+Other gateway quirks can be handled in the same place.
+
+### A Codex that reports the turn over and does not exit
+
+Seen in a chat: the usage line («токенов: … на входе») was shown and the spinner kept turning — the turn stays `running` until the Codex process exits, and it did not exit at once.
+agentd now treats Codex's own `turn.completed` / `turn.failed` as the end: it gives the process `AGENT_EXIT_GRACE_SECONDS` (10) to leave by itself, then ends it (SIGINT, then SIGKILL after the usual grace)
+and reports exit code 0 with `lingered: true` — ending a finished process is not a failure. The page shows no spinner once the usage line closes the feed and says «завершается…» while it waits.
+
+### Limits
+
+The agent can do anything inside its container, including reading what you paste into the chat and using the model key it was given
+for that turn; it cannot reach the panel's data. It has no access to your hosts unless you hand it SSH keys in the chat. There is no
+per-session spending limit besides the turn time limit (Codex reports token counts, not cost, so the budget bar of scans does not apply).
+The container's volume grows with the sessions' working directories: deleting a session removes its directory.
+
+### Tests
+
+`backend/tests/test_agent.py` (28): the API (roles, ownership, disabled without a token, Claude profile refused, one turn at a time,
+history order and `resume`, what Codex is given — argv, key, no panel secrets —, failed and stopped turns, redaction, truncation, an unreachable
+container, the stale-turn reaper, delete, WebSocket replay/resume/auth) against `tests/fake_codex.py` through the real agentd app; a real uvicorn
+for the tests that need streaming (stop; a silent long command stays alive); agentd on its own (token, unsafe identifiers, timeout, TOML quoting).
+Frontend: `src/lib/agentModel.test.ts` — how events become the feed.
+
+## 21. «Настройки»: operating parameters in the panel, and a live limit of scans that run at once
+
+Until now every number below lived in `.env` and needed a restart. They are now edited by an administrator on the **«Настройки»** page
+(`GET/PUT /api/settings`, admin only) and take effect without restarting anything.
+
+### Where a value comes from
+
+`.env` (and the default in `app/core/config.py`) is the **baseline**. A change made in the panel is a row in `app_settings` (migration 0012)
+and **wins over the baseline**; "сбросить" deletes the row. Setting a value equal to the baseline stores no row (so a later edit of `.env`
+still counts for a parameter nobody really changed). Each row keeps who changed it and when.
+
+The panel code already read `settings.<name>` at the moment it needed a value, so applying a change is setting that attribute
+(`app/core/runtime_settings.py::apply`). Every process — the API, each worker child, beat — runs a small background thread that reloads the
+table every 5 seconds (`start_refresher`: API lifespan, Celery `worker_process_init` and `beat_init`); the API process that took the `PUT`
+applies it at once. So a change reaches all of them within seconds. A database that is away, or not yet migrated, leaves the current values
+alone; a stored value that no longer passes validation, or for a parameter that no longer exists, is ignored.
+
+### What is editable (27 parameters, `runtime_settings.SPECS`) and what is not
+
+Scans (parallelism, timeout, grace on stop, stale threshold, log size, per-account limit), schedules, Strix (reasoning effort, API route,
+preflight timeout, telemetry, update check, version and sandbox image to install), SSH, Операции, Агент, login throttling and session length.
+Each has bounds checked on the server (and mirrored in the page), a unit, a hint, and its `.env` name.
+
+**Not here, deliberately:** secrets and what the panel needs before it can read the database (`JWT_SECRET`, `SECRET_ENCRYPTION_KEY`, Postgres
+and Redis addresses, `ADMIN_*`, `ORESHNIK_ENV`, `CORS_ORIGINS`), `AGENT_TOKEN` / `AGENT_URL`, paths and binaries, and the worker's process
+counts (`SCAN_WORKER_SLOTS`, `AGENT_CONCURRENCY`). `strix_version` and `strix_sandbox_image` end up in shell commands on SSH hosts, so they
+must match a strict pattern (no spaces, quotes, `;`, `$`, backticks). `ssh_check_interval_seconds` sets beat's schedule at startup, so it is
+saved but marked "нужен перезапуск" (`docker compose restart beat`).
+
+### The limit of scans that run at once (`SCAN_CONCURRENCY`)
+
+It used to be the worker's `--concurrency`, i.e. fixed at start. Now the **panel** holds it: the worker starts with up to
+`SCAN_WORKER_SLOTS` processes (default 16, `--autoscale`, so idle ones are not kept) as a ceiling, and `tasks._claim` — under a PostgreSQL
+advisory lock, so two workers cannot take the last place — counts scans in `running` + `cancelling` and moves a queued scan to `running` only
+while that count is below `scan_concurrency`. Otherwise the scan **stays `queued`** and its task is scheduled again in 5 s; cancelling it makes the
+next try a no-op. Raising the limit lets waiting scans start within seconds; lowering it does **not** stop scans that are already running — it only
+stops new ones from starting. The setting cannot exceed the ceiling (refused with a reason). Places are not handed out strictly in order of arrival.
+
+### Tests and limits
+
+`tests/test_app_settings.py` (34): every parameter exists on `settings` and its default is valid; secrets are not editable; shell metacharacters are
+refused; the API (roles, listing, apply at once, reset, "equal to default stores nothing", all-or-nothing, round trips); another process picking a
+change up by refreshing, invalid and unknown rows ignored, a broken database; the scan gate (waits at the limit, starts with a free place, raising
+the limit without restart, lowering does not kill, cancelling still holds its place, finished ones do not, cancelled is skipped, re-scheduled in a real
+worker). Frontend: `src/lib/settingsForm.test.ts` (11). **Not run:** the Celery signal hooks and the autoscaling worker themselves (no broker or Docker
+in the environment where this was written) — after updating, change «Сканов одновременно» with scans queued and watch them start.
+
+## 22. Saved model lists, and choosing any model of any provider for a scan
+
+A profile used to hold one model; «Загрузить модели» only suggested ids while typing it. Now the list **is kept** and a scan picks from all of it.
+
+- **Storage.** `llm_profiles.models` (JSON list, migration 0013) holds what the provider served at the last load (at most 1000 ids, trimmed, no repeats,
+  each ≤ 200 characters). `model` stays the profile's default and is always selectable, first, even if it is not in the list (`services/llm.py::profile_models`).
+- **Loading.** `POST /api/llm-profiles/models` with `profile_id` and neither a typed key nor a changed endpoint uses the stored ones **and stores the list at once**
+  (`saved: true`) — it is not lost if the form is closed without «Сохранить». A list loaded with a typed key or another endpoint is only handed back; the form sends it
+  with «Сохранить» (`models` on create/update). An untouched form sends no list, so editing a profile and retyping its key cannot wipe what it already has.
+  `POST /api/llm-profiles/{id}/refresh-models` (the card's «Обновить модели») asks again with the stored key and replaces the list.
+- **Choosing.** `ScanCreate`, `ScanContinue` and schedules take `llm_model` next to `llm_profile_id` (`scans.llm_model`, `schedules.llm_model`; null = follow the profile's default).
+  The server checks the model is one of that profile's (default included) — otherwise `422` with a hint to load the list — and that a model comes with a profile. `ScanOut.llm_model`
+  is what the scan runs with (the chosen one, else the profile's default). The worker passes it to `build_strix_env(profile, model)` → `STRIX_LLM`, with the provider's usual prefix.
+- **The page.** One select, «Модель», lists every model of every profile the user has, grouped by profile («DeepSeek Flash · свой endpoint»), the profile's default marked; a search box
+  appears once there are more than 12. The same control is in «Новый скан», the schedule form and «Продолжить». It sends no `llm_model` for a profile's own default, so such a scan keeps following the profile.
+- **Continuing / schedules.** A continuation keeps the scan's model unless a model or another profile is chosen; a model that has left the profile's list (the provider stopped serving it and the list was refreshed)
+  falls back to the profile's default. Changing a schedule's profile without choosing a model means that profile's default. A schedule whose pinned model is later removed from the list is refused when it fires, with the reason
+  (the usual skipped-with-reason), rather than silently running something else.
+- **«Агент» and «Операции» too.** An agent session (`agent_sessions.llm_model`) and an ops run (`ops_runs.llm_model`, migration 0014) take `llm_model` next to `llm_profile_id`, checked the same way
+  (`services/llm.py::validate_model`, `422` with the hint). The session keeps its model for every turn: Codex gets it through `-c model=…` with the profile's endpoint (`endpoint_for(profile, model)`), and an ops script is
+  drafted with it. The agent's choice is limited to the profiles Codex can use (OpenAI, Grok, custom — not Claude). The agent's model is checked only when the session is created, not on every message, so a model that
+  left the list later is tried anyway and the provider's own error is shown in the chat.
+
+Tests: `tests/test_llm_models.py` (30: list cleaning and storage, load/refresh, choosing for scans of different providers, refusals, what Strix is given, continuing, schedules), `src/lib/modelChoice.test.ts` (14).
+
+
+## 23. «Агент» on `codex app-server`: a live chat, control of the turn, files, questions, scans
+
+The agent used to be one `codex exec --json` process per message: only finished steps came back, nothing could be changed during a turn. It now talks to
+**`codex app-server`** (the protocol Codex's own IDE extension uses; JSON-RPC, one JSON object per line over the process's stdio; `agentd/rpc.py`).
+Everything below was **run against the real Codex 0.169.0** (a stand-in model endpoint that streams like a real one), not only read from its schema:
+`thread/start|resume|fork|revert`, `turn/start|steer|interrupt`, `thread/compact/start`, `thread/shellCommand`, `review/start`, the deltas
+(`item/agentMessage/delta`, `item/commandExecution/outputDelta`, …), `turn/diff/updated`, `turn/plan/updated`, `thread/tokenUsage/updated` and the server
+requests `item/commandExecution|fileChange/requestApproval`, `item/tool/requestUserInput`. A scripted run of 18 such checks through the final agentd passes.
+
+### Processes and sessions
+
+One `codex app-server` per session, started with the first message, ended after `AGENT_IDLE_SECONDS` (900) without work or when
+`AGENT_MAX_PROCESSES` (8) is reached (the longest idle one makes room; if none is idle the new turn is refused with a reason). The conversation lives in the session's
+`CODEX_HOME`, so the next message `thread/resume`s it; a thread whose files are gone is replaced by a new one instead of refusing to answer. A changed endpoint, key or tool set
+restarts the process; a changed effort, model or approval mode does not (they go with `turn/start`). The old process's last words never reach a new turn
+(callbacks are bound to the process that made them — a bug found by a test).
+
+### What the page gets (the events)
+
+agentd turns Codex's notifications into a small stream of its own, and keeps the old `codex exec` item shapes so one feed renders both:
+
+| | stored (`agent_events`, in order, never changes) | live (`agent_live`, one row per unfinished item, dropped when it finishes) |
+|---|---|---|
+| messages, reasoning | the finished item | the text so far (throttled to ~7 per second) |
+| commands | the finished item: command as typed, output, exit code, status | the output so far |
+| file changes | each file's own diff | — |
+| the turn | `turn.started`, `turn.diff` (unified `git diff`), `turn.plan`, `turn.completed` (+ token usage of the turn) | the diff and plan so far |
+| questions | `approval.requested`, `approval.resolved` | — |
+
+The WebSocket sends `event` frames (numbered, a reconnect resumes from the next unseen one) and `live` / `live_end` frames. A live snapshot never replaces a finished
+item on the page (the finished one arrives first). Streaming output of a command, not only its end, is visible while it runs.
+
+### Controlling a turn
+
+**Stop** (`turn/interrupt`; also when the panel hangs up or the time limit passes), **add an instruction** to the running turn (`turn/steer`; shown in the feed as "добавлено по ходу"),
+**compact** the conversation, **review** the changes (`review/start`; needs a git repository, so every working folder is `git init`ed), **run a command yourself**
+(`!ls`, `thread/shellCommand`, no model involved), **undo the last turn** (`thread/revert`) and **fork** the session. Slash commands in the box: `/compact`, `/review`, `/undo`, `/fork`.
+Two of these are easy to misread: *undo removes the turn from the **conversation**, not from the **files*** (checked: Codex's revert is history only; the page says so), and a fork is a copy of the folder
+and the conversation under a new key (the source session must be idle).
+
+### Questions to the user («Подтверждения»)
+
+Per session: **«Без вопросов»** (`approvalPolicy never`, as before) or **«Спрашивать»** (`untrusted`, with the sandbox mode `danger-full-access` because the container is the sandbox:
+Codex then asks before commands it does not know to be safe and before every file change). The page shows a card with the command (as typed) or a pointer to the change; **Разрешить / Разрешить на сессию / Отклонить**.
+The agent can also ask a question (`request_user_input`): options and/or a free answer, secret answers as a password field. An unanswered question is declined after `AGENT_APPROVAL_TIMEOUT_SECONDS`;
+**Stop** cancels pending questions first (an interrupt would never reach a turn that waits). Requests the panel cannot answer (MCP elicitation, dynamic tools) are refused with an error; extra
+**permissions are never granted**.
+
+### Settings and the system prompt
+
+Per session and editable: title, **its own instructions**, **reasoning effort** (minimal…xhigh), approval mode. *Found on the real Codex:* on `thread/resume` the new `developerInstructions` are
+**ignored** (the old text stays in the thread; `baseInstructions` would replace Codex's whole built-in prompt). So instructions are given when a thread is created, and when you change them later agentd
+puts "the instructions changed, ONLY these apply now (the previous are cancelled): …" in front of the next message — once; the panel remembers what the thread has (`thread_instructions`).
+
+### The session's files
+
+Folder browser, text preview (first 1 MB; binary files are described), download, upload (raw body, `AGENT_MAX_UPLOAD_MB`), `git clone --depth 1` of a plain **https** link (protocols are closed
+on purpose: no `file://`, `ext::`, ssh; credentials in the URL are refused), the whole folder as a zip (without `.git`, `AGENT_MAX_ARCHIVE_MB`). Every path is resolved first and refused unless its **real** location
+is inside the session's folder (the agent can make symbolic links; links are tested). The panel only checks that the session is yours and passes the request on (streams, not buffers).
+
+### «Разобрать в агенте» (from a scan)
+
+The button on a finished scan creates a session whose folder already holds `scan/README.md` (targets, mode, status, the scan's own instruction), `scan/findings.json` (the findings the panel stored),
+and, if Strix left them, `report.md`, `vulnerabilities.json`, `findings.sarif`, `vulnerabilities/*.md` (limits: 5 MB per file, 30 MB, 200 files), plus a proposed first message that the user reads and sends.
+An operator can do this only for their own scans, an admin for any; the model is chosen from the user's profiles as everywhere. The target's source code is not fetched automatically: clone it in «Файлы».
+
+### Limits, honestly
+
+- `app-server` is marked **experimental** by Codex; only 0.169.0 was checked, and the version is pinned in the image. A newer Codex may change the protocol.
+- **Sessions of different users share one container and one Unix user.** The container hides the panel's secrets, but an agent could read another session's folder (and its parent process's environment, `AGENT_TOKEN` included).
+  Treat the agent container as one trust domain: do not give «Агент» to people who must not see each other's work. (Separate containers per user would fix it; not built.)
+- No disk quota per session besides the upload and archive limits; a runaway agent can fill the volume.
+- Not run for real: the `agent` image and compose (no Docker daemon where this was written), a real model, and a real gateway with the full flow (the gateway cases are covered by the earlier checks in this document).
+
+### Tests
+
+`tests/test_agentd.py` (87) runs agentd as a real uvicorn against `tests/fake_appserver.py` (it speaks the recorded protocol): input checking, live text, what Codex is started and told, process reuse and restart,
+approvals (command, file change, question; decline; late and wrong answers; timeout), steer, stop, a hung-up client, timeout, compact/shell/review/revert, fork, every file call incl. symlink escapes, limits, clone validation, health, the compat proxy.
+`tests/test_agentd_normalize.py` (14) — the pure translation. `tests/test_agent.py` (57) — the panel's API through the worker to agentd: ownership of everything, history and live snapshots, the socket (live, late client, `live_end`),
+questions, steering, stopping, settings and the instructions hand-over, actions, undo one after another, fork, files, scans, gateways. Frontend: `agentModel.test.ts` (28; feed, live overlay, questions, undo, composer commands),
+`diff.test.ts` (11), `files.test.ts`.
+
+
+## 24. «Агент»: context and spend, goals, web search
+
+Three additions to the chat, each checked on the real Codex 0.169 first.
+
+### How full the context is, and what the session has spent
+
+`thread/tokenUsage/updated` carries the thread's running total, the last model call and `modelContextWindow`. After every turn agentd reports `context = {used: tokens of the last
+call, window, window_known}` and the turn's own usage; the panel keeps `context_used`, `context_window` and the session's totals (`tokens_in`, `tokens_out`, summed turn by turn, so
+they survive a restarted thread). The header shows a bar («контекст 76% · 196k из 258k»), the totals, and offers «сжать контекст» from 70%. **Caveat shown in the page:** for a model Codex does
+not know (its warning "Model metadata … not found. Defaulting to fallback metadata" — every gateway model so far) the window is Codex's default (258 400), not the model's real one; the
+percentage is then marked «≈». There is no cost in money: the panel has no prices for arbitrary gateway models.
+
+### Goals — the agent working by itself
+
+`thread/goal/set` gives the thread an objective (and a token budget). **Found by running it:** an *active* goal makes Codex start turns **by itself** — right after it is set and after every turn —
+until the model marks it complete (`update_goal`), it is paused, or the budget is spent (`budgetLimited`; with a budget of 1000 tokens the run ended after 17 turns). Unattended, that is an agent spending tokens
+with nobody watching. So:
+
+- Codex's goal feature is **off** (`--disable goals`) unless the session has a goal. This also closes a hole that existed for OpenAI profiles: with the feature on by default the model was offered `create_goal` and could have started such a loop on its own.
+- A goal is started only by the user («Поставить цель…» or `/goal текст`) and **must have a token budget** (10 000 … `AGENT_GOAL_MAX_TOKENS`, default ceiling 5M, editable in «Настройки»; the form proposes 500k). The turn's time limit applies to the whole run as well.
+- The run is one stream: agentd keeps reading across Codex's self-started turns (each is stored and counted on its own), and ends when the goal stops being active, when no next turn starts within 20 s, on Stop, on the time limit, or when the panel hangs up.
+- **Nobody reading = goal paused.** At the end of every such stream an active goal is set to `paused`; Stop pauses first (between two turns there is nothing to interrupt); a goal found active when a thread is resumed (the container died mid-run) is paused before anything else;
+  a turn that starts with no reader is interrupted. Checked on the real Codex: a paused goal does not start turns, an ordinary message with a paused goal is one turn, and with the feature off the model is not offered the goal tools.
+- The header shows the goal, its status and tokens used of the budget, with «продолжить» (sets the same goal going again) and «снять». The feed gets a line when the goal's status changes, not after every turn.
+
+### Web search
+
+Per session: **auto** (as before: on for OpenAI, off for gateways, which refuse the tool), **on**, **off**. "On" for a gateway is the user's call — a gateway that does not implement it answers 400, as documented above. A change restarts the session's process on the same thread.
+
+### Also fixed here
+
+The feed keyed a step by (user action, item id); a goal runs many Codex turns inside one action and their item ids repeat, so later steps replaced earlier ones. Steps are now keyed by Codex turn as well.
+
+### Tests
+
+`test_agentd.py` +18 (context, the guessed window, web search choices, a goal to completion, to its budget, Stop, resume, a hung-up reader, no next turn, clear, an active goal left behind, refusals), `test_agent.py` +11 (the same through the panel, totals, the budget ceiling, fork),
+`agentModel.test.ts` +8. Real Codex through the final agentd: budget run to `budgetLimited`, nothing calling the model afterwards, Stop → paused, a paused goal stays quiet, resume, completion by the model, clear, goal tools absent when off.
+
+## 25. Lights in the menu: something new in «Сканы» and «Агент»
+
+A small light next to «Сканы» and «Агент» in the menu, lit when something happened since the user last opened that section and off once it is opened
+(asked for instead of browser notifications: nothing to permit, works on plain HTTP).
+
+- `GET /api/attention?scans_since=&agent_since=` counts, **for the user's own things only**: scans that reached a final state after `scans_since` (a scan the user cancelled is no news; `failed` and
+  `findings` colour the light red / amber, otherwise green), agent sessions whose turn ended after `agent_since` and that are idle now, and — regardless of time — sessions where the agent is **waiting
+  for the user's answer** (amber, pulsing; it stays lit until the question is answered, also after the page was opened and left).
+- "Last opened" lives in the browser's `localStorage`, per account and section, as the **server's** time (the reply's `now`), so a wrong clock on the computer does not matter. The first time nothing is remembered,
+  everything counts as seen: old scans do not light up. It is per browser, not per account: another device has its own lights.
+- The page polls every 8 s (every 32 s in a background tab); the section being looked at never has a light. A tooltip says what is new («2 скана завершено, с находками: 1»).
+
+Tests: `tests/test_attention.py` (8), `src/lib/attention.test.ts` (7); the off-on-open behaviour was also driven in a real browser against a stubbed API.
+
+## 26. Tools for the agent: baked into the image, and self-installed at runtime
+
+The agent container (§20) starts with nothing but Codex, Python and Node — enough to read and patch code, not enough for most pentesting tasks. Two layers add
+to that, both inside the same sandbox the agent already runs in (no Docker socket, `read_only: true`, `cap_drop: [ALL]`, no DB/Redis/secrets, outbound internet
+only): everything here is for **authorized** testing — the agent's own targets (environments the operator owns or has written permission to test), the same rule
+that already governs Strix scans.
+
+### Layer 1 — baked into the image (`agentd/Dockerfile`)
+
+An apt-get install, Debian bookworm's main repo only, no backports, chosen for dependable availability rather than completeness:
+
+- **dev**: `jq`, `ripgrep` (`rg`), `httpie` (`http`), `zip`/`unzip`, `sqlite3`, `dnsutils` (`dig`), `openssl`, `less`
+- **network / recon**: `nmap`, `netcat-openbsd` (`nc`), `whois`, `traceroute`, `nikto`
+- `sqlmap`, from PyPI, in its own venv at `/opt/agent-tools` (never the system Python — Debian's PEP 668 refuses a bare `pip install` there anyway — and never
+  `agentd`'s own venv, so neither gets a dependency conflict from the other's needs)
+
+An admin extends this list without touching the Dockerfile: `AGENT_EXTRA_PACKAGES` in `.env` (space-separated apt package names) flows straight into the same
+`apt-get install` via a build arg (`docker-compose.yml`'s `agent.build.args`). It needs `docker compose build agent` to take effect — the image is immutable at
+runtime, which is the point: nothing baked in can be tampered with from inside a session.
+
+`cap_drop: [ALL]` means tools that want raw sockets degrade rather than fail outright — `nmap` without `CAP_NET_RAW` falls back to its unprivileged TCP-connect
+scan (`-sT`) automatically; this is normal, documented `nmap` behaviour, not a bug here, and is enough for port discovery and most version/NSE checks.
+
+### Layer 2 — the agent installs more at runtime, no root
+
+Baked-in coverage will always be incomplete; the agent decides for itself, mid-session, what else a task needs and installs it — without root, since the
+container never grants any. Three mechanisms, each already present in a stock Debian/Node image or added as one static binary, and each configured (in
+`spawn_env()`, `agentd/main.py`) to write only inside the session's own writable home (`agent_data` volume — the one place the read-only-rootfs container can
+write), never a system path uid 1000 cannot touch:
+
+- `pip install --user ...` → `~/.local/bin` (pip's own default; no extra configuration needed)
+- `npm install -g ...` → `~/.npm-global/bin`, via `NPM_CONFIG_PREFIX`
+- `micromamba create -n tools -c conda-forge ...` / `micromamba install -n tools ...` → `~/.micromamba/envs/tools/bin`, via `MAMBA_ROOT_PREFIX`. `micromamba`
+  itself is one static binary baked into the image (`/usr/local/bin/micromamba`, mamba-org's own bootstrap URL) — no conda, no root, no system package
+  manager involved in fetching it.
+
+All four self-install/baked bin directories are prepended to `PATH`, so anything placed there is callable by bare name right away — no second step, no shell
+restart. Two places set this, for a reason that only showed up once real commands were traced: `codex`'s shell tool runs every command as `/bin/bash -lc
+"..."` — a **login** shell — and Debian's stock `/etc/profile` unconditionally **overwrites** `PATH` for login shells before it sources `/etc/profile.d/*.sh`.
+So `spawn_env()` sets `PATH`/`MAMBA_ROOT_PREFIX`/`NPM_CONFIG_PREFIX` as the spawned process's own environment (covers anything that is not a login shell), and
+`agentd/Dockerfile` also bakes a fixed `/etc/profile.d/agent-tools.sh` that re-adds the same directories after that reset (covers the login shell, which is
+where it actually matters in practice). A PATH entry for a directory that does not exist yet is harmless — it is only resolved at the moment a command is
+looked up — so this works correctly before the agent has installed anything, and immediately after.
+
+### What this does not do
+
+No listening sockets, no inbound ports, no reverse-shell catchers: the agent container has no published ports and sits on the isolated `agentnet` network, so
+nothing outside Docker could reach a socket it opened anyway — raising that would need its own, separate decision about exposing a port, which has not been
+made. This section is tools the agent runs against things *it* connects out to, not things that connect in to it.
+
+### Tests
+
+`tests/test_agentd.py::test_self_installed_tools_land_in_the_sessions_own_folder_and_are_on_the_path` (the fake `app-server` reports its own `PATH`,
+`MAMBA_ROOT_PREFIX` and `NPM_CONFIG_PREFIX`, checked against the session's actual home directory). The apt/`sqlmap`/`micromamba` install steps themselves are
+not covered by this suite — there is no Docker daemon in the environment this was written in — and should be sanity-checked with a real `docker compose build
+agent` before this ships.
+
+## 27. A listener for the agent: a port the panel proxies in, on request
+
+§20 made `agent` deliberately unreachable from anywhere but the panel: no published port, no route but `agentnet`. That is right for commands the
+agent *initiates* (recon, `curl`, `git`), but it also means a capability some pentesting tasks genuinely need — catching an inbound connection,
+e.g. a reverse shell from an authorized target, or a webhook callback — had nowhere to land. This section is that one exception, made as
+narrow as the rest of the design allows it to be: **authorized testing only**, same as everywhere else in this panel.
+
+```
+outside world ──TCP:4444──> backend (published, host network) ──TCP:4444──> agent container (agentnet, no published port)
+                                    ↑ opened only by an explicit API call, for one session, one port, at a time
+```
+
+- **A fixed range, not a free-for-all.** `AGENT_LISTENER_PORTS` (`.env`, e.g. `4444-4450`) is both the range `docker-compose.yml` publishes on
+  `backend`'s own host ports *and* the range the API itself will open — the same variable, so they cannot drift apart. Empty = the feature is off
+  (`503` from every listener call); the ports stay published either way (nothing is bound to them until opened), so turning the feature off again
+  needs only the `.env` change, no rebuild.
+- **Opened per session, not per deploy.** `POST /api/agent/sessions/{id}/listener {port}` picks one port out of the range and starts an
+  `asyncio` TCP proxy in the **backend** process (`app/services/agent_listener.py`) between `0.0.0.0:<port>` (the host-published side) and
+  `agent:<port>` (the same port, reached over `agentnet` by the container's own Docker-DNS name — the one host this module will ever proxy to).
+  It is a dumb byte pipe both ways; it does not look inside the connection. `DELETE` closes it; `GET` reports it (also folded into
+  `AgentSessionOut.listener_port`, shown in the session's settings in the panel). One port per session at a time — opening a second closes the first.
+- **The agent, not the panel, listens.** The proxy does not create a socket inside the container: the agent itself has to bind that port
+  (`nc -lp 4444`, a short Python server, whatever the task calls for) with an ordinary shell command, same as any other command it runs. A
+  connection to the published port before that happens is accepted and closed at once (nothing to proxy to yet) — not left hanging.
+- **Ephemeral and self-closing.** All state is an in-memory `dict` in the one `uvicorn` process (`docker-compose.yml` runs no `--workers`); it does
+  not survive a restart, which is intentional — a listener is a short-lived, explicit action, not standing infrastructure. A listener nobody has
+  sent a byte through for `AGENT_LISTENER_IDLE_SECONDS` (default 1800) closes itself (`sweep_loop`, started in `app/main.py`'s lifespan); the
+  session's own deletion also closes its listener; shutdown closes all of them.
+- **What this still does not do.** The agent container itself remains exactly as isolated as §20 describes — this adds one proxied port on the
+  *panel's* host, not a published port on `agent`. Raw sockets, SYN scans and the like remain unavailable regardless (`cap_drop: [ALL]`, §26);
+  a listener only ever receives ordinary TCP, same as any service.
+
+### Tests
+
+`tests/test_agent_listener.py` (24): `port_range()` parsing, the actual byte-for-byte TCP pipe (against a stand-in "inside" server — two
+different loopback addresses stand in for the panel's host and the container, since one address cannot bind the same port twice), the
+nothing-listening-yet case, range/conflict/idempotency rules, the idle sweep, and the HTTP surface (ownership, 404 for someone else's session,
+422 outside the range, closing on session delete).

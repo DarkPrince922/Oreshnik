@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import AgentsPanel from "../components/AgentsPanel";
 import BudgetBar from "../components/BudgetBar";
+import AnalyzeModal from "../components/agent/AnalyzeModal";
 import ContinueModal from "../components/ContinueModal";
 import FindingsPanel from "../components/FindingsPanel";
 import LogViewer from "../components/LogViewer";
@@ -74,6 +75,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const [report, setReport] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState<"cancel" | "delete" | ExportFormat | null>(null);
   const [continueOpen, setContinueOpen] = useState(false);
+  const [analyzeOpen, setAnalyzeOpen] = useState(false);
   const tabChosen = useRef(false);
   const scanRef = useRef<Scan | null>(null);
   scanRef.current = scan;
@@ -254,6 +256,11 @@ function ScanDetailView({ scanId }: { scanId: number }) {
             {canModify && active && scan.status !== "cancelling" && (
               <Button variant="danger" loading={busy === "cancel"} onClick={onCancel}>Остановить</Button>
             )}
+            {canSeeAgents && finished && (
+              <Button onClick={() => setAnalyzeOpen(true)} title="Создать сессию агента: находки и отчёт этого скана будут в её папке, агент поможет их проверить и исправить">
+                Разобрать в агенте
+              </Button>
+            )}
             {canModify && finished && scan.run_name && scan.runner_name && (
               <Button variant="primary" onClick={() => setContinueOpen(true)} title="Продолжить этот прогон с новой инструкцией (новый скан)">
                 Продолжить…
@@ -304,6 +311,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
       </Card>
 
       <ErrorNote message={error} />
+      {canSeeAgents && <AnalyzeModal open={analyzeOpen} scanId={scan.id} onClose={() => setAnalyzeOpen(false)} />}
       {scan.run_name && <ContinueModal scan={scan} open={continueOpen} onClose={() => setContinueOpen(false)} onContinued={onContinued} />}
 
       <div className="mb-5 mt-8 flex gap-1 border-b border-white/10">
@@ -362,6 +370,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
         <Card className="space-y-5 p-6">
           <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
             <Stat label="LLM-профиль" value={scan.llm_profile_name ?? "—"} />
+            {scan.llm_model && <Stat label="Модель" value={scan.llm_model} />}
             <Stat label="Лимит бюджета" value={scan.max_budget ? `$${scan.max_budget}` : "не задан"} />
             <Stat label="Создан" value={formatDateTime(scan.created_at)} />
           </dl>

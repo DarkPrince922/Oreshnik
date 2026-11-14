@@ -36,8 +36,14 @@ services:
     volumes:
       - ./backend:/app
       - strix_runs:/data/strix_runs
+    networks: [default, agentnet]
     ports:
       - "8000:8000"
+      # Fixed range for the agent's listener (docs/ARCHITECTURE.md §27): the panel proxies one of these, on request, to the
+      # same port inside the isolated `agent` container, which has no published port of its own. AGENT_LISTENER_PORTS in
+      # .env is the matching toggle the API itself checks — leave it empty there to turn the feature off without editing
+      # this file (the ports stay published but nothing binds them until a session opens one).
+      - "4444-4450:4444-4450"
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,8 +54,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
-    # One worker process per concurrent scan (each scan = one Strix run + sandbox containers + LLM spend).
-    command: celery -A app.worker.celery_app.celery worker --loglevel=info --concurrency=${SCAN_CONCURRENCY:-2} --prefetch-multiplier=1
+    # Processes start on demand up to SCAN_WORKER_SLOTS (a ceiling). How many scans RUN at once is a setting of the panel
+    # («Настройки» → «Сканов одновременно», default SCAN_CONCURRENCY): each scan = one Strix run + sandbox containers + LLM spend.
+    command: celery -A app.worker.celery_app.celery worker --loglevel=info -Q celery --autoscale=${SCAN_WORKER_SLOTS:-16},2 --prefetch-multiplier=1
     # `docker compose stop` makes Celery wait for running scans. After this period Docker kills the worker;
     # the reaper then fails those scans (no heartbeat) and removes their sandbox containers.
     stop_grace_period: 60s
@@ -65,6 +72,54 @@ services:
     depends_on:
       - backend
       - redis
+
+  # «Агент»: ходы чата с Codex. Своя очередь и свой воркер: ход длится минуты и не должен занимать слоты сканов.
+  # Без docker.sock — этому воркеру он не нужен (сам Codex работает в контейнере `agent`).
+  agent-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    command: celery -A app.worker.celery_app.celery worker --loglevel=info -Q agent --concurrency=${AGENT_CONCURRENCY:-4} --prefetch-multiplier=1 -n agent@%h
+    stop_grace_period: 30s
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+    volumes:
+      - ./backend:/app
+    networks: [default, agentnet]
+    depends_on:
+      - backend
+      - redis
+
+  # Контейнер, где Codex выполняет команды. Он и есть песочница: Codex запускается с отключёнными подтверждениями,
+  # поэтому контейнер НЕ получает ни docker.sock, ни .env, ни доступа к Postgres/Redis (отдельная сеть `agentnet`).
+  # Единственное, что он знает из панели, — AGENT_TOKEN; ключ модели приходит с каждым ходом и на диск не пишется.
+  agent:
+    build:
+      context: ./agentd
+      args:
+        # Extra Debian packages baked into the agent image on top of the default dev+network toolset (see agentd/Dockerfile).
+        # Needs `docker compose build agent` to take effect — the image is immutable at runtime.
+        AGENT_EXTRA_PACKAGES: ${AGENT_EXTRA_PACKAGES:-}
+    environment:
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+      AGENT_IDLE_SECONDS: ${AGENT_IDLE_SECONDS:-900}
+      AGENT_MAX_PROCESSES: ${AGENT_MAX_PROCESSES:-8}
+      AGENT_APPROVAL_TIMEOUT_SECONDS: ${AGENT_APPROVAL_TIMEOUT_SECONDS:-900}
+      AGENT_MAX_UPLOAD_MB: ${AGENT_MAX_UPLOAD_MB:-50}
+      AGENT_MAX_ARCHIVE_MB: ${AGENT_MAX_ARCHIVE_MB:-300}
+    volumes:
+      - agent_data:/data/agent
+    networks: [agentnet]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: ${AGENT_MEM_LIMIT:-2g}
+    restart: unless-stopped
 
   beat:
     build: ./backend
@@ -94,3 +149,9 @@ services:
 volumes:
   pgdata:
   strix_runs:
+  agent_data:
+
+networks:
+  default: {}
+  # postgres/redis are NOT on it: the agent container can reach only the panel's backend/worker and the internet.
+  agentnet: {}

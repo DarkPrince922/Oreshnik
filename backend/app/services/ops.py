@@ -57,14 +57,14 @@ def strip_code_fence(text: str) -> str:
     return match.group(1).strip() if match else body
 
 
-def draft_script(profile: LLMProfile, goal: str, runner_names: list[str]) -> str:
-    """Ask the profile's model to write the script. Raises `OpsError` with a message safe to show the operator."""
+def draft_script(profile: LLMProfile, goal: str, runner_names: list[str], model: str | None = None) -> str:
+    """Ask the profile's model (or `model`, one of the profile's) to write the script. Raises `OpsError` with a message safe to show the operator."""
     try:
         reply = chat_once(
             profile.provider,
             profile.base_url,
             decrypt(profile.api_key_enc),
-            profile.model,
+            model or profile.model,
             system=DRAFT_SYSTEM_PROMPT,
             user=build_user_prompt(goal, runner_names),
         )

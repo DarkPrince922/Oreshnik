@@ -3,7 +3,9 @@ import { useNavigate } from "react-router-dom";
 
 import { useAuth } from "../lib/auth";
 
+import ModelSelect from "./ModelSelect";
 import { continueScan, errorMessage, listProfiles, type LLMProfile, type Scan } from "../lib/api";
+import { modelToSend, resolveChoice, type Choice } from "../lib/modelChoice";
 import { budgetProblem, canContinueInPlace, defaultBudget, instructionRequired, parseBudget } from "../lib/continueScan";
 import { formatCost } from "../lib/format";
 import { Button, ErrorNote, Field, Modal } from "./ui";
@@ -37,7 +39,8 @@ export default function ContinueModal({
   const [instruction, setInstruction] = useState("");
   const [budget, setBudget] = useState(() => defaultBudget(scan));
   const [profiles, setProfiles] = useState<LLMProfile[] | null>(null);
-  const [profileId, setProfileId] = useState<number | null>(null);
+  const [choice, setChoice] = useState<Choice | null>(null);
+  const profileId = choice?.profileId ?? null;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -56,7 +59,7 @@ export default function ContinueModal({
         if (!alive) return;
         setProfiles(list);
         // The scan's own profile if it is one of yours, otherwise the first you have.
-        setProfileId(list.find((p) => p.id === scan.llm_profile_id)?.id ?? list[0]?.id ?? null);
+        setChoice(resolveChoice(list, scan.llm_profile_id, scan.llm_model));
       })
       .catch((e) => alive && setError(errorMessage(e)));
     return () => {
@@ -79,6 +82,7 @@ export default function ContinueModal({
         instruction: instruction.trim() || null,
         max_budget: parseBudget(budget),
         llm_profile_id: needsProfile ? profileId : null,
+        llm_model: needsProfile ? modelToSend(profiles ?? [], choice) : null,
         as_new_scan: newScan,
       });
       onClose();
@@ -145,15 +149,12 @@ export default function ContinueModal({
         </label>
 
         {needsProfile && (
-          <Field label="LLM-профиль">
-            <select className="field" value={profileId ?? ""} onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : null)} required>
-              {profiles === null && <option value="">Загрузка…</option>}
-              {profiles?.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} · {p.strix_model}
-                </option>
-              ))}
-            </select>
+          <Field label="Модель">
+            {profiles === null ? (
+              <p className="text-xs text-slate-500">Загрузка…</p>
+            ) : (
+              <ModelSelect profiles={profiles} value={choice} onChange={setChoice} required label="Модель" />
+            )}
             {profiles?.length === 0 && <span className="mt-1.5 block text-[11px] text-signal-warn">У вас нет профилей — добавьте ключ в разделе «LLM-профили».</span>}
           </Field>
         )}

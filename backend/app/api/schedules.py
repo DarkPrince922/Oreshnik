@@ -55,6 +55,7 @@ def _out(s: Schedule) -> ScheduleOut:
         runner_kind=s.runner.kind.value if s.runner else None,
         llm_profile_id=s.llm_profile_id,
         llm_profile_name=s.llm_profile.name if s.llm_profile else None,
+        llm_model=s.llm_model or (s.llm_profile.model if s.llm_profile else None),
         next_run_at=s.next_run_at,
         next_runs=svc.upcoming(s.cron, s.timezone, 3) if s.enabled else [],
         last_run_at=s.last_run_at,
@@ -66,12 +67,12 @@ def _out(s: Schedule) -> ScheduleOut:
     )
 
 
-def _validate(db: Session, owner: User, *, cron, tz, targets, runner_id, llm_profile_id, max_budget) -> Runner:
+def _validate(db: Session, owner: User, *, cron, tz, targets, runner_id, llm_profile_id, max_budget, llm_model=None) -> Runner:
     """Everything that must hold for a schedule to be saved; returns the resolved runner."""
     try:
         cron = svc.normalize_cron(cron)
         svc.get_zone(tz)
-        resolved = resolve_request(db, owner, targets=targets, runner_id=runner_id, llm_profile_id=llm_profile_id)
+        resolved = resolve_request(db, owner, targets=targets, runner_id=runner_id, llm_profile_id=llm_profile_id, llm_model=llm_model)
         svc.check_definition(cron, tz, resolved.runner.kind, max_budget)
     except svc.ScheduleError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
@@ -109,10 +110,10 @@ def create_schedule(body: ScheduleCreate, user: User = Depends(require_operator)
         raise HTTPException(status.HTTP_409_CONFLICT, f"Достигнут лимит расписаний: {settings.max_schedules_per_user}")
     runner = _validate(
         db, user, cron=body.cron, tz=body.timezone, targets=body.targets, runner_id=body.runner_id,
-        llm_profile_id=body.llm_profile_id, max_budget=body.max_budget,
+        llm_profile_id=body.llm_profile_id, max_budget=body.max_budget, llm_model=body.llm_model or None,
     )
     cron = svc.normalize_cron(body.cron)
-    resolved = resolve_request(db, user, targets=body.targets, runner_id=body.runner_id, llm_profile_id=body.llm_profile_id)
+    resolved = resolve_request(db, user, targets=body.targets, runner_id=body.runner_id, llm_profile_id=body.llm_profile_id, llm_model=body.llm_model or None)
     schedule = Schedule(
         user_id=user.id,
         name=body.name,
@@ -125,6 +126,7 @@ def create_schedule(body: ScheduleCreate, user: User = Depends(require_operator)
         max_budget=body.max_budget,
         runner_id=runner.id,  # always explicit: a deleted runner must never fall back to the default one
         llm_profile_id=resolved.profile.id if resolved.profile else None,
+        llm_model=resolved.model,
         next_run_at=svc.next_fire(cron, body.timezone) if body.enabled else None,
     )
     db.add(schedule)
@@ -165,21 +167,23 @@ def update_schedule(
     max_budget = pick("max_budget", schedule.max_budget)
     runner_id = body.runner_id if body.runner_id is not None else schedule.runner_id
     profile_id = pick("llm_profile_id", schedule.llm_profile_id)
+    # A model belongs to a profile: moving to another profile without choosing a model means that profile's default.
+    llm_model = (pick("llm_model", schedule.llm_model) or None) if ("llm_model" in sent or profile_id == schedule.llm_profile_id) else None
     if runner_id is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Раннер расписания удалён — выберите другой")
 
     # Validated against the OWNER (an admin editing someone's schedule cannot attach their own profile to it).
     runner = _validate(
         db, schedule.user, cron=cron, tz=tz, targets=targets, runner_id=runner_id,
-        llm_profile_id=profile_id, max_budget=max_budget,
+        llm_profile_id=profile_id, max_budget=max_budget, llm_model=llm_model,
     )
 
     timing_changed = cron != schedule.cron or tz != schedule.timezone
     re_enabled = enabled and not schedule.enabled
     schedule.name, schedule.cron, schedule.timezone, schedule.enabled = name, cron, tz, enabled
-    schedule.targets = resolve_request(db, schedule.user, targets=targets, runner_id=runner.id, llm_profile_id=profile_id).targets
+    schedule.targets = resolve_request(db, schedule.user, targets=targets, runner_id=runner.id, llm_profile_id=profile_id, llm_model=llm_model).targets
     schedule.scan_mode, schedule.instruction, schedule.max_budget = scan_mode, instruction, max_budget
-    schedule.runner_id, schedule.llm_profile_id = runner.id, profile_id
+    schedule.runner_id, schedule.llm_profile_id, schedule.llm_model = runner.id, profile_id, llm_model
     if not enabled:
         schedule.next_run_at = None
     elif timing_changed or re_enabled or schedule.next_run_at is None:

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
+import ModelSelect from "../components/ModelSelect";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, PageHeader, Spinner, rise, stagger } from "../components/ui";
 import {
   cancelOpsRun,
@@ -12,15 +13,16 @@ import {
   type LLMProfile,
   type OpsRun,
 } from "../lib/api";
+import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { canCancel, canSubmit, fleetSummary, hostStatusLabel, hostStatusTone, runStatusLabel, runStatusTone } from "../lib/ops";
 
 interface Form {
   name: string;
   goal: string;
-  llmProfileId: number | null;
+  choice: Choice | null;
   runnerIds: number[];
 }
-const emptyForm: Form = { name: "", goal: "", llmProfileId: null, runnerIds: [] };
+const emptyForm: Form = { name: "", goal: "", choice: null, runnerIds: [] };
 
 function HostRow({ host }: { host: OpsRun["hosts"][number] }) {
   const [open, setOpen] = useState(false);
@@ -56,7 +58,7 @@ function RunCard({ run, onCancel, cancelling }: { run: OpsRun; onCancel: () => v
       </div>
 
       <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-slate-500">
-        <div>профиль: <span className="text-slate-300">{run.llm_profile_name ?? "—"}</span></div>
+        <div>профиль: <span className="text-slate-300">{run.llm_profile_name ?? "—"}{run.llm_model ? ` · ${run.llm_model}` : ""}</span></div>
         <div>кто запустил: <span className="text-slate-300">{run.owner_email}</span></div>
         <div>хосты: <span className="text-slate-300">{fleetSummary(run.hosts)}</span></div>
       </dl>
@@ -126,7 +128,7 @@ export default function Ops() {
   }, [reload]);
 
   const openCreate = () => {
-    setForm(emptyForm);
+    setForm({ ...emptyForm, choice: defaultChoice(profiles) });
     setFormError(null);
     setOpen(true);
   };
@@ -146,7 +148,8 @@ export default function Ops() {
       await createOpsRun({
         name: form.name.trim(),
         goal: form.goal,
-        llm_profile_id: form.llmProfileId as number,
+        llm_profile_id: form.choice?.profileId as number,
+        llm_model: modelToSend(profiles, form.choice),
         runner_ids: form.runnerIds,
       });
       setOpen(false);
@@ -216,22 +219,8 @@ export default function Ops() {
             />
           </Field>
 
-          <Field label="LLM-профиль">
-            <select
-              className="field"
-              value={form.llmProfileId ?? ""}
-              onChange={(e) => setForm({ ...form, llmProfileId: e.target.value ? Number(e.target.value) : null })}
-              required
-            >
-              <option value="" disabled>
-                Выберите профиль…
-              </option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+          <Field label="Модель" hint="Модель, которая напишет скрипт. Любая модель любого вашего профиля.">
+            <ModelSelect profiles={profiles} value={form.choice} onChange={(c) => setForm({ ...form, choice: c })} required label="Модель" />
             {profiles.length === 0 && <p className="mt-1.5 text-[11px] text-signal-warn">Нет своих LLM-профилей — добавьте его на странице «LLM-профили».</p>}
           </Field>
 
@@ -260,7 +249,7 @@ export default function Ops() {
               type="submit"
               variant="primary"
               loading={busy}
-              disabled={!canSubmit({ goal: form.goal, llmProfileId: form.llmProfileId, runnerIds: form.runnerIds })}
+              disabled={!canSubmit({ goal: form.goal, llmProfileId: form.choice?.profileId ?? null, runnerIds: form.runnerIds })}
             >
               Выполнить сразу
             </Button>

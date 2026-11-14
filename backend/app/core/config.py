@@ -5,6 +5,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER = "CHANGE_ME"
 
+# What the panel's STRIX_API_TYPE may be: "auto" lets the panel decide per profile (see services/llm.py), the others are
+# Strix's own `STRIX_API_TYPE` values and apply to every profile.
+STRIX_API_TYPES = ("auto", "responses", "chat_completions")
+
+# Which tools the agent (Codex) offers its model: "auto" = plain function tools only for a gateway, everything Codex has for OpenAI itself.
+AGENT_TOOLS = ("auto", "functions", "full")
+
 # Strix's own accepted values for STRIX_REASONING_EFFORT (strix.config.settings.ReasoningEffort).
 STRIX_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
@@ -49,6 +56,11 @@ class Settings(BaseSettings):
     strix_cancel_grace_seconds: int = 20
     # A running scan whose worker has not heartbeated for this long is marked failed.
     scan_stale_seconds: int = 180
+    # How many scans RUN at once. A scan beyond this waits as `queued` and starts the moment one finishes. The panel itself
+    # holds this limit (so it can be changed in «Настройки» without restarting anything); the worker is started with
+    # SCAN_WORKER_SLOTS processes as a ceiling it can never exceed.
+    scan_concurrency: int = Field(default=2, ge=1, le=64)
+    scan_worker_slots: int = Field(default=16, ge=1, le=256)
     # Guard against accidentally burning tokens with many parallel scans: active (queued + running) scans one account may
     # have on ONE runner. A runner can set its own number (`runners.max_scans_per_user`); this is the default for the rest.
     max_active_scans_per_user: int = 3
@@ -71,6 +83,12 @@ class Settings(BaseSettings):
     # and cost; only matters for a model LiteLLM's own catalog marks as reasoning-capable — for a model it doesn't
     # recognise (most "custom" base_url profiles, and some providers) Strix silently ignores this.
     strix_reasoning_effort: str = "high"
+    # Which OpenAI API Strix's agent loop talks to. "auto" (default): a `custom` profile gets chat_completions — an
+    # OpenAI-compatible gateway usually implements only that, and Strix's Responses route sends native "custom" tools
+    # such as the file tools, which such gateways refuse with 400 "This endpoint supports function tools only" — and every other
+    # profile is left to Strix (which picks Responses for models its LiteLLM catalog lists under /v1/responses).
+    # "responses" / "chat_completions" force that route for every profile.
+    strix_api_type: str = "auto"
     # How long Strix waits for the model to answer its one tiny test request before the scan starts (Strix's own
     # LLM_PREFLIGHT_TIMEOUT, 30 s by default). Raise it for a slow gateway or a model that thinks long before its first token;
     # it does not help when the runner cannot reach the endpoint at all.
@@ -78,6 +96,30 @@ class Settings(BaseSettings):
 
     # Операции: how long one host's script may run before it is given up on and marked failed.
     ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
+
+    @field_validator("agent_tools", mode="before")
+    @classmethod
+    def _normalize_agent_tools(cls, value: object) -> object:
+        return value.strip().lower() or "auto" if isinstance(value, str) else value
+
+    @field_validator("agent_tools")
+    @classmethod
+    def _check_agent_tools(cls, value: str) -> str:
+        if value not in AGENT_TOOLS:
+            raise ValueError(f"AGENT_TOOLS must be one of {', '.join(AGENT_TOOLS)}, got {value!r}")
+        return value
+
+    @field_validator("strix_api_type", mode="before")
+    @classmethod
+    def _normalize_api_type(cls, value: object) -> object:
+        return value.strip().lower() or "auto" if isinstance(value, str) else value
+
+    @field_validator("strix_api_type")
+    @classmethod
+    def _check_api_type(cls, value: str) -> str:
+        if value not in STRIX_API_TYPES:
+            raise ValueError(f"STRIX_API_TYPE must be one of {', '.join(STRIX_API_TYPES)}, got {value!r}")
+        return value
 
     @field_validator("strix_reasoning_effort", mode="before")
     @classmethod
@@ -105,6 +147,27 @@ class Settings(BaseSettings):
     # What the panel installs on a remote host. The panel was verified against this Strix version.
     strix_version: str = "1.7.0"
     strix_sandbox_image: str = "ghcr.io/usestrix/strix-sandbox:1.3.0"
+
+    # Agent («Агент»): Codex CLI in its own container (agentd/). The token must be the same on both sides; empty = feature off.
+    agent_url: str = "http://agent:8100"
+    agent_token: str = ""
+    # Wall-clock limit of ONE turn (one message to the agent).
+    agent_turn_timeout_seconds: int = Field(default=1800, ge=10, le=24 * 3600)
+    max_agent_sessions_per_user: int = 20
+    agent_tools: str = "auto"
+    # Complete the usage numbers in a gateway's final stream event (see agentd's compat proxy). Never applied to OpenAI itself.
+    agent_response_fix: bool = True
+    # A goal makes the agent work by itself, turn after turn: the token budget one goal may get at most (the user picks a number up to this).
+    agent_goal_max_tokens: int = Field(default=5_000_000, ge=10_000, le=50_000_000)
+    # A turn whose worker has not stored an event for this long is given up on.
+    agent_stale_seconds: int = Field(default=300, ge=30)
+    # Listener for the agent: a fixed range of ports the panel (this process) has published to the host and proxies, on
+    # explicit request, to a single port inside the sandboxed agent container (which itself has no published port and sits on
+    # an isolated network — see docs/ARCHITECTURE.md §27). Empty = feature off. Fixed at deploy time: docker-compose must
+    # publish the same range, so changing it needs a restart, unlike the rest of «Настройки».
+    agent_listener_ports: str = ""
+    # A listener nobody has sent a byte through for this long is closed on its own.
+    agent_listener_idle_seconds: int = Field(default=1800, ge=30)
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]

@@ -27,7 +27,7 @@ FastAPI · Postgres · Celery + Redis (queue + beat scheduler) · React/Vite/TS/
 
 ## Status
 
-Early development — phases 0–5 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI, live agent activity, continuing a scan with new instructions in the same scan, cron schedules, live scan cost and cost accounting, SSH runners (key or password login) with a pinned host key and one-click installation of Docker and Strix). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
+Early development — phases 0–5 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI, live agent activity, continuing a scan with new instructions in the same scan, cron schedules, live scan cost and cost accounting, SSH runners (key or password login) with a pinned host key and one-click installation of Docker and Strix). Operating parameters (limits, timeouts, Strix/SSH/agent tuning) are edited in the panel under «Настройки» — no restart; `.env` holds the defaults. Also: «Агент» — a chat with the open-source Codex CLI in an isolated container, with a live feed of its steps (set `AGENT_TOKEN` to enable it). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
 design and the phased build plan.
 
 ## Quick start (dev)

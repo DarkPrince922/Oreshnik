@@ -16,6 +16,7 @@ from app.models.llm_profile import LLMProfile
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind
 from app.models.user import User
+from app.services.llm import validate_model
 from app.schemas.ops import OpsRunCreate, OpsRunHostOut, OpsRunOut
 from app.services.scan_factory import ScanRequestError, check_runner_usable
 from app.worker.tasks import ops_run as ops_run_task
@@ -34,6 +35,7 @@ def _out(run: OpsRun) -> OpsRunOut:
         goal=run.goal,
         llm_profile_id=run.llm_profile_id,
         llm_profile_name=run.llm_profile.name if run.llm_profile else None,
+        llm_model=run.llm_model or (run.llm_profile.model if run.llm_profile else None),
         status=run.status,
         script=run.script,
         script_error=run.script_error,
@@ -81,6 +83,10 @@ def create_run(body: OpsRunCreate, admin: User = Depends(require_admin), db: Ses
     profile = db.scalar(select(LLMProfile).where(LLMProfile.id == body.llm_profile_id, LLMProfile.user_id == admin.id))
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "LLM-профиль не найден")
+    try:
+        model = validate_model(profile, body.llm_model)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
     runners = list(db.scalars(select(Runner).where(Runner.id.in_(body.runner_ids))))
     found = {r.id for r in runners}
@@ -100,6 +106,7 @@ def create_run(body: OpsRunCreate, admin: User = Depends(require_admin), db: Ses
         name=body.name.strip() or body.goal[:100],
         goal=body.goal,
         llm_profile_id=profile.id,
+        llm_model=model,
         status=OpsRunStatus.drafting,
     )
     db.add(run)

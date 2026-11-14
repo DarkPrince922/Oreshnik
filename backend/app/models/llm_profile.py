@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -31,6 +31,9 @@ class LLMProfile(Base):
     name: Mapped[str] = mapped_column(String(100))
     provider: Mapped[Provider] = mapped_column(Enum(Provider, name="llm_provider"))
     model: Mapped[str] = mapped_column(String(200))
+    # Every model the provider served when «Загрузить модели» was last run (and the one typed in by hand): what a scan may pick from.
+    # `model` above stays the profile's default; it is always selectable even if it is not in this list.
+    models: Mapped[list[str]] = mapped_column(JSON, default=list)
     base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     api_key_enc: Mapped[str] = mapped_column(Text)
     api_key_hint: Mapped[str] = mapped_column(String(16))

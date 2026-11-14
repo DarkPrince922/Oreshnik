@@ -96,6 +96,8 @@ class Scan(Base):
 
     user: Mapped[User] = relationship(lazy="joined")
     runner: Mapped[Runner | None] = relationship(lazy="joined")
+    # The model this scan runs with, chosen from the profile's models; None = the profile's own default model.
+    llm_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     llm_profile: Mapped[LLMProfile | None] = relationship(lazy="joined")
 
 

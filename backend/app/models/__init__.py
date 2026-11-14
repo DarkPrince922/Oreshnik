@@ -1,3 +1,5 @@
+from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus
+from app.models.app_setting import AppSetting
 from app.models.llm_profile import LLMProfile, Provider
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
@@ -13,6 +15,11 @@ from app.models.scan import (
 from app.models.user import Role, User
 
 __all__ = [
+    "AppSetting",
+    "AgentSession",
+    "AgentEvent",
+    "AgentLive",
+    "AgentSessionStatus",
     "User",
     "Role",
     "LLMProfile",

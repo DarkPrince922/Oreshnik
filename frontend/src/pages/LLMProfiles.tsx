@@ -8,6 +8,7 @@ import {
   deleteProfile,
   errorMessage,
   fetchModels,
+  refreshProfileModels,
   listPresets,
   listProfiles,
   updateProfile,
@@ -43,8 +44,13 @@ export default function LLMProfiles() {
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [modelsBusy, setModelsBusy] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  // True once a list was loaded in THIS form session: only then it is sent with «Сохранить». (Editing a profile and retyping the key
+  // must never wipe the list it already has, so an untouched form sends no list at all.)
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [refreshing, setRefreshing] = useState<number | null>(null);
   const resetFetchedModels = () => {
     setFetchedModels([]);
+    setModelsLoaded(false);
     setModelsError(null);
   };
 
@@ -92,17 +98,32 @@ export default function LLMProfiles() {
     try {
       const key = form.api_key.trim();
       const reuseProfile = !key && editing && editing.provider === form.provider;
-      const list = await fetchModels({
+      const { models: list, saved } = await fetchModels({
         provider: form.provider,
         base_url: form.provider === "custom" ? form.base_url.trim() || null : null,
         ...(key ? { api_key: key } : reuseProfile ? { profile_id: editing.id } : {}),
       });
       setFetchedModels(list);
+      setModelsLoaded(true);
+      if (saved) void reload(); // the server already kept it for this profile: the card shows the new count
     } catch (e) {
       setFetchedModels([]);
       setModelsError(errorMessage(e));
     } finally {
       setModelsBusy(false);
+    }
+  };
+
+  const refreshModels = async (p: LLMProfile) => {
+    setRefreshing(p.id);
+    setLoadError(null);
+    try {
+      await refreshProfileModels(p.id);
+      await reload();
+    } catch (err) {
+      setLoadError(`${p.name}: ${errorMessage(err)}`);
+    } finally {
+      setRefreshing(null);
     }
   };
 
@@ -119,9 +140,10 @@ export default function LLMProfiles() {
           model: form.model,
           base_url,
           ...(form.api_key.trim() ? { api_key: form.api_key } : {}),
+          ...(modelsLoaded ? { models: fetchedModels } : {}),
         });
       } else {
-        await createProfile({ name: form.name, provider: form.provider, model: form.model, base_url, api_key: form.api_key });
+        await createProfile({ name: form.name, provider: form.provider, model: form.model, base_url, api_key: form.api_key, ...(modelsLoaded ? { models: fetchedModels } : {}) });
       }
       setForm((f) => ({ ...f, api_key: "" })); // don't keep the secret in memory
       setOpen(false);
@@ -181,6 +203,10 @@ export default function LLMProfiles() {
                 </div>
                 <dl className="mt-4 space-y-1.5 text-xs">
                   <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">Моделей для выбора</dt>
+                    <dd className="text-slate-300">{new Set([p.model, ...p.models]).size}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4">
                     <dt className="text-slate-500">Ключ</dt>
                     <dd className="font-mono text-slate-300">{p.api_key_hint}</dd>
                   </div>
@@ -193,6 +219,13 @@ export default function LLMProfiles() {
                 </dl>
                 <div className="mt-5 flex gap-2 pt-1">
                   <Button onClick={() => openEdit(p)} className="flex-1">Изменить</Button>
+                  <Button
+                    loading={refreshing === p.id}
+                    title="Спросить у провайдера, какие модели он отдаёт сейчас, и сохранить весь список"
+                    onClick={() => void refreshModels(p)}
+                  >
+                    Обновить модели
+                  </Button>
                   <Button variant="danger" loading={deleting === p.id} onClick={() => remove(p)}>Удалить</Button>
                 </div>
               </Card>
@@ -255,7 +288,7 @@ export default function LLMProfiles() {
           <Field label="Модель" hint={modelHint(form.provider, form.model)}>
             <input className="field font-mono" list="model-suggestions" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder={preset?.model_placeholder} required maxLength={200} />
             <datalist id="model-suggestions">
-              {mergeModelOptions(preset?.suggestions ?? [], fetchedModels).map((s) => <option key={s} value={s} />)}
+              {mergeModelOptions(preset?.suggestions ?? [], [...fetchedModels, ...(editing?.models ?? [])]).map((s) => <option key={s} value={s} />)}
             </datalist>
           </Field>
 
@@ -271,7 +304,9 @@ export default function LLMProfiles() {
               Загрузить модели
             </Button>
             {!modelsBusy && !modelsError && fetchedModels.length > 0 && (
-              <span className="text-[11px] text-slate-500">Загружено {fetchedModels.length} — выберите из списка в поле «Модель» или впишите свою</span>
+              <span className="text-[11px] text-slate-500">
+                Загружено {fetchedModels.length} — все сохранятся в профиле и появятся в выборе при запуске скана. В поле «Модель» — модель по умолчанию.
+              </span>
             )}
           </div>
           <ErrorNote message={modelsError} />

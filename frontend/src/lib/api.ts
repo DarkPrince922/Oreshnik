@@ -86,6 +86,8 @@ export interface LLMProfile {
   provider: Provider;
   model: string;
   base_url: string | null;
+  /** Every model the provider served when «Загрузить модели» last ran: what a scan can pick from (plus `model`, the default). */
+  models: string[];
   api_key_hint: string;
   strix_model: string;
   created_at: string;
@@ -151,6 +153,8 @@ export interface Scan {
   runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  /** The model the scan runs with: the one chosen, else the profile's default. */
+  llm_model: string | null;
   targets: string[];
   scan_mode: ScanMode;
   instruction: string | null;
@@ -232,17 +236,20 @@ export const fetchModels = async (body: {
   base_url: string | null;
   api_key?: string;
   profile_id?: number;
-}) => (await api.post<{ models: string[] }>("/api/llm-profiles/models", body)).data.models;
+}) => (await api.post<{ models: string[]; saved: boolean }>("/api/llm-profiles/models", body)).data;
+/** Ask the provider again, with the profile's stored key, and keep the whole list. */
+export const refreshProfileModels = async (id: number) => (await api.post<LLMProfile>(`/api/llm-profiles/${id}/refresh-models`)).data;
 export const createProfile = async (body: {
   name: string;
   provider: Provider;
   model: string;
   base_url: string | null;
   api_key: string;
+  models?: string[];
 }) => (await api.post<LLMProfile>("/api/llm-profiles", body)).data;
 export const updateProfile = async (
   id: number,
-  body: { name: string; provider: Provider; model: string; base_url: string | null; api_key?: string }
+  body: { name: string; provider: Provider; model: string; base_url: string | null; api_key?: string; models?: string[] }
 ) => (await api.patch<LLMProfile>(`/api/llm-profiles/${id}`, body)).data;
 export const deleteProfile = (id: number) => api.delete(`/api/llm-profiles/${id}`);
 
@@ -289,6 +296,8 @@ export interface ScanCreateInput {
   max_budget: number | null;
   runner_id: number | null;
   llm_profile_id: number | null;
+  /** One of the profile's models; null = the profile's own default. */
+  llm_model?: string | null;
 }
 export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
 export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; limit?: number; offset?: number } = {}) =>
@@ -360,6 +369,7 @@ export interface ContinueInput {
   instruction: string | null;
   max_budget: number | null;
   llm_profile_id: number | null;
+  llm_model?: string | null;
   /** false (default): continue this very scan. true: create a new scan on a copy of the run. */
   as_new_scan?: boolean;
 }
@@ -386,6 +396,7 @@ export interface Schedule {
   runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  llm_model: string | null;
   next_run_at: string | null;
   next_runs: string[];
   last_run_at: string | null;
@@ -407,6 +418,7 @@ export interface ScheduleInput {
   max_budget: number | null;
   runner_id: number | null;
   llm_profile_id: number | null;
+  llm_model?: string | null;
 }
 
 export interface SchedulePreview {
@@ -466,6 +478,7 @@ export interface OpsRun {
   goal: string;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  llm_model: string | null;
   status: OpsRunStatus;
   script: string | null;
   script_error: string | null;
@@ -480,6 +493,215 @@ export interface OpsRun {
 export const listOpsTargetRunners = async () => (await api.get<{ id: number; name: string }[]>("/api/ops/runners")).data;
 export const listOpsRuns = async () => (await api.get<OpsRun[]>("/api/ops")).data;
 export const getOpsRun = async (id: number) => (await api.get<OpsRun>(`/api/ops/${id}`)).data;
-export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; runner_ids: number[] }) =>
+export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; llm_model?: string | null; runner_ids: number[] }) =>
   (await api.post<OpsRun>("/api/ops", body)).data;
 export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/ops/${id}/cancel`)).data;
+
+// ── Агент ────────────────────────────────────────────────────────────────
+//
+// A chat with Codex CLI that runs in the isolated agent container (see backend/app/api/agent.py). Each message is one "turn"; what the agent
+// does comes back as an ordered history of events plus snapshots of what it is writing right now, live over a WebSocket.
+
+export type AgentSessionStatus = "idle" | "running";
+export type ApprovalMode = "auto" | "ask";
+export type WebSearchMode = "auto" | "on" | "off";
+/** A goal makes the agent work by itself, turn after turn, until it is reached or its token budget is spent. */
+export interface AgentGoal {
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete" | string;
+  token_budget: number | null;
+  tokens_used: number;
+  seconds_used: number;
+}
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+
+export interface AgentSession {
+  id: number;
+  title: string;
+  llm_profile_id: number | null;
+  llm_profile_name: string | null;
+  /** The model the session talks to: the one chosen, else the profile's default. */
+  llm_model: string | null;
+  instructions: string | null;
+  reasoning_effort: string | null;
+  approval_mode: ApprovalMode;
+  web_search: WebSearchMode;
+  goal: AgentGoal | null;
+  /** Tokens in the model's context after the last turn, and the window Codex assumes for the model (a guess when `context_window_known` is false). */
+  context_used: number | null;
+  context_window: number | null;
+  context_window_known: boolean;
+  /** Spent by the session in total. */
+  tokens_in: number;
+  tokens_out: number;
+  status: AgentSessionStatus;
+  turn_count: number;
+  last_error: string | null;
+  cancel_requested: boolean;
+  event_count: number;
+  /** A listener open for this session right now (see docs/ARCHITECTURE.md §27), or null. */
+  listener_port: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentListener {
+  port: number | null;
+  opened_at: string | null;
+  last_active: string | null;
+}
+export interface AgentListenerRange {
+  available: boolean;
+  min: number | null;
+  max: number | null;
+}
+
+/** One stored event: `kind` is "user", "action", "turn.started", "item.completed", "turn.diff", "turn.plan", "approval.requested/resolved",
+ * "turn.completed", "thread.reverted", "turn.error"/"turn.stopped" (the panel's own notes). */
+export interface AgentEvent {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+}
+
+export interface AgentSessionInput {
+  title: string;
+  llm_profile_id: number;
+  llm_model?: string | null;
+  instructions?: string | null;
+  reasoning_effort?: string | null;
+  approval_mode?: ApprovalMode;
+}
+export interface AgentSettingsInput {
+  title?: string;
+  instructions?: string | null;
+  reasoning_effort?: string | null;
+  approval_mode?: ApprovalMode;
+  web_search?: WebSearchMode;
+}
+export type ReviewTarget = { type: "uncommittedChanges" } | { type: "baseBranch"; branch: string } | { type: "commit"; sha: string } | { type: "custom"; instructions: string };
+export type AgentActionInput =
+  | { action: "compact" }
+  | { action: "revert" }
+  | { action: "goal"; objective?: string; token_budget?: number }
+  | { action: "goal_clear" }
+  | { action: "shell"; command: string }
+  | { action: "review"; target?: ReviewTarget };
+export type ApprovalDecision = "accept" | "accept_session" | "decline" | "cancel" | "answer";
+
+export interface AgentFileEntry {
+  name: string;
+  dir: boolean;
+  size: number | null;
+  modified: number;
+}
+export interface AgentFileListing {
+  path: string;
+  entries: AgentFileEntry[];
+}
+export interface AgentFilePreview {
+  binary: boolean;
+  size: number;
+  text: string | null;
+  truncated: boolean;
+}
+
+const A = "/api/agent/sessions";
+export const getAgentHealth = async () => (await api.get<{ ok: boolean; detail: string }>("/api/agent/health")).data;
+export const listAgentSessions = async () => (await api.get<AgentSession[]>(A)).data;
+export const createAgentSession = async (body: AgentSessionInput) => (await api.post<AgentSession>(A, body)).data;
+export const getAgentSession = async (id: number) => (await api.get<AgentSession>(`${A}/${id}`)).data;
+export const updateAgentSession = async (id: number, body: AgentSettingsInput) => (await api.patch<AgentSession>(`${A}/${id}`, body)).data;
+export const deleteAgentSession = async (id: number) => {
+  await api.delete(`${A}/${id}`);
+};
+export const sendAgentMessage = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/messages`, { text })).data;
+/** Add an instruction to the turn that is running now. */
+export const steerAgentTurn = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/steer`, { text })).data;
+export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/stop`)).data;
+export const getAgentListenerRange = async () => (await api.get<AgentListenerRange>("/api/agent/listener-range")).data;
+export const getAgentListener = async (id: number) => (await api.get<AgentListener>(`${A}/${id}/listener`)).data;
+export const openAgentListener = async (id: number, port: number) => (await api.post<AgentListener>(`${A}/${id}/listener`, { port })).data;
+export const closeAgentListener = async (id: number) => {
+  await api.delete(`${A}/${id}/listener`);
+};
+export const runAgentAction = async (id: number, body: AgentActionInput) => (await api.post<AgentSession>(`${A}/${id}/actions`, body)).data;
+export const forkAgentSession = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/fork`, undefined, { timeout: 300_000 })).data;
+export const answerAgentApproval = async (id: number, requestId: string, decision: ApprovalDecision, answers?: Record<string, string | string[]>) => {
+  await api.post(`${A}/${id}/approvals/${encodeURIComponent(requestId)}`, { decision, answers: answers ?? null });
+};
+
+export const listAgentFiles = async (id: number, path = "") => (await api.get<AgentFileListing>(`${A}/${id}/files`, { params: { path } })).data;
+export const readAgentFile = async (id: number, path: string) => (await api.get<AgentFilePreview>(`${A}/${id}/files/content`, { params: { path } })).data;
+export const uploadAgentFile = async (id: number, path: string, file: File) =>
+  (await api.put<{ path: string; size: number }>(`${A}/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
+export const cloneIntoAgent = async (id: number, url: string) => (await api.post<{ path: string }>(`${A}/${id}/files/clone`, { url }, { timeout: 330_000 })).data;
+
+/** Save a file the panel serves behind the login: fetched with the token, then handed to the browser as a download. */
+async function saveBlob(url: string, params: Record<string, string>, filename: string): Promise<void> {
+  const response = await api.get<Blob>(url, { params, responseType: "blob", timeout: 600_000 });
+  const href = URL.createObjectURL(response.data);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
+export const downloadAgentFile = (id: number, path: string) => saveBlob(`${A}/${id}/files/download`, { path }, path.split("/").pop() || "file");
+export const downloadAgentArchive = (id: number, title: string) => saveBlob(`${A}/${id}/files/archive`, {}, `${title.replace(/[^\p{L}\p{N}._-]+/gu, "_") || "session"}.zip`);
+
+export interface AgentFromScan {
+  session: AgentSession;
+  /** The task proposed for the first message: the user reads it and sends it. */
+  draft: string;
+  files: number;
+}
+export const createAgentFromScan = async (scanId: number, body: { llm_profile_id: number; llm_model?: string | null }) =>
+  (await api.post<AgentFromScan>(`/api/agent/from-scan/${scanId}`, body, { timeout: 120_000 })).data;
+
+// ── Настройки ────────────────────────────────────────────────────────────
+//
+// The operating parameters that used to live only in `.env`. `value` applies right now; `default` is what `.env` / the built-in
+// default says (what "сбросить" returns to); `restart` is not empty for a parameter that needs a restart of that part to apply.
+
+export type SettingKind = "int" | "float" | "bool" | "choice" | "text";
+export type SettingValue = number | boolean | string;
+
+export interface AppSettingItem {
+  key: string;
+  env: string;
+  label: string;
+  hint: string;
+  kind: SettingKind;
+  minimum: number | null;
+  maximum: number | null;
+  choices: string[];
+  unit: string;
+  restart: string;
+  value: SettingValue;
+  default: SettingValue;
+  changed: boolean;
+  updated_at: string | null;
+}
+export interface AppSettingsGroup {
+  name: string;
+  items: AppSettingItem[];
+}
+export const getAppSettings = async () => (await api.get<{ groups: AppSettingsGroup[] }>("/api/settings")).data.groups;
+/** key -> new value; `null` resets that parameter to its default. All or nothing. */
+export const updateAppSettings = async (values: Record<string, SettingValue | null>) =>
+  (await api.put<{ groups: AppSettingsGroup[] }>("/api/settings", { values })).data.groups;
+
+// ── Огоньки в меню ───────────────────────────────────────────────────────
+//
+// What is new since the user last opened «Сканы» / «Агент» (see backend/app/api/attention.py).
+
+export interface Attention {
+  /** The server's clock: stored as "seen" when a section is opened. */
+  now: string;
+  scans: { finished: number; failed: number; findings: number };
+  agent: { finished: number; waiting: number };
+}
+export const getAttention = async (params: { scans_since?: string; agent_since?: string }) => (await api.get<Attention>("/api/attention", { params })).data;
