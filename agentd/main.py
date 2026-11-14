@@ -200,6 +200,35 @@ async def delete_session(session_key: str) -> dict:
     return {"deleted": True}
 
 
+_codex_check: tuple[float, bool, str] | None = None
+CODEX_CHECK_SECONDS = 60.0
+
+
+async def codex_status() -> tuple[bool, str]:
+    """Whether Codex really STARTS (`codex --version`), not merely whether a file called codex is on the PATH: the launcher can be
+    installed while its platform binary is missing. Remembered for a minute so polling the health does not spawn a process each time."""
+    global _codex_check
+    now = asyncio.get_running_loop().time()
+    if _codex_check is not None and now - _codex_check[0] < CODEX_CHECK_SECONDS:
+        return _codex_check[1], _codex_check[2]
+    if shutil.which(CODEX_BIN) is None:
+        ok, detail = False, f"{CODEX_BIN}: не найден в PATH"
+    else:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                CODEX_BIN, "--version", stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env={k: os.environ[k] for k in _PASSTHROUGH if k in os.environ} | {"HOME": str(DATA_DIR), "CODEX_HOME": str(DATA_DIR / ".codex-check")},
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), 15)
+            text = (out or err).decode("utf-8", "replace").strip()
+            ok, detail = proc.returncode == 0, (text.splitlines()[0] if proc.returncode == 0 and text else text[-300:] or f"код {proc.returncode}")
+        except (OSError, TimeoutError) as exc:
+            ok, detail = False, f"не запускается ({exc.__class__.__name__})"
+    _codex_check = (now, ok, detail)
+    return ok, detail
+
+
 @app.get("/health")
 async def health() -> dict:
-    return {"ok": True, "codex": shutil.which(CODEX_BIN) is not None}
+    ok, detail = await codex_status()
+    return {"ok": True, "codex": ok, "codex_detail": detail}

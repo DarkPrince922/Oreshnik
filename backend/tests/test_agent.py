@@ -398,3 +398,52 @@ def test_toml_quoting_cannot_be_broken_out_of(agentd):
     body = agentd.Turn(**turn_body(base_url='http://x/v1"\nwire_api = "evil', model="m"))
     provider = next(a for a in agentd.build_argv(body) if a.startswith("model_providers.oreshnik="))
     assert provider.count("\n") == 0 and '\\"' in provider
+
+
+# ── health: Codex must really start ─────────────────────────────────────────
+
+def script(tmp_path, body: str, name: str = "codex"):
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_health_is_ok_when_codex_starts(agentd, tmp_path, monkeypatch):
+    monkeypatch.setattr(agentd, "CODEX_BIN", script(tmp_path, "echo codex-cli 0.169.0\n"))
+    body = TestClient(agentd.app).get("/health").json()
+    assert body == {"ok": True, "codex": True, "codex_detail": "codex-cli 0.169.0"}
+
+
+def test_health_catches_a_launcher_whose_binary_is_missing(agentd, tmp_path, monkeypatch):
+    """The real failure seen after a build: `codex` is on the PATH, but its platform package was never installed."""
+    msg = "Error: Missing optional dependency @openai/codex-linux-x64. Reinstall Codex: npm install -g @openai/codex@latest"
+    monkeypatch.setattr(agentd, "CODEX_BIN", script(tmp_path, f"echo '{msg}' >&2\nexit 1\n"))
+    body = TestClient(agentd.app).get("/health").json()
+    assert body["codex"] is False and "Missing optional dependency" in body["codex_detail"]
+
+
+def test_health_reports_a_missing_binary(agentd, monkeypatch):
+    monkeypatch.setattr(agentd, "CODEX_BIN", "definitely-not-installed-codex")
+    body = TestClient(agentd.app).get("/health").json()
+    assert body["codex"] is False and "не найден" in body["codex_detail"]
+
+
+def test_health_does_not_start_codex_on_every_poll(agentd, tmp_path, monkeypatch):
+    counter = tmp_path / "runs"
+    monkeypatch.setattr(agentd, "CODEX_BIN", script(tmp_path, f"echo x >> {counter}\necho v\n"))
+    client = TestClient(agentd.app)
+    for _ in range(3):
+        assert client.get("/health").json()["codex"] is True
+    assert len(counter.read_text().splitlines()) == 1
+
+
+def test_the_panel_shows_why_codex_does_not_start(wired, tmp_path, monkeypatch):
+    monkeypatch.setattr(wired, "CODEX_BIN", script(tmp_path, "echo 'Missing optional dependency @openai/codex-linux-x64' >&2\nexit 1\n"))
+    health = agent_service.agent_health()
+    assert health["ok"] is False and "не запускается" in health["detail"] and "Missing optional dependency" in health["detail"]
+
+
+def test_the_panel_says_the_agent_is_fine_when_codex_starts(wired, tmp_path, monkeypatch):
+    monkeypatch.setattr(wired, "CODEX_BIN", script(tmp_path, "echo codex-cli 0.169.0\n"))
+    assert agent_service.agent_health() == {"ok": True, "detail": "Агент на связи"}

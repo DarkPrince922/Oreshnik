@@ -100,12 +100,13 @@ def agent_health() -> dict:
     if not settings.agent_token:
         return {"ok": False, "detail": "AGENT_TOKEN не задан: агент выключен"}
     try:
-        with agent_client(3.0) as client:
+        with agent_client(20.0) as client:  # the first check starts Codex once
             data = client.get("/health").json()
     except (httpx.HTTPError, ValueError) as exc:
         return {"ok": False, "detail": f"Контейнер агента недоступен: {exc.__class__.__name__}"}
     if not data.get("codex"):
-        return {"ok": False, "detail": "В контейнере агента нет Codex"}
+        why = str(data.get("codex_detail") or "").strip()
+        return {"ok": False, "detail": f"Codex в контейнере агента не запускается: {why}" if why else "В контейнере агента нет Codex"}
     return {"ok": True, "detail": "Агент на связи"}
 
 

@@ -918,6 +918,15 @@ exact shape of `command_execution` / `file_change` items comes from Codex's docu
 recognise as a generic step instead of dropping it. **Not built or run:** the `agent` image and the compose changes (no Docker daemon
 there) — try `docker compose up --build`, check `GET /api/agent/health` in the panel, and send one message.
 
+### Installing Codex in the image, and the health check (found on first real use)
+
+`@openai/codex` is a JS launcher; the real binary is the separate package `@openai/codex-linux-x64` (or `-arm64`), an **optional** dependency that npm
+silently skips when it cannot fetch it. The first image built that way started fine and then failed on the first message with
+`Missing optional dependency @openai/codex-linux-x64. Reinstall Codex`. `agentd/Dockerfile` now installs the platform package by name with
+`--include=optional` (checked here also with `NPM_CONFIG_OMIT=optional` set) and runs `codex --version`, so an unusable Codex fails the **build**.
+`GET /health` of agentd also really starts it (`codex --version`, remembered for a minute) instead of only looking for a file on the PATH, and the
+panel's badge on the «Агент» page shows the reason («Codex в контейнере агента не запускается: …»).
+
 ### Limits
 
 The agent can do anything inside its container, including reading what you paste into the chat and using the model key it was given

@@ -8,9 +8,20 @@ FROM node:22-slim
 ARG CODEX_VERSION=0.169.0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-venv git curl ca-certificates openssh-client build-essential \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm install -g "@openai/codex@${CODEX_VERSION}" \
-    && npm cache clean --force
+    && rm -rf /var/lib/apt/lists/*
+
+# `codex` is a thin JS launcher; the real binary is a separate package (@openai/codex-linux-x64 / -arm64) that npm installs as an
+# OPTIONAL dependency — and silently skips when it cannot fetch it (network trouble, `omit=optional`), leaving an image that builds
+# fine and then fails with "Missing optional dependency … Reinstall Codex". So the platform package is named explicitly, optional
+# dependencies are forced on, and the build runs `codex --version`: a Codex that cannot start now fails the BUILD, not the first chat.
+RUN set -eux; \
+    case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64) ARCH=arm64 ;; *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;; esac; \
+    mkdir -p /opt/codex && cd /opt/codex && npm init -y >/dev/null; \
+    npm install --include=optional --no-audit --no-fund \
+        "@openai/codex@${CODEX_VERSION}" "@openai/codex-linux-${ARCH}@npm:@openai/codex@${CODEX_VERSION}-linux-${ARCH}"; \
+    ln -s /opt/codex/node_modules/.bin/codex /usr/local/bin/codex; \
+    codex --version; \
+    npm cache clean --force
 
 WORKDIR /srv
 COPY requirements.txt .
