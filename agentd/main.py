@@ -30,6 +30,7 @@ CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 DATA_DIR = Path(os.environ.get("AGENT_DATA_DIR", "/data/agent"))
 TOKEN = os.environ.get("AGENT_TOKEN", "")
 PING_SECONDS = float(os.environ.get("AGENT_PING_SECONDS", "15"))
+EXIT_GRACE_SECONDS = float(os.environ.get("AGENT_EXIT_GRACE_SECONDS", "10"))  # how long Codex may take to exit after it reported the turn over
 STOP_GRACE_SECONDS = float(os.environ.get("AGENT_STOP_GRACE_SECONDS", "10"))
 MAX_STDERR_TAIL = 4000
 KEY_ENV = "ORESHNIK_AGENT_API_KEY"
@@ -117,6 +118,14 @@ def build_env(turn: Turn, home: Path) -> dict[str, str]:
     return env
 
 
+def _is_final_event(line: str) -> bool:
+    """Codex's own end-of-turn events: after one of them there is nothing left for the process to say."""
+    try:
+        return json.loads(line).get("type") in ("turn.completed", "turn.failed")
+    except (ValueError, AttributeError):
+        return False
+
+
 async def _kill_group(proc: asyncio.subprocess.Process, sig: int) -> None:
     try:
         os.killpg(proc.pid, sig)
@@ -150,6 +159,8 @@ async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], wo
 
     stderr_task = asyncio.create_task(drain_stderr())
     timed_out = False
+    lingered = False       # Codex said the turn is over but did not exit: it was ended after a short grace
+    final_at: float | None = None
     try:
         assert proc.stdout
         loop = asyncio.get_running_loop()
@@ -161,7 +172,14 @@ async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], wo
                     remaining = deadline - loop.time()
                     if remaining <= 0:
                         raise TimeoutError
-                    done, _ = await asyncio.wait({read}, timeout=min(PING_SECONDS, remaining))
+                    wait = min(PING_SECONDS, remaining)
+                    if final_at is not None:
+                        left = final_at + EXIT_GRACE_SECONDS - loop.time()
+                        if left <= 0:
+                            lingered = True
+                            break
+                        wait = min(wait, left)
+                    done, _ = await asyncio.wait({read}, timeout=wait)
                     if done:
                         break
                     # A long command prints nothing for minutes: tell the panel this turn is alive.
@@ -169,6 +187,8 @@ async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], wo
             finally:
                 if not read.done():
                     read.cancel()
+            if lingered:
+                break
             try:
                 raw = read.result()
             except ValueError:  # a single line over the limit: nothing sensible to do with the rest
@@ -178,6 +198,8 @@ async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], wo
             line = raw.decode("utf-8", "replace").strip()
             if line.startswith("{"):
                 yield line + "\n"
+                if final_at is None and _is_final_event(line):
+                    final_at = loop.time()
     except TimeoutError:
         timed_out = True
     finally:
@@ -193,7 +215,9 @@ async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], wo
         _running.pop(key, None)
         _compat.pop(compat_token or "", None)
     tail = stderr_tail.decode("utf-8", "replace").replace(turn.api_key, "[key]")
-    yield json.dumps({"type": "agentd.exit", "code": proc.returncode, "timed_out": timed_out, "stderr": tail}) + "\n"
+    # A process we had to end after it reported the turn over did its job: that is not a failure, whatever its signal exit code is.
+    code = 0 if lingered else proc.returncode
+    yield json.dumps({"type": "agentd.exit", "code": code, "timed_out": timed_out, "lingered": lingered, "stderr": tail}) + "\n"
 
 
 # ── the compat proxy: a gateway's answers, made digestible for Codex ─────────────────────────────

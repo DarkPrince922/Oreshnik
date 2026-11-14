@@ -637,3 +637,25 @@ def test_the_setting_switches_the_proxy_off(client, wired, monkeypatch):
     user, h = op_user(client)
     monkeypatch.setattr(settings, "agent_response_fix", False)
     assert 'base_url = "http://gw.internal/v1"' in provider_arg(report_argv(client, h, custom_gateway(user.id)))
+
+
+# ── a Codex that reports the turn over and does not exit ────────────────────────
+
+def test_a_process_that_lingers_after_the_turn_is_over_is_ended_and_not_an_error(agentd, monkeypatch):
+    monkeypatch.setattr(agentd, "EXIT_GRACE_SECONDS", 0.5)
+    start = time.time()
+    _, evs = post_turn(agentd, prompt="linger", timeout_seconds=30)
+    assert time.time() - start < 20  # not the 60 s the process would have slept
+    assert [e["type"] for e in evs if e["type"] == "turn.completed"] == ["turn.completed"]
+    assert evs[-1]["type"] == "agentd.exit" and evs[-1]["code"] == 0 and evs[-1]["lingered"] is True and evs[-1]["timed_out"] is False
+
+
+def test_a_process_that_exits_by_itself_is_not_marked_as_lingering(agentd):
+    _, evs = post_turn(agentd, prompt="hi")
+    assert evs[-1]["code"] == 0 and evs[-1]["lingered"] is False
+
+
+def test_only_the_end_of_turn_events_start_the_grace(agentd):
+    assert agentd._is_final_event('{"type":"turn.completed","usage":{}}') and agentd._is_final_event('{"type":"turn.failed","error":{}}')
+    assert not agentd._is_final_event('{"type":"item.completed","item":{}}')
+    assert not agentd._is_final_event("not json") and not agentd._is_final_event("[1]")

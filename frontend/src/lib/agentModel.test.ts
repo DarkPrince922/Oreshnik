@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentEvent } from "./api";
-import { buildFeed, canSend, formatTokens, lastStepRunning, usableProfiles } from "./agentModel";
+import { buildFeed, canSend, formatTokens, lastStepRunning, turnFinished, usableProfiles } from "./agentModel";
 
 let seq = 0;
 const ev = (kind: string, payload: Record<string, unknown> = {}): AgentEvent => ({ seq: seq++, kind, payload });
@@ -116,5 +116,16 @@ describe("formatTokens", () => {
     expect(formatTokens(950)).toBe("950");
     expect(formatTokens(12_345)).toBe("12.3k");
     expect(formatTokens(250_000)).toBe("250k");
+  });
+});
+
+describe("turnFinished", () => {
+  it("is true once the usage line closes the feed, so no spinner is shown for a turn that is over", () => {
+    reset();
+    const done = buildFeed([ev("user", { text: "x" }), ev("item.completed", { item: { id: "a", type: "agent_message", text: "hi" } }), ev("turn.completed", { usage: { input_tokens: 1, output_tokens: 1 } })]);
+    expect(turnFinished(done)).toBe(true);
+    const working = buildFeed([ev("user", { text: "x" }), ev("item.completed", { item: { id: "a", type: "agent_message", text: "hi" } })]);
+    expect(turnFinished(working)).toBe(false);
+    expect(turnFinished([])).toBe(false);
   });
 });

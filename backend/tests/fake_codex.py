@@ -54,6 +54,13 @@ elif prompt == "report":
     text = json.dumps({"argv": argv, "key_env": os.environ.get("ORESHNIK_AGENT_API_KEY"), "codex_home": os.environ.get("CODEX_HOME"),
                        "cwd": os.getcwd(), "leaked": sorted(k for k in os.environ if k in ("JWT_SECRET", "SECRET_ENCRYPTION_KEY", "POSTGRES_PASSWORD"))})
     emit({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": text}})
+elif prompt == "linger":
+    # Reports the turn over and then does not exit (seen in practice: Codex shutting down slowly).
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+    emit({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "done"}})
+    emit({"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 3}})
+    time.sleep(60)
+    sys.exit(0)
 elif prompt == "bigout":
     emit({"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "yes", "aggregated_output": "y\n" * 50000, "exit_code": 0, "status": "completed"}})
 else:

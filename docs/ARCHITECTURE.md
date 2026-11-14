@@ -948,6 +948,12 @@ the token valid for that turn and then dropped) which forwards to the real endpo
 Checked with the real Codex through the proxy: one answer, `turn.completed`, no retries. The setting `AGENT_RESPONSE_FIX` («Исправлять ответы шлюза», on by default) switches it off.
 Other gateway quirks can be handled in the same place.
 
+### A Codex that reports the turn over and does not exit
+
+Seen in a chat: the usage line («токенов: … на входе») was shown and the spinner kept turning — the turn stays `running` until the Codex process exits, and it did not exit at once.
+agentd now treats Codex's own `turn.completed` / `turn.failed` as the end: it gives the process `AGENT_EXIT_GRACE_SECONDS` (10) to leave by itself, then ends it (SIGINT, then SIGKILL after the usual grace)
+and reports exit code 0 with `lingered: true` — ending a finished process is not a failure. The page shows no spinner once the usage line closes the feed and says «завершается…» while it waits.
+
 ### Limits
 
 The agent can do anything inside its container, including reading what you paste into the chat and using the model key it was given

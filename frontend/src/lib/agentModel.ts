@@ -111,6 +111,11 @@ export function lastStepRunning(feed: FeedEntry[]): boolean {
   return !!last && (last.type === "command" || last.type === "files" || last.type === "tool") && last.running;
 }
 
+/** The turn has reported its end (the usage line is the last thing in the feed); the process may take a moment to exit. */
+export function turnFinished(feed: FeedEntry[]): boolean {
+  return feed[feed.length - 1]?.type === "usage";
+}
+
 export function canSend(args: { text: string; status: "idle" | "running"; profileAvailable: boolean }): boolean {
   return args.text.trim().length > 0 && args.status === "idle" && args.profileAvailable;
 }

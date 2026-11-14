@@ -17,7 +17,7 @@ import {
   type AgentSession,
   type LLMProfile,
 } from "../lib/api";
-import { buildFeed, canSend, formatTokens, lastStepRunning, usableProfiles, type FeedEntry } from "../lib/agentModel";
+import { buildFeed, canSend, formatTokens, lastStepRunning, turnFinished, usableProfiles, type FeedEntry } from "../lib/agentModel";
 import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
 
@@ -169,7 +169,7 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
         </div>
         <div className="flex items-center gap-2">
           {state !== "live" && <Badge tone={state === "error" ? "bad" : "warn"}>{state === "error" ? "нет связи" : "подключение…"}</Badge>}
-          {running && <Badge tone="accent">думает…</Badge>}
+          {running && <Badge tone="accent">{turnFinished(feed) ? "завершается…" : "думает…"}</Badge>}
           {running && (
             <Button variant="danger" className="px-3 py-1.5 text-xs" onClick={stop} disabled={session.cancel_requested}>
               Стоп
@@ -192,7 +192,7 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
         {feed.map((entry) => (
           <Step key={entry.key} entry={entry} />
         ))}
-        {running && !lastStepRunning(feed) && <Spinner className="h-3.5 w-3.5" />}
+        {running && !lastStepRunning(feed) && !turnFinished(feed) && <Spinner className="h-3.5 w-3.5" />}
       </div>
 
       <form onSubmit={send} className="border-t border-white/5 p-4">
