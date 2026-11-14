@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { motion } from "framer-motion";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import AgentsPanel from "../components/AgentsPanel";
 import BudgetBar from "../components/BudgetBar";
@@ -76,6 +76,9 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const [report, setReport] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState<"cancel" | "delete" | ExportFormat | null>(null);
   const [continueOpen, setContinueOpen] = useState(false);
+  // «Продолжить» in the scans list leads here and asks for the dialog to be opened straight away (once).
+  const location = useLocation();
+  const wantsContinue = (location.state as { continue?: boolean } | null)?.continue === true;
   const [analyzeOpen, setAnalyzeOpen] = useState(false);
   const tabChosen = useRef(false);
   const scanRef = useRef<Scan | null>(null);
@@ -114,6 +117,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const continuing = scan !== null && active && scan.resume_count > 0;
   // «Продолжить»: pick the run up again, or — for a scan that never got to start Strix — start it again.
   const contKind = scan !== null && finished ? continueKind(scan) : null;
+  useEffect(() => {
+    if (!wantsContinue || scan === null) return;
+    if (contKind && canModify) setContinueOpen(true);
+    navigate(location.pathname, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsContinue, scan === null]);
   const findingsKey = scan ? `${scan.status}:${scan.findings_total}` : "";
   useEffect(() => {
     if (!finished && !continuing) return;

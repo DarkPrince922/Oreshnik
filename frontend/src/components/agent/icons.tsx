@@ -22,3 +22,9 @@ export const SlidersIcon = (p: P) => <Icon {...p}><path d="M4 6h9M17 6h3M4 12h3M
 export const ArrowUpIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="M12 19V5M5 12l7-7 7 7" /></Icon>;
 export const TerminalIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="m5 8 4 4-4 4M12 16h7" /></Icon>;
 export const CloseIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="M6 6l12 12M18 6 6 18" /></Icon>;
+export const AlertIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="M12 4 3 20h18z" /><path d="M12 10v5M12 17.5v.5" /></Icon>;
+export const CheckIcon = (p: P) => <Icon {...p} strokeWidth={2.2}><path d="m5 12 5 5 9-10" /></Icon>;
+export const MinusIcon = (p: P) => <Icon {...p} strokeWidth={2.2}><path d="M7 12h10" /></Icon>;
+export const ClockIcon = (p: P) => <Icon {...p} strokeWidth={2}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></Icon>;
+export const ChevronLeftIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="m15 6-6 6 6 6" /></Icon>;
+export const ChevronRightIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="m9 6 6 6-6 6" /></Icon>;

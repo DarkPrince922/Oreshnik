@@ -189,6 +189,8 @@ export interface ScanList {
   total: number;
   limit: number;
   offset: number;
+  /** How many scans of each status the list holds (same schedule and search), whatever status the rows are narrowed to. */
+  counts: Partial<Record<ScanStatus, number>>;
 }
 
 export interface Finding {
@@ -300,7 +302,7 @@ export interface ScanCreateInput {
   llm_model?: string | null;
 }
 export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
-export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; limit?: number; offset?: number } = {}) =>
+export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; active?: boolean; q?: string; limit?: number; offset?: number } = {}) =>
   (await api.get<ScanList>("/api/scans", { params })).data;
 export const getScan = async (id: number) => (await api.get<Scan>(`/api/scans/${id}`)).data;
 export const cancelScan = async (id: number) => (await api.post<Scan>(`/api/scans/${id}/cancel`)).data;

@@ -8,7 +8,7 @@ from typing import Literal
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, status
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, or_, select, true, update
+from sqlalchemy import String, cast, func, or_, select, true, update
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -403,16 +403,31 @@ def continue_scan(
 def list_scans(
     status_filter: ScanStatus | None = Query(default=None, alias="status"),
     schedule_id: int | None = Query(default=None, description="only scans started by this schedule"),
+    active: bool | None = Query(default=None, description="true: queued/running/cancelling only; false: finished only"),
+    q: str | None = Query(default=None, max_length=200, description="a part of a target, or a scan number"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ScanList:
-    where = [_visible(user)]
+    # What the list is about: what the viewer may see, one schedule, a search. `counts` (the tiles above the list) covers all of
+    # it by status; `status` and `active` then narrow the rows themselves.
+    scope = [_visible(user)]
+    if schedule_id is not None:
+        scope.append(Scan.schedule_id == schedule_id)
+    text = (q or "").strip()
+    if text:
+        pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        match = cast(Scan.targets, String).ilike(pattern, escape="\\")
+        number = text.lstrip("#")
+        scope.append(or_(match, Scan.id == int(number)) if number.isdigit() and len(number) <= 9 else match)
+    by_status = dict(db.execute(select(Scan.status, func.count()).where(*scope).group_by(Scan.status)).all())
+
+    where = list(scope)
     if status_filter is not None:
         where.append(Scan.status == status_filter)
-    if schedule_id is not None:
-        where.append(Scan.schedule_id == schedule_id)
+    if active is not None:
+        where.append(Scan.status.in_(ACTIVE_STATUSES) if active else Scan.status.in_(FINAL_STATUSES))
     total = db.scalar(select(func.count()).select_from(Scan).where(*where))
     scans = db.scalars(select(Scan).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)).all()
     ids = [s.id for s in scans]
@@ -421,6 +436,7 @@ def list_scans(
     return ScanList(
         items=[_out(s, user, counts[s.id], children[s.id], names.get(s.schedule_id)) for s in scans],
         total=total, limit=limit, offset=offset,
+        counts={status.value: by_status.get(status, 0) for status in ScanStatus},
     )
 
 

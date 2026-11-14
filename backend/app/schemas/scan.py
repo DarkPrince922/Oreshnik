@@ -107,6 +107,8 @@ class ScanList(BaseModel):
     total: int
     limit: int
     offset: int
+    # How many scans of each status the same list holds (same viewer, schedule and search), whatever status the rows are narrowed to.
+    counts: dict[str, int] = {}
 
 
 class LogPage(BaseModel):
