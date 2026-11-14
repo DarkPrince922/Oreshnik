@@ -579,7 +579,11 @@ def test_the_whole_folder_can_be_downloaded_as_a_zip_without_git_internals(agent
     assert reply.status_code == 200 and reply.headers["content-type"] == "application/zip"
     names = zipfile.ZipFile(io.BytesIO(reply.content)).namelist()
     assert "src/m.py" in names and not any(n.startswith(".git") for n in names)
-    assert list((Path(agentd.module.DATA_DIR) / ".tmp").glob("*.zip")) == []  # the temporary file is removed
+    leftovers = lambda: list((Path(agentd.module.DATA_DIR) / ".tmp").glob("*.zip"))  # noqa: E731
+    deadline = time.time() + 10
+    while leftovers() and time.time() < deadline:  # it is removed right after the response has been sent, not before
+        time.sleep(0.1)
+    assert leftovers() == []
 
 
 def test_cloning_accepts_only_plain_https_links(agentd):
