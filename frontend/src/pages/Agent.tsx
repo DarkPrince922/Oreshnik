@@ -1,15 +1,18 @@
 import clsx from "clsx";
-import { motion } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { FeedStep, type Answer } from "../components/agent/Feed";
 import FilesModal from "../components/agent/FilesModal";
 import GoalModal from "../components/agent/GoalModal";
+import { ArrowUpIcon, BranchIcon, CompressIcon, FolderIcon, PlusIcon, ReviewIcon, SlidersIcon, TargetIcon, TerminalIcon, UndoIcon } from "../components/agent/icons";
+import SessionList from "../components/agent/SessionList";
+import SessionStats from "../components/agent/SessionStats";
 import SettingsModal from "../components/agent/SettingsModal";
 import ModelSelect from "../components/ModelSelect";
-import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, PageHeader, Spinner } from "../components/ui";
-import { buildFeed, canSend, contextView, formatTokens, goalResumable, goalStatusLabel, lastStepRunning, readComposer, turnFinished, usableProfiles, waitingForUser } from "../lib/agentModel";
+import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, Spinner } from "../components/ui";
+import { buildFeed, canSend, lastStepRunning, readComposer, turnFinished, usableProfiles, waitingForUser } from "../lib/agentModel";
+import { applyQuick, groupSteps, isUserBlock, sessionsSummary } from "../lib/agentSessions";
 import {
   answerAgentApproval,
   createAgentSession,
@@ -29,18 +32,33 @@ import {
 import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
 
-function MenuItem({ children, onClick, danger = false, disabled = false }: { children: string; onClick: () => void; danger?: boolean; disabled?: boolean }) {
+const chip = "rounded-md border border-white/10 px-2 py-0.5 text-slate-400";
+const WEB_SEARCH: Record<string, string> = { auto: "авто", on: "включён", off: "выключен" };
+
+/** The buttons above the message box: Codex-style slash commands and `!` for a command of your own. */
+const QUICK: { label: string; text: string; hint: string }[] = [
+  { label: "/goal", text: "/goal", hint: "Поставить цель: агент работает сам, пока не достигнет её" },
+  { label: "/compact", text: "/compact", hint: "Сжать контекст" },
+  { label: "/review", text: "/review", hint: "Код-ревью изменений (можно указать ветку)" },
+  { label: "/undo", text: "/undo", hint: "Откатить последний ход" },
+  { label: "/fork", text: "/fork", hint: "Ответвить копию сессии" },
+  { label: "!команда", text: "!", hint: "Выполнить свою команду в контейнере, без участия модели" },
+];
+
+function ToolButton({ icon, children, ...rest }: { icon: ReactNode; children: string; title: string; disabled?: boolean; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={clsx("block w-full px-3 py-2 text-left text-xs hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40", danger ? "text-signal-bad" : "text-slate-200")}
-    >
+    <Button className="h-9 px-3 text-[13px]" {...rest}>
+      {icon}
       {children}
-    </button>
+    </Button>
   );
 }
+
+const AgentMark = () => (
+  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent/20 text-accent-soft" title="Агент">
+    <TerminalIcon />
+  </span>
+);
 
 function Chat({
   session,
@@ -57,15 +75,16 @@ function Chat({
 }) {
   const { events, live, status, state } = useAgentStream(session.id);
   const feed = buildFeed(events, live);
+  const blocks = groupSteps(feed);
   const [text, setText] = useState(initialDraft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [menu, setMenu] = useState(false);
   const [settings, setSettings] = useState(false);
   const [files, setFiles] = useState(false);
   const [goalOpen, setGoalOpen] = useState<string | null>(null); // the text to start the goal form with; null = closed
   const [current, setCurrent] = useState(session);
   const scroller = useRef<HTMLDivElement>(null);
+  const composerBox = useRef<HTMLTextAreaElement>(null);
   const stick = useRef(true);
 
   useEffect(() => setCurrent(session), [session]);
@@ -89,8 +108,6 @@ function Chat({
   }, [marks, onChanged]);
 
   const running = status === "running";
-  const context = contextView(current.context_used, current.context_window);
-  const goal = current.goal;
   const waiting = waitingForUser(feed);
   const composer = readComposer(text, status);
 
@@ -139,8 +156,13 @@ function Chat({
   };
 
   const action = (fn: () => Promise<unknown>) => {
-    setMenu(false);
     void attempt(fn, false);
+  };
+  const compact = () => action(() => runAgentAction(session.id, { action: "compact" }));
+  /** A quick-command button: put the command into the box and leave the cursor there. */
+  const quick = (command: string) => {
+    setText((t) => applyQuick(t, command));
+    composerBox.current?.focus();
   };
 
   const stop = async () => {
@@ -174,100 +196,65 @@ function Chat({
       : "Что сделать?  !команда — выполнить самому · /goal /compact /review /undo /fork";
 
   return (
-    <Card className="flex h-[calc(100vh-14rem)] min-h-[30rem] flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 px-5 py-3">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold text-white">{current.title}</h2>
-          <p className="truncate text-[11px] text-slate-500">
-            {current.llm_profile_name ?? "профиль удалён"}
-            {current.llm_model ? ` · ${current.llm_model}` : ""}
-            {current.approval_mode === "ask" ? " · спрашивает" : ""}
-            {current.instructions ? " · свои инструкции" : ""}
-          </p>
+    <Card className="flex h-[calc(100vh-9.5rem)] min-h-[44rem] flex-col">
+      <div className="flex flex-wrap items-start justify-between gap-3 px-5 pb-3 pt-4">
+        <div className="min-w-0 space-y-1.5">
+          <h2 className="truncate text-lg font-semibold text-white">{current.title}</h2>
+          <div className="flex flex-wrap gap-1.5 text-[11px]">
+            <span className={clsx(chip, "max-w-full truncate font-mono text-slate-300")}>
+              {current.llm_profile_name ?? "профиль удалён"}
+              {current.llm_model ? ` · ${current.llm_model}` : ""}
+            </span>
+            <span className={chip}>подтверждения: {current.approval_mode === "ask" ? "спрашивает" : "без вопросов"}</span>
+            <span className={chip}>веб-поиск: {WEB_SEARCH[current.web_search] ?? current.web_search}</span>
+            {current.instructions && <span className={chip}>свои инструкции</span>}
+          </div>
         </div>
-        <div className="relative flex items-center gap-2">
+        <div className="flex items-center gap-2">
           {state !== "live" && <Badge tone={state === "error" ? "bad" : "warn"}>{state === "error" ? "нет связи" : "подключение…"}</Badge>}
           {running && <Badge tone={waiting ? "warn" : "accent"}>{waiting ? "ждёт ответа" : turnFinished(feed) ? "завершается…" : "работает…"}</Badge>}
           {running && (
-            <Button variant="danger" className="px-3 py-1.5 text-xs" onClick={stop} disabled={current.cancel_requested}>
+            <Button variant="danger" className="h-10 px-3.5 text-xs" onClick={stop} disabled={current.cancel_requested}>
               Стоп
             </Button>
           )}
-          <Button className="px-3 py-1.5 text-xs" onClick={() => setFiles(true)}>
-            Файлы
+          <Button className="h-10 w-10 !p-0" onClick={() => setSettings(true)} aria-label="Настройки сессии" title="Настройки сессии">
+            <SlidersIcon className="h-[18px] w-[18px]" />
           </Button>
-          <Button className="px-3 py-1.5 text-xs" onClick={() => setMenu((m) => !m)} aria-label="Действия">
-            ⋯
-          </Button>
-          {menu && (
-            <>
-              <button type="button" aria-label="Закрыть меню" className="fixed inset-0 z-10 cursor-default" onClick={() => setMenu(false)} />
-              <div className="absolute right-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-xl border border-white/10 bg-ink-900 shadow-xl">
-                <MenuItem onClick={() => { setMenu(false); setSettings(true); }}>Настройки сессии…</MenuItem>
-                <MenuItem disabled={running} onClick={() => { setMenu(false); setGoalOpen(""); }}>Поставить цель…</MenuItem>
-                <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "compact" }))}>Сжать контекст</MenuItem>
-                <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "review" }))}>Код-ревью изменений</MenuItem>
-                <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "revert" }))}>Откатить последний ход</MenuItem>
-                <MenuItem disabled={running} onClick={() => action(doFork)}>Ответвить копию сессии</MenuItem>
-              </div>
-            </>
-          )}
         </div>
       </div>
 
-      {(context.percent !== null || current.tokens_in > 0 || goal) && (
-        <div className="space-y-2 border-b border-white/5 px-5 py-2">
-          {(context.percent !== null || current.tokens_in > 0) && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
-              {context.percent !== null && (
-                <span className="flex items-center gap-2" title={current.context_window_known ? "Сколько места в контексте модели занято после последнего хода" : "Codex не знает эту модель: размер окна взят по умолчанию и может не совпадать с настоящим"}>
-                  контекст
-                  <span className="h-1.5 w-28 overflow-hidden rounded-full bg-white/10">
-                    <span className={clsx("block h-full rounded-full", context.tone === "bad" ? "bg-signal-bad" : context.tone === "warn" ? "bg-signal-warn" : "bg-accent")} style={{ width: `${Math.max(2, context.percent)}%` }} />
-                  </span>
-                  <span className={context.tone === "bad" ? "text-signal-bad" : context.tone === "warn" ? "text-signal-warn" : "text-slate-300"}>
-                    {current.context_window_known ? "" : "≈"}
-                    {context.percent}%
-                  </span>
-                  <span>
-                    {formatTokens(current.context_used ?? 0)} из {formatTokens(current.context_window ?? 0)}
-                  </span>
-                </span>
-              )}
-              <span>
-                всего за сессию: {formatTokens(current.tokens_in)} на входе · {formatTokens(current.tokens_out)} на выходе
-              </span>
-              {context.suggestCompact && !running && (
-                <button type="button" className="text-accent-soft underline decoration-dotted" onClick={() => action(() => runAgentAction(session.id, { action: "compact" }))}>
-                  сжать контекст
-                </button>
-              )}
-            </div>
-          )}
-          {goal && (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-              <Badge tone={goal.status === "complete" ? "ok" : goal.status === "active" ? "accent" : "warn"}>цель {goalStatusLabel(goal.status)}</Badge>
-              <span className="min-w-0 flex-1 truncate text-slate-300" title={goal.objective}>
-                {goal.objective}
-              </span>
-              <span className="text-[11px] text-slate-500">
-                {formatTokens(goal.tokens_used)}
-                {goal.token_budget ? ` из ${formatTokens(goal.token_budget)}` : ""} токенов
-              </span>
-              {goalResumable(goal, status) && (
-                <button type="button" className="text-[11px] text-accent-soft underline decoration-dotted" onClick={() => action(() => runAgentAction(session.id, { action: "goal" }))}>
-                  продолжить
-                </button>
-              )}
-              {!running && (
-                <button type="button" className="text-[11px] text-slate-500 underline decoration-dotted hover:text-slate-300" onClick={() => action(() => runAgentAction(session.id, { action: "goal_clear" }))}>
-                  снять
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+      {/* What used to hide behind «⋯»: every action of the session, in sight. All but «Файлы» wait for the agent to stop. */}
+      <div className="flex flex-wrap gap-2 border-b border-white/5 px-5 pb-3">
+        <ToolButton icon={<FolderIcon />} title="Файлы сессии в контейнере агента" onClick={() => setFiles(true)}>
+          Файлы
+        </ToolButton>
+        <ToolButton icon={<TargetIcon />} title="Поставить цель: агент работает сам, пока не достигнет её или не потратит бюджет" disabled={running} onClick={() => setGoalOpen("")}>
+          Цель
+        </ToolButton>
+        <ToolButton icon={<CompressIcon />} title="Сжать контекст: заменить историю кратким пересказом" disabled={running} onClick={compact}>
+          Сжать
+        </ToolButton>
+        <ToolButton icon={<ReviewIcon />} title="Код-ревью изменений, сделанных в сессии" disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "review" }))}>
+          Ревью
+        </ToolButton>
+        <ToolButton icon={<UndoIcon />} title="Откатить последний ход" disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "revert" }))}>
+          Откатить
+        </ToolButton>
+        <ToolButton icon={<BranchIcon />} title="Ответвить копию сессии" disabled={running} onClick={() => action(doFork)}>
+          Ответвить
+        </ToolButton>
+      </div>
+
+      <SessionStats
+        session={current}
+        status={status}
+        waiting={waiting}
+        onCompact={compact}
+        onGoalSet={() => setGoalOpen("")}
+        onGoalResume={() => action(() => runAgentAction(session.id, { action: "goal" }))}
+        onGoalClear={() => action(() => runAgentAction(session.id, { action: "goal_clear" }))}
+      />
 
       <div
         ref={scroller}
@@ -280,30 +267,68 @@ function Chat({
         {feed.length === 0 && state === "live" && (
           <p className="pt-10 text-center text-sm text-slate-500">Напишите задачу — агент будет выполнять команды и править файлы в своём контейнере. Файлы сессии — по кнопке «Файлы».</p>
         )}
-        {feed.map((entry) => (
-          <FeedStep key={entry.key} entry={entry} answer={answer} />
-        ))}
-        {running && !lastStepRunning(feed) && !turnFinished(feed) && !waiting && <Spinner className="h-3.5 w-3.5" />}
+        {blocks.map((block, i) => {
+          if (block.type === "single" && isUserBlock(block)) return <FeedStep key={block.key} entry={block.entry} answer={answer} />;
+          // The agent's side: one mark where its turn begins, everything under it aligned to the same column.
+          const first = i === 0 || isUserBlock(blocks[i - 1]);
+          return (
+            <div key={block.key} className="flex gap-3">
+              <span className="w-7 shrink-0">{first && <AgentMark />}</span>
+              <div className="min-w-0 flex-1">
+                {block.type === "steps" ? (
+                  <div className="max-w-[92%] divide-y divide-white/5 overflow-hidden rounded-xl border border-white/[0.08] bg-ink-800/60">
+                    {block.entries.map((entry) => (
+                      <FeedStep key={entry.key} entry={entry} answer={answer} grouped />
+                    ))}
+                  </div>
+                ) : (
+                  <FeedStep entry={block.entry} answer={answer} />
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {running && !lastStepRunning(feed) && !turnFinished(feed) && !waiting && <Spinner className="ml-10 h-3.5 w-3.5" />}
       </div>
 
-      <form onSubmit={send} className="border-t border-white/5 p-4">
+      <form onSubmit={send} className="border-t border-white/5 px-4 pb-4 pt-2">
         <ErrorNote message={error} />
         {!profileAvailable && <p className="mb-2 text-xs text-signal-warn">Профиль LLM этой сессии удалён: создайте новую сессию.</p>}
-        <div className="flex items-end gap-3">
+        <div className="mb-1.5 flex flex-wrap gap-0.5">
+          {QUICK.map((q) => (
+            <button
+              key={q.text}
+              type="button"
+              disabled={running}
+              title={running ? "Пока агент работает, сообщение дополняет ход — команды недоступны" : q.hint}
+              onClick={() => quick(q.text)}
+              className={clsx(
+                "rounded-lg px-2 py-1.5 font-mono text-xs font-medium transition-colors hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
+                q.text === "!" ? "text-signal-ok" : "text-accent-soft"
+              )}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-end gap-2 rounded-2xl border border-white/[0.12] bg-ink-800/80 py-2 pl-3.5 pr-2 transition-colors focus-within:border-accent/50">
           <textarea
+            ref={composerBox}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKey}
             rows={2}
             maxLength={50000}
             placeholder={placeholder}
-            className="min-h-[3.25rem] flex-1 resize-y rounded-xl border border-white/10 bg-ink-900/60 px-3 py-2 text-sm text-slate-100 outline-none focus:border-accent/50"
+            aria-label="Сообщение агенту"
+            className="max-h-60 min-h-[3rem] flex-1 resize-y bg-transparent py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-500"
           />
-          <Button type="submit" variant="primary" loading={busy} disabled={!sendable}>
+          <Button type="submit" variant="primary" loading={busy} disabled={!sendable} className="h-10 px-4">
+            {!busy && <ArrowUpIcon />}
             {running ? "Дополнить" : "Отправить"}
           </Button>
         </div>
-        <p className="mt-1.5 text-[10px] text-slate-600">Enter — отправить, Shift+Enter — новая строка{composer.kind === "shell" ? " · будет выполнено как команда, без участия модели" : ""}</p>
+        <p className="mt-1.5 text-[11px] text-slate-500">Enter — отправить, Shift+Enter — новая строка{composer.kind === "shell" ? " · будет выполнено как команда, без участия модели" : ""}</p>
       </form>
 
       <SettingsModal open={settings} session={current} onClose={() => setSettings(false)} onSaved={(s) => { setCurrent(s); onChanged(); }} />
@@ -364,6 +389,7 @@ export default function Agent() {
   }, [incoming?.sessionId, sessions, navigate, location.pathname]);
 
   const usable = usableProfiles(profiles);
+  const summary = sessionsSummary(sessions ?? []);
   const current = sessions?.find((s) => s.id === selected) ?? null;
 
   const create = async (e: FormEvent) => {
@@ -395,25 +421,33 @@ export default function Agent() {
 
   return (
     <div>
-      <PageHeader
-        title="Агент"
-        subtitle="Кодинг-агент Codex в изолированном контейнере: задача словами, а команды, правки и ответ — по мере появления"
-        action={
-          <div className="flex items-center gap-3">
-            {health && <Badge tone={health.ok ? "ok" : "bad"}>{health.detail}</Badge>}
-            <Button
-              variant="primary"
-              disabled={health?.ok === false}
-              onClick={() => {
-                setChoice(defaultChoice(usable));
-                setCreating(true);
-              }}
-            >
-              Новая сессия
-            </Button>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight text-white">Агент</h1>
+            {health && (
+              <Badge tone={health.ok ? "ok" : "bad"}>
+                <span className={clsx("h-1.5 w-1.5 rounded-full", health.ok ? "bg-signal-ok" : "bg-signal-bad")} />
+                {health.ok ? "на связи" : health.detail}
+              </Badge>
+            )}
           </div>
-        }
-      />
+          <p className="text-sm text-slate-400">
+            Codex в изолированном контейнере{summary ? ` · ${summary}` : ": задача словами, а команды, правки и ответ — по мере появления"}
+          </p>
+        </div>
+        <Button
+          variant="primary"
+          disabled={health?.ok === false}
+          onClick={() => {
+            setChoice(defaultChoice(usable));
+            setCreating(true);
+          }}
+        >
+          <PlusIcon />
+          Новая сессия
+        </Button>
+      </div>
       <ErrorNote message={error} />
 
       {sessions === null ? (
@@ -424,39 +458,13 @@ export default function Agent() {
           text="Создайте сессию: выберите модель (OpenAI, Grok или custom с Responses API) и поставьте агенту задачу. Скан можно разобрать в агенте со страницы самого скана."
         />
       ) : (
-        <div className="grid gap-5 lg:grid-cols-[18rem_1fr]">
+        <div className="grid gap-5 lg:grid-cols-[19rem_minmax(0,1fr)]">
           {/* `min-w-0` on every grid item: without it a CSS grid track sizes to its content's min-content width, so one long
               unbroken line (a diff, a path, a command) in the chat makes this track — and the whole page — wider than the
               viewport. `body` has `overflow-x: hidden`, so that overflow does not scroll; it is silently clipped off the right
               edge instead, which looked like the chat running off the monitor. */}
-          <div className="min-w-0 space-y-2">
-            {sessions.map((s) => (
-              <motion.div key={s.id} layout>
-                <div
-                  className={clsx(
-                    "group flex w-full items-start justify-between gap-2 rounded-xl border px-3 py-2.5 text-left transition-colors",
-                    s.id === selected ? "border-accent/40 bg-accent/10" : "border-white/5 bg-white/[0.03] hover:bg-white/5"
-                  )}
-                >
-                  <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setSelected(s.id)}>
-                    <span className="block truncate text-sm text-slate-100">{s.title}</span>
-                    <span className="text-[11px] text-slate-500">
-                      {s.status === "running" ? "работает…" : `ходов: ${s.turn_count}`}
-                      {s.last_error && <span className="text-signal-bad"> · ошибка</span>}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    title="Удалить"
-                    disabled={s.status === "running"}
-                    className="text-slate-600 opacity-0 hover:text-signal-bad disabled:hidden group-hover:opacity-100"
-                    onClick={() => void remove(s)}
-                  >
-                    ✕
-                  </button>
-                </div>
-              </motion.div>
-            ))}
+          <div className="min-w-0">
+            <SessionList sessions={sessions} selected={selected} onSelect={setSelected} onRemove={(s) => void remove(s)} />
           </div>
           {current && (
             <div className="min-w-0">

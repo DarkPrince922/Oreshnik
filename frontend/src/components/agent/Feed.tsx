@@ -122,12 +122,14 @@ function ApprovalCard({ entry, answer }: { entry: Extract<FeedEntry, { type: "ap
 
 const STATUS_NOTE: Record<string, string> = { declined: "отклонено", failed: "не удалось" };
 
-export function FeedStep({ entry, answer }: { entry: FeedEntry; answer: Answer }) {
+/** `grouped`: the step sits inside a block of steps (the block draws the frame), so it has no frame of its own. */
+export function FeedStep({ entry, answer, grouped = false }: { entry: FeedEntry; answer: Answer; grouped?: boolean }) {
+  const frame = grouped ? "p-3" : "max-w-[92%] rounded-xl border border-white/5 bg-ink-900/50 p-3";
   const [open, setOpen] = useState(false);
   switch (entry.type) {
     case "user":
       return (
-        <div className={clsx("ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border px-4 py-2.5 text-sm text-slate-100", entry.steer ? "border-white/10 bg-white/5" : "border-accent/20 bg-accent/10")}>
+        <div className={clsx("ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border px-4 py-2.5 text-sm text-slate-100", entry.steer ? "border-white/10 bg-white/5" : "border-transparent bg-accent-glow text-white")}>
           {entry.steer && <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-slate-500">добавлено по ходу</span>}
           {entry.text}
         </div>
@@ -151,7 +153,7 @@ export function FeedStep({ entry, answer }: { entry: FeedEntry; answer: Answer }
     case "command": {
       const failed = (entry.exitCode !== null && entry.exitCode !== 0) || entry.status === "failed" || entry.status === "declined";
       return (
-        <div className="max-w-[92%] rounded-xl border border-white/5 bg-ink-900/50 p-3">
+        <div className={frame}>
           <button type="button" className="flex w-full items-center gap-2 text-left" onClick={() => setOpen((o) => !o)}>
             {entry.running ? <Spinner className="h-3 w-3" /> : <span className={clsx("text-xs", failed ? "text-signal-bad" : "text-signal-ok")}>{failed ? "✕" : "✓"}</span>}
             <code className="min-w-0 flex-1 truncate font-mono text-xs text-slate-200">
@@ -159,6 +161,7 @@ export function FeedStep({ entry, answer }: { entry: FeedEntry; answer: Answer }
             </code>
             {STATUS_NOTE[entry.status] && <span className="text-[11px] text-slate-500">{STATUS_NOTE[entry.status]}</span>}
             {entry.exitCode !== null && entry.exitCode !== 0 && <span className="font-mono text-[11px] text-signal-bad">код {entry.exitCode}</span>}
+            <span className="hidden shrink-0 text-[11px] text-slate-500 sm:inline">{entry.user ? "ваша команда" : "команда"}</span>
           </button>
           {(open || entry.running) && entry.output && <Pre className="mt-2">{entry.output}</Pre>}
           {open && !entry.output && <p className="mt-2 text-[11px] text-slate-600">Вывода нет.</p>}
@@ -167,7 +170,7 @@ export function FeedStep({ entry, answer }: { entry: FeedEntry; answer: Answer }
     }
     case "files":
       return (
-        <div className="max-w-[92%] space-y-1.5 rounded-xl border border-white/5 bg-ink-900/50 p-3">
+        <div className={clsx("space-y-1.5", frame)}>
           <div className="flex items-center gap-2 text-xs text-slate-400">
             {entry.running && <Spinner className="h-3 w-3" />}
             Правки файлов
@@ -206,7 +209,7 @@ export function FeedStep({ entry, answer }: { entry: FeedEntry; answer: Answer }
       );
     case "tool":
       return (
-        <div className="flex max-w-[92%] items-center gap-2 rounded-xl border border-white/5 bg-ink-900/50 px-3 py-2 text-xs text-slate-400">
+        <div className={clsx("flex items-center gap-2 text-xs text-slate-400", grouped ? "px-3 py-2.5" : "max-w-[92%] rounded-xl border border-white/5 bg-ink-900/50 px-3 py-2")}>
           {entry.running && <Spinner className="h-3 w-3" />}
           <span className="font-mono text-slate-300">{entry.title}</span>
           {entry.detail && <span className="min-w-0 truncate text-slate-500">{entry.detail}</span>}
