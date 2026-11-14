@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     # publishes the sandbox's Caido port on a random host port chosen by dockerd, which can collide ("failed to bind host
     # port ... address already in use") when scans start together. With a network name nothing is published on the host at all
     # and Strix talks to the container by its IP — works on a Linux Docker host, not on Docker Desktop. The panel creates
-    # the network if it does not exist.
+    # the network if it does not exist; a worker that itself runs in a container must be on that network (docker-compose.yml does it).
     strix_sandbox_network: str = Field(default="", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.-]{0,62})?$")
     # How many times a scan is started again when the sandbox could not bind its host port (the clash above), before it fails.
     sandbox_start_retries: int = Field(default=2, ge=0, le=10)

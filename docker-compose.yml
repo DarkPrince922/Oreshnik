@@ -69,6 +69,9 @@ services:
       # docker.sock mounted so the worker can run Strix sandbox containers.
       # Host-root level access — accepted for single-VM deployment.
       - /var/run/docker.sock:/var/run/docker.sock
+    # `sandbox`: with STRIX_SANDBOX_NETWORK set, Strix puts its sandbox containers on that network and talks to them by
+    # container IP instead of a published host port — this worker must be on the same network to reach them.
+    networks: [default, sandbox]
     depends_on:
       - backend
       - redis
@@ -155,3 +158,6 @@ networks:
   default: {}
   # postgres/redis are NOT on it: the agent container can reach only the panel's backend/worker and the internet.
   agentnet: {}
+  # Where Strix's sandbox containers go when STRIX_SANDBOX_NETWORK is set (same name; see .env.example). Unused otherwise.
+  sandbox:
+    name: ${STRIX_SANDBOX_NETWORK:-oreshnik-sandbox}
