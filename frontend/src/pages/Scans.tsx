@@ -2,7 +2,7 @@ import clsx from "clsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { AlertIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, CloseIcon, MinusIcon, PlusIcon, SearchIcon } from "../components/agent/icons";
+import { AlertIcon, CheckIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, CloseIcon, MinusIcon, PlusIcon, SearchIcon, TargetIcon } from "../components/agent/icons";
 import { SEVERITIES, SEVERITY_LABEL, SEVERITY_STYLE, STATUS_META, MODE_META, isActive } from "../components/scan";
 import { Button, Card, EmptyState, ErrorNote, Spinner, relativeTime } from "../components/ui";
 import { cancelScan, errorMessage, listScans, type Scan, type ScanList, type Severity } from "../lib/api";
@@ -75,10 +75,14 @@ function LiveCard({ scan, showOwner, canStop, onStop }: { scan: Scan; showOwner:
   const spent = scan.cost ?? 0;
   const share = budget ? Math.min(100, Math.round((spent / budget) * 100)) : null;
   return (
-    <article className="flex min-w-0 flex-1 basis-[26rem] flex-col gap-3 rounded-2xl border border-accent/40 bg-ink-900/60 px-5 py-4">
+    <article className="relative flex min-w-0 flex-1 basis-[26rem] flex-col gap-3 overflow-hidden rounded-2xl border border-accent/40 bg-gradient-to-br from-accent/[0.10] via-ink-900/60 to-ink-900/60 px-5 py-4 shadow-[0_18px_50px_-28px_rgba(124,92,255,0.9)] transition-transform duration-200 hover:-translate-y-0.5">
+      <span aria-hidden="true" className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-accent-soft/80 to-transparent" />
       <div className="flex items-center justify-between gap-3 text-xs">
         <span className={clsx("inline-flex items-center gap-2 font-medium", stopping ? "text-signal-warn" : "text-accent-soft")}>
-          <span className={clsx("h-2 w-2 rounded-full", stopping ? "bg-signal-warn" : "bg-accent-soft shadow-[0_0_0_4px_rgba(157,134,255,0.22)]")} />
+          <span className="relative flex h-2 w-2">
+            {!stopping && <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-accent-soft" />}
+            <span className={clsx("relative h-2 w-2 rounded-full", stopping ? "bg-signal-warn" : "bg-accent-soft")} />
+          </span>
           {STATUS_META[scan.status].label}
           {elapsed !== null && ` · ${formatDuration(elapsed)}`}
         </span>
@@ -104,7 +108,7 @@ function LiveCard({ scan, showOwner, canStop, onStop }: { scan: Scan; showOwner:
           </span>
           {share !== null ? (
             <span className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10" title={`${share}% лимита`}>
-              <span className={clsx("block h-full rounded-full", share >= 90 ? "bg-signal-bad" : share >= 70 ? "bg-signal-warn" : "bg-accent-soft")} style={{ width: `${Math.max(2, share)}%` }} />
+              <span className={clsx("block h-full rounded-full", share >= 90 ? "bg-signal-bad" : share >= 70 ? "bg-signal-warn" : "bg-gradient-to-r from-accent-glow to-accent-soft", "transition-[width] duration-700")} style={{ width: `${Math.max(2, share)}%` }} />
             </span>
           ) : (
             <span className="font-mono text-[13px] font-medium text-white">{formatCost(scan.cost)}</span>
@@ -162,9 +166,9 @@ function HistoryRow({ scan, showOwner, canContinue }: { scan: Scan; showOwner: b
   const failed = scan.status === "failed";
   return (
     // The whole row opens the scan (the title link is stretched over it); «Продолжить» sits above that.
-    <li className={clsx("relative flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5 transition-colors hover:bg-white/[0.04]", COLS)}>
+    <li className={clsx("group/row relative flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5 transition-colors hover:bg-accent/[0.05]", COLS)}>
       <span className="flex w-full min-w-0 items-center gap-3 xl:w-auto">
-        <span className={clsx("flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px]", mark.box)} title={STATUS_META[scan.status].label}>
+        <span className={clsx("flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] ring-1 ring-inset ring-white/[0.06] transition-transform duration-200 group-hover/row:scale-105", mark.box)} title={STATUS_META[scan.status].label}>
           {mark.icon}
         </span>
         <span className="min-w-0">
@@ -198,6 +202,7 @@ function HistoryRow({ scan, showOwner, canContinue }: { scan: Scan; showOwner: b
   );
 }
 
+const TILE_DOT = { accent: "bg-accent-soft", bad: "bg-signal-bad", ok: "bg-signal-ok", muted: "bg-slate-500" } as const;
 const TILE_TONE = { accent: "text-accent-soft", bad: "text-rose-300", ok: "text-signal-ok", muted: "text-slate-400" } as const;
 
 export default function Scans() {
@@ -278,11 +283,16 @@ export default function Scans() {
     <>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">Сканы</h1>
-          <p className="mt-1 text-sm text-slate-400">{counts ? scansSummary(counts) : "История и текущие запуски"}</p>
+          <div className="flex items-center gap-3">
+            <span aria-hidden="true" className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-glow text-white shadow-[0_8px_24px_-8px_rgba(124,92,255,0.8)]">
+              <TargetIcon className="h-5 w-5" />
+            </span>
+            <h1 className="bg-gradient-to-r from-white to-accent-soft bg-clip-text text-2xl font-semibold tracking-tight text-transparent">Сканы</h1>
+          </div>
+          <p className="mt-1.5 text-sm text-slate-400">{counts ? scansSummary(counts) : "История и текущие запуски"}</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <label className="flex h-10 w-72 max-w-full items-center gap-2 rounded-xl border border-white/10 bg-ink-900/60 px-3 text-slate-400 focus-within:border-accent/50">
+          <label className="flex h-10 w-72 max-w-full items-center gap-2 rounded-xl border border-white/10 bg-ink-900/60 px-3 text-slate-400 transition-all focus-within:border-accent/60 focus-within:shadow-[0_0_0_4px_rgba(124,92,255,0.12)]">
             <SearchIcon />
             <input
               type="search"
@@ -327,11 +337,19 @@ export default function Scans() {
             aria-pressed={filter === t.value}
             onClick={() => pick(t.value)}
             className={clsx(
-              "flex min-h-[4.5rem] flex-1 basis-32 flex-col justify-between rounded-2xl border px-3.5 py-2.5 text-left transition-colors",
-              filter === t.value ? "border-accent/50 bg-accent/[0.14]" : "border-white/[0.08] bg-ink-900/60 hover:bg-white/[0.04]"
+              "group/tile flex min-h-[4.5rem] flex-1 basis-32 flex-col justify-between rounded-2xl border px-3.5 py-2.5 text-left transition-all duration-200",
+              filter === t.value
+                ? "border-accent/50 bg-gradient-to-br from-accent/[0.22] to-accent/[0.05] shadow-[0_10px_30px_-14px_rgba(124,92,255,0.8)]"
+                : "border-white/[0.08] bg-gradient-to-b from-white/[0.05] to-transparent hover:-translate-y-px hover:border-white/15"
             )}
           >
-            <span className={clsx("text-xs", filter === t.value ? "text-white" : TILE_TONE[t.tone])}>{t.label}</span>
+            <span className={clsx("flex items-center gap-1.5 text-xs", filter === t.value ? "text-white" : TILE_TONE[t.tone])}>
+              <span className="relative flex h-1.5 w-1.5">
+                {t.value === "running" && counts && tileCount(counts, "running") > 0 && <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-accent-soft" />}
+                <span className={clsx("relative h-1.5 w-1.5 rounded-full", TILE_DOT[t.tone])} />
+              </span>
+              {t.label}
+            </span>
             <span className="text-[22px] font-semibold leading-tight text-white">{counts ? tileCount(counts, t.value) : "—"}</span>
           </button>
         ))}
@@ -350,7 +368,7 @@ export default function Scans() {
 
       {running.length + queued.length > 0 && (
         <section className="mb-6 flex flex-col gap-3">
-          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Сейчас в работе</h2>
+          <h2 className="flex items-center gap-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Сейчас в работе<span aria-hidden="true" className="h-px flex-1 bg-gradient-to-r from-accent/40 to-transparent" /></h2>
           {running.length > 0 && (
             <div className="flex flex-wrap gap-4">
               {running.map((s) => <LiveCard key={s.id} scan={s} showOwner={showOwner} canStop={canModify(s)} onStop={() => void stop(s)} />)}
@@ -362,7 +380,7 @@ export default function Scans() {
 
       {rows.length > 0 && (
         <section className="flex flex-col gap-3">
-          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">История</h2>
+          <h2 className="flex items-center gap-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">История<span aria-hidden="true" className="h-px flex-1 bg-gradient-to-r from-white/15 to-transparent" /></h2>
           <Card className="overflow-hidden">
             <div className={clsx("hidden gap-x-4 border-b border-white/5 px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500", COLS)}>
               <span>Скан</span><span>Находки</span><span>Длительность</span><span>Стоимость</span><span>Когда</span>
