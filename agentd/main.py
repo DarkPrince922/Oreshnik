@@ -21,8 +21,9 @@ import signal
 import shutil
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
@@ -32,6 +33,7 @@ PING_SECONDS = float(os.environ.get("AGENT_PING_SECONDS", "15"))
 STOP_GRACE_SECONDS = float(os.environ.get("AGENT_STOP_GRACE_SECONDS", "10"))
 MAX_STDERR_TAIL = 4000
 KEY_ENV = "ORESHNIK_AGENT_API_KEY"
+PORT = int(os.environ.get("AGENT_PORT", "8100"))  # where uvicorn listens: Codex reaches the compat proxy below on this port, on loopback
 
 _PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "TZ", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
                 "no_proxy", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
@@ -60,6 +62,10 @@ class Turn(BaseModel):
     # Offer the model plain function tools only. A gateway that is not OpenAI itself usually refuses Codex's other tool types with
     # 400 "This endpoint supports function tools only": the built-in web_search and the multi_agent namespace.
     function_tools_only: bool = False
+    # Route Codex's requests through the compat proxy below, which completes the `usage` of the final stream event. Some gateways leave
+    # `cached_tokens` out and Codex then treats the finished answer as a dropped stream: it asks again up to 5 times (the answer
+    # appears several times, the tokens are paid each time) and fails.
+    normalize_responses: bool = False
 
 
 class Stop(BaseModel):
@@ -76,13 +82,13 @@ def toml_string(value: str) -> str:
     return json.dumps(value)  # a JSON string is a valid TOML basic string
 
 
-def build_argv(turn: Turn) -> list[str]:
+def build_argv(turn: Turn, base_url: str | None = None) -> list[str]:
     if not _MODEL_RE.match(turn.model):
         raise HTTPException(422, "bad model")
     if turn.thread_id is not None and not _THREAD_RE.match(turn.thread_id):
         raise HTTPException(422, "bad thread_id")
     provider = (
-        "{ name = \"Oreshnik\", base_url = " + toml_string(turn.base_url)
+        "{ name = \"Oreshnik\", base_url = " + toml_string(base_url or turn.base_url)
         + f", env_key = \"{KEY_ENV}\", wire_api = \"responses\" }}"
     )
     argv = [CODEX_BIN, "exec"]
@@ -119,10 +125,20 @@ async def _kill_group(proc: asyncio.subprocess.Process, sig: int) -> None:
 
 
 async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], workdir: Path):
-    proc = await asyncio.create_subprocess_exec(
-        *argv, cwd=workdir, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=16 * 1024 * 1024,
-    )
+    compat_token: str | None = None
+    if turn.normalize_responses:
+        # Codex talks to the compat proxy of this very process (loopback), which forwards to the real endpoint.
+        compat_token = secrets.token_urlsafe(16)
+        _compat[compat_token] = turn.base_url.rstrip("/")
+        argv = build_argv(turn, f"http://127.0.0.1:{PORT}/compat/{compat_token}")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=workdir, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=16 * 1024 * 1024,
+        )
+    except BaseException:
+        _compat.pop(compat_token or "", None)
+        raise
     _running[key] = proc
     stderr_tail = bytearray()
 
@@ -175,8 +191,93 @@ async def _stream(key: str, turn: Turn, argv: list[str], env: dict[str, str], wo
                 await proc.wait()
         await stderr_task
         _running.pop(key, None)
+        _compat.pop(compat_token or "", None)
     tail = stderr_tail.decode("utf-8", "replace").replace(turn.api_key, "[key]")
     yield json.dumps({"type": "agentd.exit", "code": proc.returncode, "timed_out": timed_out, "stderr": tail}) + "\n"
+
+
+# ── the compat proxy: a gateway's answers, made digestible for Codex ─────────────────────────────
+#
+# Reproduced with the real Codex 0.169 against an endpoint whose final `response.completed` event carries `input_tokens_details` without
+# `cached_tokens`: Codex fails to parse it ("stream disconnected before completion: failed to parse ResponseCompleted: missing field
+# `cached_tokens`"), repeats the whole request, and after its retries fails the turn. The proxy changes nothing but the `usage` numbers of
+# the final events, filling in what is missing with zeros; everything else passes through byte for byte.
+
+_compat: dict[str, str] = {}  # per-turn unguessable token -> the upstream base URL of that turn (never the key: the caller sends it)
+_LOOPBACK = {"127.0.0.1", "::1"}
+_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
+        "host", "content-length", "content-encoding", "accept-encoding"}
+_FINAL_EVENTS = {"response.completed", "response.incomplete", "response.failed", "response.done"}
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def fix_usage(usage: dict) -> dict:
+    """`usage` with every number Codex's parser insists on present: the `*_tokens_details` objects with `cached_tokens` / `reasoning_tokens`."""
+    usage = dict(usage)
+    if "input_tokens" not in usage and "prompt_tokens" in usage:  # a chat-completions-style usage in a Responses stream
+        usage["input_tokens"] = usage["prompt_tokens"]
+    if "output_tokens" not in usage and "completion_tokens" in usage:
+        usage["output_tokens"] = usage["completion_tokens"]
+    usage["input_tokens"] = _count(usage.get("input_tokens"))
+    usage["output_tokens"] = _count(usage.get("output_tokens"))
+    usage["total_tokens"] = _count(usage.get("total_tokens")) or usage["input_tokens"] + usage["output_tokens"]
+    for details, field in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
+        value = usage.get(details)
+        value = dict(value) if isinstance(value, dict) else {}
+        value[field] = _count(value.get(field))
+        usage[details] = value
+    return usage
+
+
+def fix_sse_line(line: str) -> str:
+    """One line of the event stream, with the final events' `usage` completed; any other line is returned as it came."""
+    if not line.startswith("data:") or '"usage"' not in line:
+        return line
+    try:
+        event = json.loads(line[5:].strip())
+    except ValueError:
+        return line
+    response = event.get("response") if isinstance(event, dict) else None
+    if not isinstance(response, dict) or event.get("type") not in _FINAL_EVENTS or not isinstance(response.get("usage"), dict):
+        return line
+    response["usage"] = fix_usage(response["usage"])
+    return "data: " + json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+
+@app.api_route("/compat/{token}/{path:path}", methods=["GET", "POST"])
+async def compat(token: str, path: str, request: Request) -> Response:
+    upstream = _compat.get(token)
+    if upstream is None or request.client is None or request.client.host not in _LOOPBACK:
+        raise HTTPException(404)
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
+    upstream_request = client.build_request(
+        request.method, f"{upstream}/{path}", params=request.query_params, headers=headers, content=await request.body()
+    )
+    try:
+        reply = await client.send(upstream_request, stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(502, f"upstream: {exc.__class__.__name__}") from exc
+    out_headers = {k: v for k, v in reply.headers.items() if k.lower() not in _HOP}
+    if "text/event-stream" not in reply.headers.get("content-type", ""):
+        body = await reply.aread()
+        await reply.aclose()
+        await client.aclose()
+        return Response(body, status_code=reply.status_code, headers=out_headers)
+
+    async def events():
+        try:
+            async for line in reply.aiter_lines():
+                yield fix_sse_line(line) + "\n"
+        finally:
+            await reply.aclose()
+            await client.aclose()
+
+    return StreamingResponse(events(), status_code=reply.status_code, headers=out_headers, media_type="text/event-stream")
 
 
 @app.post("/turn", dependencies=[Depends(require_token)])

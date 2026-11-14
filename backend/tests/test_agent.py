@@ -161,7 +161,8 @@ def test_what_codex_is_given(client, wired):
     assert "sk-live-key-9999" not in json.dumps([e.payload for e in events(s["id"])])
 
 
-def test_custom_profile_uses_its_own_base_url(client, wired):
+def test_custom_profile_uses_its_own_base_url(client, wired, monkeypatch):
+    monkeypatch.setattr(settings, "agent_response_fix", False)  # with the proxy on, Codex is given the proxy's address (tested below)
     user, h = op_user(client)
     with SessionLocal() as db:
         p = LLMProfile(user_id=user.id, name="gw", provider=Provider.custom, model="my/model", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
@@ -511,3 +512,128 @@ def test_agent_tools_setting_is_validated():
     assert Settings(_env_file=None, agent_tools=" Functions ").agent_tools == "functions"
     with pytest.raises(ValidationError, match="AGENT_TOOLS"):
         Settings(_env_file=None, agent_tools="some")
+
+
+# ── the compat proxy: a gateway's usage, completed ──────────────────────────────
+
+BROKEN = {"type": "response.completed", "response": {"id": "r1", "usage": {"input_tokens": 7, "input_tokens_details": {}, "output_tokens": 3, "output_tokens_details": {}}}}
+
+
+def sse(event: dict) -> str:
+    return "data: " + json.dumps(event, separators=(",", ":"))
+
+
+def test_the_missing_usage_numbers_are_filled_in(agentd):
+    fixed = json.loads(agentd.fix_sse_line(sse(BROKEN))[5:])["response"]["usage"]
+    assert fixed == {"input_tokens": 7, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 3,
+                     "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 10}
+
+
+def test_numbers_the_gateway_did_send_are_kept(agentd):
+    event = {"type": "response.completed", "response": {"usage": {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
+             "input_tokens_details": {"cached_tokens": 64, "text_tokens": 100}, "output_tokens_details": {"reasoning_tokens": 2}}}}
+    usage = json.loads(agentd.fix_sse_line(sse(event))[5:])["response"]["usage"]
+    assert usage["input_tokens_details"] == {"cached_tokens": 64, "text_tokens": 100} and usage["output_tokens_details"] == {"reasoning_tokens": 2}
+    assert usage["total_tokens"] == 105
+
+
+def test_a_chat_style_usage_in_a_responses_stream_is_mapped(agentd):
+    event = {"type": "response.completed", "response": {"usage": {"prompt_tokens": 9, "completion_tokens": 4}}}
+    usage = json.loads(agentd.fix_sse_line(sse(event))[5:])["response"]["usage"]
+    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (9, 4, 13)
+
+
+@pytest.mark.parametrize("line", [
+    "", "event: response.completed", ": keep-alive", "data: [DONE]", "data: not json {",
+    sse({"type": "response.output_text.delta", "delta": "hi", "usage": "word"}),  # not a final event
+    sse({"type": "response.completed", "response": {"id": "r"}}),                   # a final event without usage
+    sse({"type": "response.completed", "response": {"usage": None}}),
+])
+def test_every_other_line_passes_through_untouched(agentd, line):
+    assert agentd.fix_sse_line(line) == line
+
+
+def test_the_proxy_is_closed_to_everyone_but_this_container(agentd):
+    agentd._compat["tok"] = "http://127.0.0.1:1/v1"
+    outside = TestClient(agentd.app)  # its client address is not loopback
+    assert outside.post("/compat/tok/v1/responses", json={}).status_code == 404
+    assert outside.post("/compat/unknown/v1/responses", json={}).status_code == 404
+
+
+def run_upstream(events: list[str], seen: list):
+    """A gateway that streams `events` and remembers the request it got."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            seen.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": json.loads(body)})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for line in events:
+                self.wfile.write((line + "\n").encode())
+            self.wfile.flush()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_a_gateways_stream_comes_through_with_a_complete_usage(live, agentd):
+    import httpx
+
+    seen: list = []
+    delta = sse({"type": "response.output_text.delta", "delta": "Привет"})
+    upstream = run_upstream(["event: response.created", sse({"type": "response.created", "response": {"id": "r1"}}), "", "event: response.output_text.delta", delta, "",
+                             "event: response.completed", sse(BROKEN), "", "data: [DONE]", ""], seen)
+    try:
+        agentd._compat["tok"] = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
+        agentd.PORT = int(settings.agent_url.rsplit(":", 1)[1])
+        r = httpx.post(f"{settings.agent_url}/compat/tok/responses", json={"model": "m", "input": []}, headers={"Authorization": "Bearer gateway-key"}, timeout=20)
+    finally:
+        upstream.shutdown()
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert seen[0]["path"] == "/v1/responses" and seen[0]["auth"] == "Bearer gateway-key"  # the key is the caller's: nothing is stored here
+    assert seen[0]["body"] == {"model": "m", "input": []}
+    lines = r.text.split("\n")
+    assert delta in lines and "data: [DONE]" in lines and "event: response.completed" in lines  # the rest is untouched
+    done = json.loads(next(l for l in lines if '"response.completed"' in l and l.startswith("data:"))[5:])["response"]["usage"]
+    assert done["input_tokens_details"] == {"cached_tokens": 0} and done["output_tokens_details"] == {"reasoning_tokens": 0}
+
+
+def custom_gateway(user_id: int, name: str = "gw") -> LLMProfile:
+    with SessionLocal() as db:
+        p = LLMProfile(user_id=user_id, name=name, provider=Provider.custom, model="m", base_url="http://gw.internal/v1",
+                       api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+        return p
+
+
+def provider_arg(argv: list[str]) -> str:
+    return next(a for a in argv if a.startswith("model_providers.oreshnik="))
+
+
+def test_a_gateway_turn_goes_through_the_proxy_and_the_token_is_dropped_after(client, wired):
+    user, h = op_user(client)
+    argv = report_argv(client, h, custom_gateway(user.id))
+    assert f'base_url = "http://127.0.0.1:{wired.PORT}/compat/' in provider_arg(argv)
+    assert "gw.internal" not in provider_arg(argv)  # Codex never talks to the gateway itself
+    assert wired._compat == {}  # the per-turn route does not outlive the turn
+
+
+def test_openai_itself_is_not_proxied(client, wired):
+    user, h = op_user(client)
+    assert 'base_url = "https://api.openai.com/v1"' in provider_arg(report_argv(client, h, openai_profile(user.id)))
+
+
+def test_the_setting_switches_the_proxy_off(client, wired, monkeypatch):
+    user, h = op_user(client)
+    monkeypatch.setattr(settings, "agent_response_fix", False)
+    assert 'base_url = "http://gw.internal/v1"' in provider_arg(report_argv(client, h, custom_gateway(user.id)))

@@ -155,6 +155,8 @@ class Settings(BaseSettings):
     agent_turn_timeout_seconds: int = Field(default=1800, ge=10, le=24 * 3600)
     max_agent_sessions_per_user: int = 20
     agent_tools: str = "auto"
+    # Complete the usage numbers in a gateway's final stream event (see agentd's compat proxy). Never applied to OpenAI itself.
+    agent_response_fix: bool = True
     # A turn whose worker has not stored an event for this long is given up on.
     agent_stale_seconds: int = Field(default=300, ge=30)
 

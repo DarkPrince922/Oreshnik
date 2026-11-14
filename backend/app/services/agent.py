@@ -62,6 +62,12 @@ def function_tools_only(profile: LLMProfile) -> bool:
     return profile.provider != Provider.openai
 
 
+def normalize_responses(profile: LLMProfile) -> bool:
+    """Whether the agent's requests go through agentd's compat proxy, which completes a gateway's incomplete `usage`
+    (without it Codex fails to parse the final event and repeats the request). Not for OpenAI's own API."""
+    return settings.agent_response_fix and profile.provider != Provider.openai
+
+
 def trim(value, limit: int = MAX_STRING):
     """The event with every long string cut (a marker says so) — recursively, so a nested command output is covered too."""
     if isinstance(value, str):
@@ -137,13 +143,14 @@ def forget_session(key: str) -> None:
 
 
 def stream_turn(
-    *, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str, function_tools_only: bool = False
+    *, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str, function_tools_only: bool = False,
+    normalize_responses: bool = False,
 ) -> Iterator[dict]:
     """The agent's events for one turn, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
         "session_key": key, "prompt": prompt, "thread_id": thread_id, "model": model, "base_url": base_url,
         "api_key": api_key, "timeout_seconds": settings.agent_turn_timeout_seconds,
-        "function_tools_only": function_tools_only,
+        "function_tools_only": function_tools_only, "normalize_responses": normalize_responses,
     }
     timeout = httpx.Timeout(10.0, read=settings.agent_turn_timeout_seconds + 60.0)
     try:
@@ -183,7 +190,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str) ->
         api_key = decrypt(profile.api_key_enc)
         for event in stream_turn(
             key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key,
-            function_tools_only=function_tools_only(profile),
+            function_tools_only=function_tools_only(profile), normalize_responses=normalize_responses(profile),
         ):
             etype = str(event.get("type", ""))
             if etype == "agentd.ping":

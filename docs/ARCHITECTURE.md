@@ -937,6 +937,17 @@ The panel sends `function_tools_only` with each turn: **on for `custom` and Grok
 The setting `AGENT_TOOLS` = `auto` (default) | `functions` | `full` overrides this for all profiles (also editable in «Настройки»). Not verified: that a particular gateway then works end to
 end — the request is function-only, but a model behind it still has to call tools through its Responses API.
 
+### A gateway whose final stream event Codex cannot parse (the compat proxy)
+
+Second real-gateway failure: the model answered, then `Reconnecting… 1/5 (stream disconnected before completion: failed to parse ResponseCompleted: missing field
+`cached_tokens`)` — the answer appeared again and again and the turn finally failed. Reproduced with the real Codex 0.169 against an endpoint whose `response.completed`
+carries `input_tokens_details` without `cached_tokens`: Codex cannot parse the final event, treats the finished stream as dropped and repeats the whole request (and the tokens are paid each time).
+For gateways (every profile but OpenAI's own) agentd now gives Codex the address of a small **compat proxy** inside its own process (`/compat/<per-turn token>/…`, loopback only,
+the token valid for that turn and then dropped) which forwards to the real endpoint and completes only the `usage` numbers of the final events (`cached_tokens`, `reasoning_tokens`,
+`total_tokens`; a chat-style `prompt_tokens` is mapped); every other line passes through unchanged, and the key is whatever Codex sends — nothing is stored.
+Checked with the real Codex through the proxy: one answer, `turn.completed`, no retries. The setting `AGENT_RESPONSE_FIX` («Исправлять ответы шлюза», on by default) switches it off.
+Other gateway quirks can be handled in the same place.
+
 ### Limits
 
 The agent can do anything inside its container, including reading what you paste into the chat and using the model key it was given
