@@ -36,8 +36,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def endpoint_for(profile: LLMProfile) -> tuple[str, str]:
-    """(base_url, model) Codex should use for this profile, or `AgentError` when it cannot use it."""
+def endpoint_for(profile: LLMProfile, model: str | None = None) -> tuple[str, str]:
+    """(base_url, model) Codex should use for this profile (with `model`, one of its models, instead of its default), or
+    `AgentError` when it cannot use it."""
+    model = model or profile.model
     if profile.provider == Provider.claude:
         raise AgentError(
             "Агент (Codex) говорит на Responses API OpenAI. Профиль Claude его не поддерживает: "
@@ -46,8 +48,8 @@ def endpoint_for(profile: LLMProfile) -> tuple[str, str]:
     if profile.provider == Provider.custom:
         if not profile.base_url:
             raise AgentError("У custom-профиля нет base_url")
-        return profile.base_url, profile.model
-    return RESPONSES_BASE_URLS[profile.provider], profile.model
+        return profile.base_url, model
+    return RESPONSES_BASE_URLS[profile.provider], model
 
 
 def trim(value, limit: int = MAX_STRING):
@@ -156,14 +158,14 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str) ->
         session = db.get(AgentSession, session_id)
         if session is None:
             return
-        key, thread_id = session.key, session.thread_id
+        key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
         profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
 
     error: str | None = None
     try:
         if profile is None:
             raise AgentError("Профиль LLM удалён: выберите другой")
-        base_url, model = endpoint_for(profile)
+        base_url, model = endpoint_for(profile, chosen_model)
         api_key = decrypt(profile.api_key_enc)
         for event in stream_turn(key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key):
             etype = str(event.get("type", ""))

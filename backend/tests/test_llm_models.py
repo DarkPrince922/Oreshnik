@@ -288,3 +288,100 @@ def test_a_schedule_refuses_an_unknown_model_and_resets_it_with_the_profile(clie
     r = client.patch(f"/api/schedules/{sid}", headers=operator, json={"llm_profile_id": second})
     assert r.status_code == 200, r.text
     assert r.json()["llm_model"] == "s-default"
+
+
+# ── «Агент» and «Операции» use the chosen model too ──────────────────────────────
+
+def test_an_agent_session_runs_with_the_chosen_model(client, operator, monkeypatch):
+    from app.core.config import settings
+    from app.services import agent as agent_service
+
+    monkeypatch.setattr(settings, "agent_token", "t" * 20)
+    pid = user_and_profile(client, operator, models=["resp-small", "resp-big"])
+    r = client.post("/api/agent/sessions", headers=operator, json={"llm_profile_id": pid, "llm_model": "resp-big"})
+    assert r.status_code == 201, r.text
+    assert r.json()["llm_model"] == "resp-big"
+    sid = r.json()["id"]
+
+    seen = {}
+
+    def fake_stream(**kw):
+        seen.update(kw)
+        yield {"type": "agentd.exit", "code": 0}
+
+    monkeypatch.setattr(agent_service, "stream_turn", fake_stream)
+    assert client.post(f"/api/agent/sessions/{sid}/messages", headers=operator, json={"text": "hi"}).status_code == 202
+    assert seen["model"] == "resp-big" and seen["base_url"] == "http://gw.internal/v1"
+
+
+def test_an_agent_session_without_a_choice_uses_the_profiles_default(client, operator, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "agent_token", "t" * 20)
+    pid = user_and_profile(client, operator, models=["other"])
+    r = client.post("/api/agent/sessions", headers=operator, json={"llm_profile_id": pid})
+    assert r.status_code == 201 and r.json()["llm_model"] == "m-default"
+
+
+def test_an_agent_session_refuses_a_model_the_profile_does_not_have(client, operator, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "agent_token", "t" * 20)
+    pid = user_and_profile(client, operator, models=["a"])
+    r = client.post("/api/agent/sessions", headers=operator, json={"llm_profile_id": pid, "llm_model": "nope"})
+    assert r.status_code == 422 and "LLM-профили" in r.json()["detail"]
+
+
+def test_the_agents_endpoint_follows_the_chosen_model():
+    custom = LLMProfile(user_id=1, name="p", provider=Provider.custom, model="d", models=["x"], base_url="http://gw/v1", api_key_enc=encrypt(KEY), api_key_hint="…")
+    assert llm_agent_endpoint(custom) == ("http://gw/v1", "d")
+    assert llm_agent_endpoint(custom, "x") == ("http://gw/v1", "x")
+    grok = LLMProfile(user_id=1, name="p", provider=Provider.grok, model="grok-4", models=["grok-3"], api_key_enc=encrypt(KEY), api_key_hint="…")
+    assert llm_agent_endpoint(grok, "grok-3") == ("https://api.x.ai/v1", "grok-3")
+
+
+def llm_agent_endpoint(profile, model=None):
+    from app.services.agent import endpoint_for
+
+    return endpoint_for(profile, model)
+
+
+def ops_body(pid, runner_ids, **over):
+    body = {"goal": "обновить пакеты", "llm_profile_id": pid, "runner_ids": runner_ids}
+    body.update(over)
+    return body
+
+
+def test_an_ops_run_is_drafted_with_the_chosen_model(client, admin, fake_host, monkeypatch):
+    from tests.conftest import make_ssh_runner
+
+    seen = {}
+
+    def fake_chat(provider, base_url, api_key, model, *, system, user):
+        seen["model"] = model
+        return "#!/bin/sh\nset -eu\necho hi\n"
+
+    monkeypatch.setattr("app.services.ops.chat_once", fake_chat)
+    monkeypatch.setattr("app.worker.tasks.ops.run_on_host", lambda *a, **k: ("succeeded", 0, "hi\n"))
+    runner = make_ssh_runner(fake_host, trusted=True, status=None)
+    from app.models import RunnerStatus
+    from app.core.db import SessionLocal
+    from app.models import Runner
+
+    with SessionLocal() as db:
+        db.get(Runner, runner.id).status = RunnerStatus.online
+        db.commit()
+    pid = user_and_profile(client, admin, models=["ops-a", "ops-b"])
+    r = client.post("/api/ops", headers=admin, json=ops_body(pid, [runner.id], llm_model="ops-b"))
+    assert r.status_code == 201, r.text
+    assert r.json()["llm_model"] == "ops-b"
+    assert seen["model"] == "ops-b"
+
+
+def test_an_ops_run_refuses_a_model_the_profile_does_not_have(client, admin, fake_host):
+    from tests.conftest import make_ssh_runner
+
+    runner = make_ssh_runner(fake_host, trusted=True)
+    pid = user_and_profile(client, admin, models=["ops-a"])
+    r = client.post("/api/ops", headers=admin, json=ops_body(pid, [runner.id], llm_model="nope"))
+    assert r.status_code == 422 and "LLM-профили" in r.json()["detail"]

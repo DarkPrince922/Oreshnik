@@ -998,6 +998,9 @@ A profile used to hold one model; «Загрузить модели» only sugge
 - **Continuing / schedules.** A continuation keeps the scan's model unless a model or another profile is chosen; a model that has left the profile's list (the provider stopped serving it and the list was refreshed)
   falls back to the profile's default. Changing a schedule's profile without choosing a model means that profile's default. A schedule whose pinned model is later removed from the list is refused when it fires, with the reason
   (the usual skipped-with-reason), rather than silently running something else.
-- **Not covered:** the «Агент» (Codex) and «Операции» still use the profile's default model.
+- **«Агент» and «Операции» too.** An agent session (`agent_sessions.llm_model`) and an ops run (`ops_runs.llm_model`, migration 0014) take `llm_model` next to `llm_profile_id`, checked the same way
+  (`services/llm.py::validate_model`, `422` with the hint). The session keeps its model for every turn: Codex gets it through `-c model=…` with the profile's endpoint (`endpoint_for(profile, model)`), and an ops script is
+  drafted with it. The agent's choice is limited to the profiles Codex can use (OpenAI, Grok, custom — not Claude). The agent's model is checked only when the session is created, not on every message, so a model that
+  left the list later is tried anyway and the provider's own error is shown in the chat.
 
-Tests: `tests/test_llm_models.py` (24: list cleaning and storage, load/refresh, choosing for scans of different providers, refusals, what Strix is given, continuing, schedules), `src/lib/modelChoice.test.ts` (14).
+Tests: `tests/test_llm_models.py` (30: list cleaning and storage, load/refresh, choosing for scans of different providers, refusals, what Strix is given, continuing, schedules), `src/lib/modelChoice.test.ts` (14).

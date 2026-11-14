@@ -26,7 +26,7 @@ def stub_script(monkeypatch, script: str = "#!/bin/sh\nset -eu\necho hi\n") -> l
     """Replace the LLM call with a canned script; returns the list of (profile, goal, runner_names) it was called with."""
     calls = []
 
-    def fake(profile, goal, runner_names):
+    def fake(profile, goal, runner_names, model=None):
         calls.append((profile, goal, runner_names))
         return script
 
@@ -177,7 +177,7 @@ def test_draft_failure_fails_every_host_with_a_reason(client, admin, fake_host, 
     profile = make_profile(me(client, admin))
     runner = make_ssh_runner(fake_host, trusted=True)
 
-    def boom(profile, goal, runner_names):
+    def boom(profile, goal, runner_names, model=None):
         raise ops.OpsError("модель недоступна")
 
     monkeypatch.setattr(ops, "draft_script", boom)

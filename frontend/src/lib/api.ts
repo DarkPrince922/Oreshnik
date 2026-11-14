@@ -478,6 +478,7 @@ export interface OpsRun {
   goal: string;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  llm_model: string | null;
   status: OpsRunStatus;
   script: string | null;
   script_error: string | null;
@@ -492,7 +493,7 @@ export interface OpsRun {
 export const listOpsTargetRunners = async () => (await api.get<{ id: number; name: string }[]>("/api/ops/runners")).data;
 export const listOpsRuns = async () => (await api.get<OpsRun[]>("/api/ops")).data;
 export const getOpsRun = async (id: number) => (await api.get<OpsRun>(`/api/ops/${id}`)).data;
-export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; runner_ids: number[] }) =>
+export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; llm_model?: string | null; runner_ids: number[] }) =>
   (await api.post<OpsRun>("/api/ops", body)).data;
 export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/ops/${id}/cancel`)).data;
 
@@ -508,6 +509,8 @@ export interface AgentSession {
   title: string;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  /** The model the session talks to: the one chosen, else the profile's default. */
+  llm_model: string | null;
   status: AgentSessionStatus;
   turn_count: number;
   last_error: string | null;
@@ -527,7 +530,7 @@ export interface AgentEvent {
 
 export const getAgentHealth = async () => (await api.get<{ ok: boolean; detail: string }>("/api/agent/health")).data;
 export const listAgentSessions = async () => (await api.get<AgentSession[]>("/api/agent/sessions")).data;
-export const createAgentSession = async (body: { title: string; llm_profile_id: number }) =>
+export const createAgentSession = async (body: { title: string; llm_profile_id: number; llm_model?: string | null }) =>
   (await api.post<AgentSession>("/api/agent/sessions", body)).data;
 export const getAgentSession = async (id: number) => (await api.get<AgentSession>(`/api/agent/sessions/${id}`)).data;
 export const deleteAgentSession = async (id: number) => {

@@ -23,6 +23,7 @@ from app.models.llm_profile import LLMProfile
 from app.models.user import Role, User
 from app.schemas.agent import AgentEventOut, AgentMessage, AgentSessionCreate, AgentSessionOut
 from app.services import agent as agent_service
+from app.services.llm import validate_model
 from app.services.agent import AgentError
 from app.worker.tasks import agent_turn as agent_turn_task
 
@@ -35,7 +36,8 @@ def _out(db: Session, session: AgentSession) -> AgentSessionOut:
     profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
     return AgentSessionOut(
         id=session.id, title=session.title, llm_profile_id=session.llm_profile_id,
-        llm_profile_name=profile.name if profile else None, status=session.status, turn_count=session.turn_count,
+        llm_profile_name=profile.name if profile else None,
+        llm_model=session.llm_model or (profile.model if profile else None), status=session.status, turn_count=session.turn_count,
         last_error=session.last_error, cancel_requested=session.cancel_requested, event_count=session.next_seq,
         created_at=session.created_at, updated_at=session.updated_at,
     )
@@ -48,13 +50,14 @@ def _own_or_404(db: Session, user: User, session_id: int) -> AgentSession:
     return session
 
 
-def _usable_profile(db: Session, user: User, profile_id: int) -> LLMProfile:
+def _usable_profile(db: Session, user: User, profile_id: int, model: str | None = None) -> LLMProfile:
     profile = db.scalar(select(LLMProfile).where(LLMProfile.id == profile_id, LLMProfile.user_id == user.id))
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Профиль не найден")
     try:
+        validate_model(profile, model)
         agent_service.endpoint_for(profile)
-    except AgentError as exc:
+    except (AgentError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return profile
 
@@ -74,11 +77,12 @@ def list_sessions(user: User = Depends(require_operator), db: Session = Depends(
 def create_session(body: AgentSessionCreate, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentSessionOut:
     if not settings.agent_token:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Агент выключен: на сервере не задан AGENT_TOKEN")
-    profile = _usable_profile(db, user, body.llm_profile_id)
+    profile = _usable_profile(db, user, body.llm_profile_id, body.llm_model)
     count = db.scalar(select(func.count()).select_from(AgentSession).where(AgentSession.user_id == user.id))
     if count >= settings.max_agent_sessions_per_user:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Не больше {settings.max_agent_sessions_per_user} сессий: удалите ненужные")
-    session = AgentSession(user_id=user.id, title=body.title.strip() or "Новая сессия", llm_profile_id=profile.id)
+    session = AgentSession(user_id=user.id, title=body.title.strip() or "Новая сессия", llm_profile_id=profile.id,
+                           llm_model=validate_model(profile, body.llm_model))
     db.add(session)
     db.commit()
     db.refresh(session)

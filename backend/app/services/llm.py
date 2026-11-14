@@ -79,6 +79,16 @@ def profile_models(profile: LLMProfile) -> list[str]:
     return out
 
 
+def validate_model(profile: LLMProfile, model: str | None) -> str | None:
+    """`model` as it should be stored for a use of `profile` (None = the profile's own default), or `ValueError` with a message
+    fit to show: a model must be one of the profile's (its default, or the list saved by «Загрузить модели»)."""
+    if not model:
+        return None
+    if model not in profile_models(profile):
+        raise ValueError(f"Модели «{model}» нет в профиле «{profile.name}»: загрузите список моделей в разделе «LLM-профили»")
+    return model
+
+
 def clean_model_list(names: list[str] | None) -> list[str]:
     """A model list as it is stored: trimmed, without blanks or repeats, each id and the whole list bounded."""
     out: list[str] = []

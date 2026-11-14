@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import Markdown from "../components/Markdown";
+import ModelSelect from "../components/ModelSelect";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, PageHeader, Spinner } from "../components/ui";
 import {
   createAgentSession,
@@ -17,6 +18,7 @@ import {
   type LLMProfile,
 } from "../lib/api";
 import { buildFeed, canSend, formatTokens, lastStepRunning, usableProfiles, type FeedEntry } from "../lib/agentModel";
+import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
 
 function Pre({ children, className }: { children: string; className?: string }) {
@@ -163,7 +165,7 @@ function Chat({ session, profileAvailable, onChanged }: { session: AgentSession;
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 px-5 py-3">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold text-white">{session.title}</h2>
-          <p className="text-[11px] text-slate-500">профиль: {session.llm_profile_name ?? "удалён"}</p>
+          <p className="text-[11px] text-slate-500">профиль: {session.llm_profile_name ?? "удалён"}{session.llm_model ? ` · ${session.llm_model}` : ""}</p>
         </div>
         <div className="flex items-center gap-2">
           {state !== "live" && <Badge tone={state === "error" ? "bad" : "warn"}>{state === "error" ? "нет связи" : "подключение…"}</Badge>}
@@ -222,7 +224,8 @@ export default function Agent() {
   const [health, setHealth] = useState<{ ok: boolean; detail: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [profileId, setProfileId] = useState<number | null>(null);
+  const [choice, setChoice] = useState<Choice | null>(null);
+  const profileId = choice?.profileId ?? null;
   const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -250,7 +253,7 @@ export default function Agent() {
     setSaving(true);
     setError(null);
     try {
-      const s = await createAgentSession({ title: "", llm_profile_id: profileId });
+      const s = await createAgentSession({ title: "", llm_profile_id: profileId, llm_model: modelToSend(usable, choice) });
       setCreating(false);
       await refresh();
       setSelected(s.id);
@@ -283,7 +286,7 @@ export default function Agent() {
               variant="primary"
               disabled={health?.ok === false}
               onClick={() => {
-                setProfileId(usable[0]?.id ?? null);
+                setChoice(defaultChoice(usable));
                 setCreating(true);
               }}
             >
@@ -344,18 +347,8 @@ export default function Agent() {
               Codex говорит только на Responses API.
             </p>
           ) : (
-            <Field label="Профиль LLM" hint="Ключ из профиля уходит в контейнер агента вместе с каждым сообщением и нигде не сохраняется там.">
-              <select
-                value={profileId ?? ""}
-                onChange={(e) => setProfileId(Number(e.target.value))}
-                className="w-full rounded-xl border border-white/10 bg-ink-900/60 px-3 py-2 text-sm text-slate-100"
-              >
-                {usable.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} · {p.model}
-                  </option>
-                ))}
-              </select>
+            <Field label="Модель" hint="Любая модель вашего профиля (OpenAI, Grok или custom с Responses API). Ключ из профиля уходит в контейнер агента вместе с каждым сообщением и нигде не сохраняется там.">
+              <ModelSelect profiles={usable} value={choice} onChange={setChoice} required label="Модель" />
             </Field>
           )}
           <p className="text-[11px] leading-relaxed text-slate-500">

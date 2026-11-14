@@ -40,6 +40,7 @@ class AgentSession(Base):
     status: Mapped[AgentSessionStatus] = mapped_column(
         Enum(AgentSessionStatus, name="agent_session_status"), default=AgentSessionStatus.idle
     )
+    llm_model: Mapped[str | None] = mapped_column(String(200), nullable=True)  # None = the profile's own default
     thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # Codex's own id; set by the first turn
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

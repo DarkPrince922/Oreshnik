@@ -515,7 +515,7 @@ def ops_run(ops_run_id: int) -> str:
         return "no_profile"
 
     try:
-        script = ops.draft_script(profile, run.goal, runner_names)
+        script = ops.draft_script(profile, run.goal, runner_names, run.llm_model)
     except ops.OpsError as exc:
         _ops_finish(ops_run_id, OpsRunStatus.failed, script_error=str(exc))
         _ops_fail_all_hosts(ops_run_id, str(exc))

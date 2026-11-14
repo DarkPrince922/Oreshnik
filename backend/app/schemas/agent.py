@@ -8,6 +8,7 @@ from app.models.agent import AgentSessionStatus
 class AgentSessionCreate(BaseModel):
     title: str = Field(default="", max_length=200)
     llm_profile_id: int
+    llm_model: str | None = Field(default=None, max_length=200)  # one of the profile's models; empty = its default
 
 
 class AgentMessage(BaseModel):
@@ -26,6 +27,7 @@ class AgentSessionOut(BaseModel):
     title: str
     llm_profile_id: int | None
     llm_profile_name: str | None
+    llm_model: str | None  # the model the session talks to: the one chosen, else the profile's default
     status: AgentSessionStatus
     turn_count: int
     last_error: str | None
