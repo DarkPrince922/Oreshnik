@@ -206,6 +206,20 @@ def test_a_gateway_gets_function_tools_only(agentd):
     assert any(argv[i:i + len(run)] == run for i in range(len(argv)))
 
 
+def test_self_installed_tools_land_in_the_sessions_own_folder_and_are_on_the_path(agentd):
+    """Layer 2 (agentd/main.py spawn_env): pip --user, npm -g and micromamba must all write under the session's own writable
+    home, never a system path the sandboxed, non-root agent container cannot write to — and that home's bin directories must
+    be on PATH so a self-installed tool is runnable by bare name, not just by pip/npm/micromamba's own invocation."""
+    report = agentd.report()
+    home = report["cwd"].removesuffix("/work")  # cwd is "<home>/work"; HOME and CODEX_HOME sit next to it
+    assert report["mamba_root"] == f"{home}/.micromamba" and report["npm_prefix"] == f"{home}/.npm-global"
+    path_entries = report["path"].split(":")
+    assert f"{home}/.local/bin" in path_entries  # `pip install --user`
+    assert f"{home}/.npm-global/bin" in path_entries  # `npm install -g` with NPM_CONFIG_PREFIX
+    assert f"{home}/.micromamba/envs/tools/bin" in path_entries  # `micromamba create -n tools ...`
+    assert "/opt/agent-tools/bin" in path_entries  # the baked-in venv for pip-only CLIs such as sqlmap
+
+
 @pytest.mark.parametrize("gateway,choice,off", [(True, "auto", True), (True, "on", False), (True, "off", True), (False, "auto", False), (False, "off", True), (False, "on", False)])
 def test_web_search_follows_the_sessions_choice(agentd, gateway, choice, off):
     argv = agentd.report(function_tools_only=gateway, web_search=choice)["argv"]

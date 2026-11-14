@@ -26,10 +26,11 @@ from app.models.llm_profile import LLMProfile
 from app.models.scan import Finding, Scan
 from app.models.user import Role, User
 from app.schemas.agent import (
-    AgentAction, AgentApproval, AgentClone, AgentEventOut, AgentFromScan, AgentFromScanOut, AgentMessage, AgentSessionCreate,
-    AgentSessionOut, AgentSessionUpdate,
+    AgentAction, AgentApproval, AgentClone, AgentEventOut, AgentFromScan, AgentFromScanOut, AgentListenerOpen, AgentListenerOut,
+    AgentListenerRange, AgentMessage, AgentSessionCreate, AgentSessionOut, AgentSessionUpdate,
 )
 from app.services import agent as agent_service
+from app.services import agent_listener
 from app.services.agent import AgentError
 from app.services.llm import validate_model
 from app.services.scan_files import find_run_dir, scan_dir
@@ -45,6 +46,7 @@ PROXIED_STATUSES = {400, 404, 409, 413, 422, 502, 503, 504}
 
 def _out(db: Session, session: AgentSession) -> AgentSessionOut:
     profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
+    listener = agent_listener.status_for(session.key)
     return AgentSessionOut(
         id=session.id, title=session.title, llm_profile_id=session.llm_profile_id,
         llm_profile_name=profile.name if profile else None,
@@ -54,6 +56,7 @@ def _out(db: Session, session: AgentSession) -> AgentSessionOut:
         context_window_known=session.context_window_known is not False, tokens_in=session.tokens_in or 0, tokens_out=session.tokens_out or 0,
         status=session.status, turn_count=session.turn_count,
         last_error=session.last_error, cancel_requested=session.cancel_requested, event_count=session.next_seq,
+        listener_port=listener.port if listener else None,
         created_at=session.created_at, updated_at=session.updated_at,
     )
 
@@ -164,7 +167,7 @@ def update_session(session_id: int, body: AgentSessionUpdate, user: User = Depen
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_session(session_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
+async def delete_session(session_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
     session = _own_or_404(db, user, session_id)
     if session.status == AgentSessionStatus.running:
         raise HTTPException(status.HTTP_409_CONFLICT, "Сначала остановите ход")
@@ -172,6 +175,7 @@ def delete_session(session_id: int, user: User = Depends(require_operator), db: 
     db.delete(session)
     db.commit()
     agent_service.forget_session(key)  # best effort: its working directory in the agent container
+    await agent_listener.close_for_session(key)
 
 
 @router.get("/sessions/{session_id}/events", response_model=list[AgentEventOut])
@@ -340,6 +344,48 @@ def stop(session_id: int, user: User = Depends(require_operator), db: Session = 
         agent_service.stop_turn(session.key)
         db.refresh(session)
     return _out(db, session)
+
+
+# ── listener: a port the panel proxies, on request, to the same port inside the agent container ──────────────────────
+#
+# See docs/ARCHITECTURE.md §27. Not tied to a turn: the operator (or the agent itself, via a shell command inside the
+# container) opens it, works with it, then closes it — independent of whether a message is in flight.
+
+@router.get("/listener-range", response_model=AgentListenerRange)
+def listener_range(_: User = Depends(require_operator)) -> AgentListenerRange:
+    rng = agent_listener.port_range()
+    return AgentListenerRange(available=rng is not None, min=rng[0] if rng else None, max=rng[1] if rng else None)
+
+
+def _listener_out(listener: agent_listener.Listener | None) -> AgentListenerOut:
+    if listener is None:
+        return AgentListenerOut(port=None)
+    return AgentListenerOut(port=listener.port, opened_at=listener.opened_at, last_active=listener.last_active)
+
+
+@router.get("/sessions/{session_id}/listener", response_model=AgentListenerOut)
+def get_listener(session_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentListenerOut:
+    session = _own_or_404(db, user, session_id)
+    return _listener_out(agent_listener.status_for(session.key))
+
+
+@router.post("/sessions/{session_id}/listener", response_model=AgentListenerOut)
+async def open_listener(session_id: int, body: AgentListenerOpen, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentListenerOut:
+    """Start proxying `body.port` on the panel's host to the same port inside this session's agent container. The agent
+    must bind that port itself (e.g. with a shell command) for anything to come through; this call only opens the pipe."""
+    session = _own_or_404(db, user, session_id)
+    _require_enabled()
+    try:
+        listener = await agent_listener.open_listener(port=body.port, session_key=session.key, session_id=session.id, user_id=user.id)
+    except AgentError as exc:
+        raise _agent_http_error(exc)
+    return _listener_out(listener)
+
+
+@router.delete("/sessions/{session_id}/listener", status_code=status.HTTP_204_NO_CONTENT)
+async def close_listener(session_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
+    session = _own_or_404(db, user, session_id)
+    await agent_listener.close_for_session(session.key)
 
 
 # ── the session's files ───────────────────────────────────────────────────────────────────────

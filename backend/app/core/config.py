@@ -161,6 +161,13 @@ class Settings(BaseSettings):
     agent_goal_max_tokens: int = Field(default=5_000_000, ge=10_000, le=50_000_000)
     # A turn whose worker has not stored an event for this long is given up on.
     agent_stale_seconds: int = Field(default=300, ge=30)
+    # Listener for the agent: a fixed range of ports the panel (this process) has published to the host and proxies, on
+    # explicit request, to a single port inside the sandboxed agent container (which itself has no published port and sits on
+    # an isolated network — see docs/ARCHITECTURE.md §27). Empty = feature off. Fixed at deploy time: docker-compose must
+    # publish the same range, so changing it needs a restart, unlike the rest of «Настройки».
+    agent_listener_ports: str = ""
+    # A listener nobody has sent a byte through for this long is closed on its own.
+    agent_listener_idle_seconds: int = Field(default=1800, ge=30)
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]

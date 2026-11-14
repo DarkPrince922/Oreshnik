@@ -253,8 +253,20 @@ async def init_git(session: Session) -> None:
 
 def spawn_env(turn: Turn, session: Session) -> dict[str, str]:
     env = {k: os.environ[k] for k in _PASSTHROUGH if k in os.environ}
+    home = str(session.home)
+    # Layer-2 self-install locations: all three point into the session's OWN writable folder (on the `agent_data` volume,
+    # the one place the agent container can write — its root filesystem is read_only). `pip install --user` already
+    # defaults under $HOME with no extra variable; npm and micromamba need to be told explicitly, since their defaults are
+    # system paths the agent (uid 1000, cap_drop: ALL, no root) cannot write to. The matching PATH prepend that makes
+    # anything installed this way (plus the Layer-1 apt/venv tools baked into the image) reachable by bare name lives in
+    # /etc/profile.d/agent-tools.sh (agentd/Dockerfile) — commands actually run as `bash -lc "..."`, a LOGIN shell, and
+    # Debian's /etc/profile resets PATH before sourcing profile.d, so a plain env var here would be overwritten for those;
+    # it is still set here too for the few code paths that are not a login shell.
+    env["NPM_CONFIG_PREFIX"] = f"{home}/.npm-global"
+    env["MAMBA_ROOT_PREFIX"] = f"{home}/.micromamba"
+    env["PATH"] = f"{home}/.local/bin:{home}/.npm-global/bin:{home}/.micromamba/envs/tools/bin:/opt/agent-tools/bin:" + env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     env.update({
-        "HOME": str(session.home), "CODEX_HOME": str(session.home / ".codex"), "TERM": "dumb", "NO_COLOR": "1", KEY_ENV: turn.api_key,
+        "HOME": home, "CODEX_HOME": str(session.home / ".codex"), "TERM": "dumb", "NO_COLOR": "1", KEY_ENV: turn.api_key,
         "GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_NAME": "Oreshnik agent", "GIT_AUTHOR_EMAIL": "agent@oreshnik.local",
         "GIT_COMMITTER_NAME": "Oreshnik agent", "GIT_COMMITTER_EMAIL": "agent@oreshnik.local",
     })

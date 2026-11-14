@@ -1,7 +1,10 @@
 import clsx from "clsx";
 import { useEffect, useState, type FormEvent } from "react";
 
-import { REASONING_EFFORTS, errorMessage, updateAgentSession, type AgentSession, type ApprovalMode, type WebSearchMode } from "../../lib/api";
+import {
+  REASONING_EFFORTS, closeAgentListener, errorMessage, getAgentListenerRange, openAgentListener, updateAgentSession,
+  type AgentListenerRange, type AgentSession, type ApprovalMode, type WebSearchMode,
+} from "../../lib/api";
 import { Button, ErrorNote, Field, Modal } from "../ui";
 
 const EFFORT_LABEL: Record<string, string> = { minimal: "минимальная", low: "низкая", medium: "средняя", high: "высокая", xhigh: "максимальная" };
@@ -16,6 +19,11 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [listenerRange, setListenerRange] = useState<AgentListenerRange | null>(null);
+  const [listenerPort, setListenerPort] = useState("");
+  const [listenerBusy, setListenerBusy] = useState(false);
+  const [listenerError, setListenerError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!open) return;
     setTitle(session.title);
@@ -24,7 +32,39 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
     setMode(session.approval_mode);
     setWeb(session.web_search);
     setError(null);
+    setListenerError(null);
+    getAgentListenerRange().then(setListenerRange, () => setListenerRange(null));
   }, [open, session]);
+
+  useEffect(() => {
+    if (listenerRange?.available && !listenerPort) setListenerPort(String(listenerRange.min));
+  }, [listenerRange]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const openListener = async () => {
+    const port = Number(listenerPort);
+    setListenerBusy(true);
+    setListenerError(null);
+    try {
+      const listener = await openAgentListener(session.id, port);
+      onSaved({ ...session, listener_port: listener.port });
+    } catch (err) {
+      setListenerError(errorMessage(err));
+    } finally {
+      setListenerBusy(false);
+    }
+  };
+  const closeListener = async () => {
+    setListenerBusy(true);
+    setListenerError(null);
+    try {
+      await closeAgentListener(session.id);
+      onSaved({ ...session, listener_port: null });
+    } catch (err) {
+      setListenerError(errorMessage(err));
+    } finally {
+      setListenerBusy(false);
+    }
+  };
 
   const changedPrompt = instructions.trim() !== (session.instructions ?? "");
   const submit = async (e: FormEvent) => {
@@ -95,6 +135,37 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
             ))}
           </div>
         </div>
+
+        {listenerRange?.available && (
+          <Field
+            label="Листенер"
+            hint={`Контейнер агента сам не доступен снаружи: это проксирует порт панели на такой же порт внутри контейнера, пока агент сам его слушает (например, командой nc -lp <порт>). Диапазон: ${listenerRange.min}–${listenerRange.max}. Закрывается сам, если долго нет данных.`}
+          >
+            {session.listener_port ? (
+              <div className="flex items-center gap-2">
+                <span className="field flex-1 text-slate-300">Открыт порт {session.listener_port}</span>
+                <Button type="button" onClick={closeListener} loading={listenerBusy}>
+                  Закрыть
+                </Button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  className="field w-28"
+                  type="number"
+                  min={listenerRange.min ?? undefined}
+                  max={listenerRange.max ?? undefined}
+                  value={listenerPort}
+                  onChange={(e) => setListenerPort(e.target.value)}
+                />
+                <Button type="button" onClick={openListener} loading={listenerBusy}>
+                  Открыть
+                </Button>
+              </div>
+            )}
+            <ErrorNote message={listenerError} />
+          </Field>
+        )}
 
         <ErrorNote message={error} />
         <div className="flex justify-end gap-2">

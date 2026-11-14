@@ -92,7 +92,8 @@ def run_turn(thread: str, turn_id: str, text: str, params: dict) -> None:
         os._exit(3)
     if "report" in text:
         body = json.dumps({"argv": sys.argv[1:], "key_env": os.environ.get("ORESHNIK_AGENT_API_KEY"), "codex_home": os.environ.get("CODEX_HOME"), "cwd": os.getcwd(),
-                           "leaked": sorted(k for k in os.environ if k in ("JWT_SECRET", "SECRET_ENCRYPTION_KEY", "POSTGRES_PASSWORD")), "seen": state["seen"], "pid": os.getpid()})
+                           "leaked": sorted(k for k in os.environ if k in ("JWT_SECRET", "SECRET_ENCRYPTION_KEY", "POSTGRES_PASSWORD")), "seen": state["seen"], "pid": os.getpid(),
+                           "path": os.environ.get("PATH", ""), "mamba_root": os.environ.get("MAMBA_ROOT_PREFIX"), "npm_prefix": os.environ.get("NPM_CONFIG_PREFIX")})
         item_completed(thread, turn_id, {"type": "agentMessage", "id": "m1", "text": body})
     elif "run a command" in text:
         command = "echo hi-from-agent"

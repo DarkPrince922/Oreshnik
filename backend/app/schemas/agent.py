@@ -140,8 +140,25 @@ class AgentSessionOut(BaseModel):
     last_error: str | None
     cancel_requested: bool
     event_count: int
+    listener_port: int | None   # a listener open for this session right now, or None
     created_at: datetime
     updated_at: datetime
+
+
+class AgentListenerOpen(BaseModel):
+    port: int = Field(ge=1, le=65535)
+
+
+class AgentListenerOut(BaseModel):
+    port: int | None
+    opened_at: datetime | None = None
+    last_active: datetime | None = None
+
+
+class AgentListenerRange(BaseModel):
+    available: bool
+    min: int | None = None
+    max: int | None = None
 
 
 class AgentEventOut(BaseModel):

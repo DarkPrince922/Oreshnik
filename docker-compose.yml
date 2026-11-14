@@ -39,6 +39,11 @@ services:
     networks: [default, agentnet]
     ports:
       - "8000:8000"
+      # Fixed range for the agent's listener (docs/ARCHITECTURE.md §27): the panel proxies one of these, on request, to the
+      # same port inside the isolated `agent` container, which has no published port of its own. AGENT_LISTENER_PORTS in
+      # .env is the matching toggle the API itself checks — leave it empty there to turn the feature off without editing
+      # this file (the ports stay published but nothing binds them until a session opens one).
+      - "4444-4450:4444-4450"
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,7 +95,12 @@ services:
   # поэтому контейнер НЕ получает ни docker.sock, ни .env, ни доступа к Postgres/Redis (отдельная сеть `agentnet`).
   # Единственное, что он знает из панели, — AGENT_TOKEN; ключ модели приходит с каждым ходом и на диск не пишется.
   agent:
-    build: ./agentd
+    build:
+      context: ./agentd
+      args:
+        # Extra Debian packages baked into the agent image on top of the default dev+network toolset (see agentd/Dockerfile).
+        # Needs `docker compose build agent` to take effect — the image is immutable at runtime.
+        AGENT_EXTRA_PACKAGES: ${AGENT_EXTRA_PACKAGES:-}
     environment:
       AGENT_TOKEN: ${AGENT_TOKEN:-}
       AGENT_IDLE_SECONDS: ${AGENT_IDLE_SECONDS:-900}

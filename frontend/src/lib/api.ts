@@ -539,8 +539,21 @@ export interface AgentSession {
   last_error: string | null;
   cancel_requested: boolean;
   event_count: number;
+  /** A listener open for this session right now (see docs/ARCHITECTURE.md §27), or null. */
+  listener_port: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface AgentListener {
+  port: number | null;
+  opened_at: string | null;
+  last_active: string | null;
+}
+export interface AgentListenerRange {
+  available: boolean;
+  min: number | null;
+  max: number | null;
 }
 
 /** One stored event: `kind` is "user", "action", "turn.started", "item.completed", "turn.diff", "turn.plan", "approval.requested/resolved",
@@ -606,6 +619,12 @@ export const sendAgentMessage = async (id: number, text: string) => (await api.p
 /** Add an instruction to the turn that is running now. */
 export const steerAgentTurn = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/steer`, { text })).data;
 export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/stop`)).data;
+export const getAgentListenerRange = async () => (await api.get<AgentListenerRange>("/api/agent/listener-range")).data;
+export const getAgentListener = async (id: number) => (await api.get<AgentListener>(`${A}/${id}/listener`)).data;
+export const openAgentListener = async (id: number, port: number) => (await api.post<AgentListener>(`${A}/${id}/listener`, { port })).data;
+export const closeAgentListener = async (id: number) => {
+  await api.delete(`${A}/${id}/listener`);
+};
 export const runAgentAction = async (id: number, body: AgentActionInput) => (await api.post<AgentSession>(`${A}/${id}/actions`, body)).data;
 export const forkAgentSession = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/fork`, undefined, { timeout: 300_000 })).data;
 export const answerAgentApproval = async (id: number, requestId: string, decision: ApprovalDecision, answers?: Record<string, string | string[]>) => {

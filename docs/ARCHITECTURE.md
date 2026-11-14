@@ -1180,3 +1180,99 @@ A small light next to «Сканы» and «Агент» in the menu, lit when so
 - The page polls every 8 s (every 32 s in a background tab); the section being looked at never has a light. A tooltip says what is new («2 скана завершено, с находками: 1»).
 
 Tests: `tests/test_attention.py` (8), `src/lib/attention.test.ts` (7); the off-on-open behaviour was also driven in a real browser against a stubbed API.
+
+## 26. Tools for the agent: baked into the image, and self-installed at runtime
+
+The agent container (§20) starts with nothing but Codex, Python and Node — enough to read and patch code, not enough for most pentesting tasks. Two layers add
+to that, both inside the same sandbox the agent already runs in (no Docker socket, `read_only: true`, `cap_drop: [ALL]`, no DB/Redis/secrets, outbound internet
+only): everything here is for **authorized** testing — the agent's own targets (environments the operator owns or has written permission to test), the same rule
+that already governs Strix scans.
+
+### Layer 1 — baked into the image (`agentd/Dockerfile`)
+
+An apt-get install, Debian bookworm's main repo only, no backports, chosen for dependable availability rather than completeness:
+
+- **dev**: `jq`, `ripgrep` (`rg`), `httpie` (`http`), `zip`/`unzip`, `sqlite3`, `dnsutils` (`dig`), `openssl`, `less`
+- **network / recon**: `nmap`, `netcat-openbsd` (`nc`), `whois`, `traceroute`, `nikto`
+- `sqlmap`, from PyPI, in its own venv at `/opt/agent-tools` (never the system Python — Debian's PEP 668 refuses a bare `pip install` there anyway — and never
+  `agentd`'s own venv, so neither gets a dependency conflict from the other's needs)
+
+An admin extends this list without touching the Dockerfile: `AGENT_EXTRA_PACKAGES` in `.env` (space-separated apt package names) flows straight into the same
+`apt-get install` via a build arg (`docker-compose.yml`'s `agent.build.args`). It needs `docker compose build agent` to take effect — the image is immutable at
+runtime, which is the point: nothing baked in can be tampered with from inside a session.
+
+`cap_drop: [ALL]` means tools that want raw sockets degrade rather than fail outright — `nmap` without `CAP_NET_RAW` falls back to its unprivileged TCP-connect
+scan (`-sT`) automatically; this is normal, documented `nmap` behaviour, not a bug here, and is enough for port discovery and most version/NSE checks.
+
+### Layer 2 — the agent installs more at runtime, no root
+
+Baked-in coverage will always be incomplete; the agent decides for itself, mid-session, what else a task needs and installs it — without root, since the
+container never grants any. Three mechanisms, each already present in a stock Debian/Node image or added as one static binary, and each configured (in
+`spawn_env()`, `agentd/main.py`) to write only inside the session's own writable home (`agent_data` volume — the one place the read-only-rootfs container can
+write), never a system path uid 1000 cannot touch:
+
+- `pip install --user ...` → `~/.local/bin` (pip's own default; no extra configuration needed)
+- `npm install -g ...` → `~/.npm-global/bin`, via `NPM_CONFIG_PREFIX`
+- `micromamba create -n tools -c conda-forge ...` / `micromamba install -n tools ...` → `~/.micromamba/envs/tools/bin`, via `MAMBA_ROOT_PREFIX`. `micromamba`
+  itself is one static binary baked into the image (`/usr/local/bin/micromamba`, mamba-org's own bootstrap URL) — no conda, no root, no system package
+  manager involved in fetching it.
+
+All four self-install/baked bin directories are prepended to `PATH`, so anything placed there is callable by bare name right away — no second step, no shell
+restart. Two places set this, for a reason that only showed up once real commands were traced: `codex`'s shell tool runs every command as `/bin/bash -lc
+"..."` — a **login** shell — and Debian's stock `/etc/profile` unconditionally **overwrites** `PATH` for login shells before it sources `/etc/profile.d/*.sh`.
+So `spawn_env()` sets `PATH`/`MAMBA_ROOT_PREFIX`/`NPM_CONFIG_PREFIX` as the spawned process's own environment (covers anything that is not a login shell), and
+`agentd/Dockerfile` also bakes a fixed `/etc/profile.d/agent-tools.sh` that re-adds the same directories after that reset (covers the login shell, which is
+where it actually matters in practice). A PATH entry for a directory that does not exist yet is harmless — it is only resolved at the moment a command is
+looked up — so this works correctly before the agent has installed anything, and immediately after.
+
+### What this does not do
+
+No listening sockets, no inbound ports, no reverse-shell catchers: the agent container has no published ports and sits on the isolated `agentnet` network, so
+nothing outside Docker could reach a socket it opened anyway — raising that would need its own, separate decision about exposing a port, which has not been
+made. This section is tools the agent runs against things *it* connects out to, not things that connect in to it.
+
+### Tests
+
+`tests/test_agentd.py::test_self_installed_tools_land_in_the_sessions_own_folder_and_are_on_the_path` (the fake `app-server` reports its own `PATH`,
+`MAMBA_ROOT_PREFIX` and `NPM_CONFIG_PREFIX`, checked against the session's actual home directory). The apt/`sqlmap`/`micromamba` install steps themselves are
+not covered by this suite — there is no Docker daemon in the environment this was written in — and should be sanity-checked with a real `docker compose build
+agent` before this ships.
+
+## 27. A listener for the agent: a port the panel proxies in, on request
+
+§20 made `agent` deliberately unreachable from anywhere but the panel: no published port, no route but `agentnet`. That is right for commands the
+agent *initiates* (recon, `curl`, `git`), but it also means a capability some pentesting tasks genuinely need — catching an inbound connection,
+e.g. a reverse shell from an authorized target, or a webhook callback — had nowhere to land. This section is that one exception, made as
+narrow as the rest of the design allows it to be: **authorized testing only**, same as everywhere else in this panel.
+
+```
+outside world ──TCP:4444──> backend (published, host network) ──TCP:4444──> agent container (agentnet, no published port)
+                                    ↑ opened only by an explicit API call, for one session, one port, at a time
+```
+
+- **A fixed range, not a free-for-all.** `AGENT_LISTENER_PORTS` (`.env`, e.g. `4444-4450`) is both the range `docker-compose.yml` publishes on
+  `backend`'s own host ports *and* the range the API itself will open — the same variable, so they cannot drift apart. Empty = the feature is off
+  (`503` from every listener call); the ports stay published either way (nothing is bound to them until opened), so turning the feature off again
+  needs only the `.env` change, no rebuild.
+- **Opened per session, not per deploy.** `POST /api/agent/sessions/{id}/listener {port}` picks one port out of the range and starts an
+  `asyncio` TCP proxy in the **backend** process (`app/services/agent_listener.py`) between `0.0.0.0:<port>` (the host-published side) and
+  `agent:<port>` (the same port, reached over `agentnet` by the container's own Docker-DNS name — the one host this module will ever proxy to).
+  It is a dumb byte pipe both ways; it does not look inside the connection. `DELETE` closes it; `GET` reports it (also folded into
+  `AgentSessionOut.listener_port`, shown in the session's settings in the panel). One port per session at a time — opening a second closes the first.
+- **The agent, not the panel, listens.** The proxy does not create a socket inside the container: the agent itself has to bind that port
+  (`nc -lp 4444`, a short Python server, whatever the task calls for) with an ordinary shell command, same as any other command it runs. A
+  connection to the published port before that happens is accepted and closed at once (nothing to proxy to yet) — not left hanging.
+- **Ephemeral and self-closing.** All state is an in-memory `dict` in the one `uvicorn` process (`docker-compose.yml` runs no `--workers`); it does
+  not survive a restart, which is intentional — a listener is a short-lived, explicit action, not standing infrastructure. A listener nobody has
+  sent a byte through for `AGENT_LISTENER_IDLE_SECONDS` (default 1800) closes itself (`sweep_loop`, started in `app/main.py`'s lifespan); the
+  session's own deletion also closes its listener; shutdown closes all of them.
+- **What this still does not do.** The agent container itself remains exactly as isolated as §20 describes — this adds one proxied port on the
+  *panel's* host, not a published port on `agent`. Raw sockets, SYN scans and the like remain unavailable regardless (`cap_drop: [ALL]`, §26);
+  a listener only ever receives ordinary TCP, same as any service.
+
+### Tests
+
+`tests/test_agent_listener.py` (24): `port_range()` parsing, the actual byte-for-byte TCP pipe (against a stand-in "inside" server — two
+different loopback addresses stand in for the panel's host and the container, since one address cannot bind the same port twice), the
+nothing-listening-yet case, range/conflict/idempotency rules, the idle sweep, and the HTTP surface (ownership, 404 for someone else's session,
+422 outside the range, closing on session delete).

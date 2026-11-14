@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,7 @@ from app.bootstrap import run_bootstrap
 from app.core.config import settings
 from app.core import runtime_settings
 from app.core.db import SessionLocal
+from app.services import agent_listener
 
 log = logging.getLogger("oreshnik")
 
@@ -38,7 +40,12 @@ async def lifespan(_: FastAPI):
         # Typically: migrations have not run yet. Keep serving /api/health so the
         # problem is visible instead of crash-looping.
         log.exception("Bootstrap failed (have migrations been applied?)")
-    yield
+    sweep = asyncio.create_task(agent_listener.sweep_loop())
+    try:
+        yield
+    finally:
+        sweep.cancel()
+        await agent_listener.close_all()  # nothing is left listening on the host past this process's life
 
 
 app = FastAPI(
