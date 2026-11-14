@@ -425,7 +425,11 @@ export default function Agent() {
         />
       ) : (
         <div className="grid gap-5 lg:grid-cols-[18rem_1fr]">
-          <div className="space-y-2">
+          {/* `min-w-0` on every grid item: without it a CSS grid track sizes to its content's min-content width, so one long
+              unbroken line (a diff, a path, a command) in the chat makes this track — and the whole page — wider than the
+              viewport. `body` has `overflow-x: hidden`, so that overflow does not scroll; it is silently clipped off the right
+              edge instead, which looked like the chat running off the monitor. */}
+          <div className="min-w-0 space-y-2">
             {sessions.map((s) => (
               <motion.div key={s.id} layout>
                 <div
@@ -455,17 +459,19 @@ export default function Agent() {
             ))}
           </div>
           {current && (
-            <Chat
-              key={current.id}
-              session={current}
-              profileAvailable={current.llm_profile_id !== null}
-              initialDraft={draft?.sessionId === current.id ? draft.text : ""}
-              onChanged={refresh}
-              onForked={async (s) => {
-                await refresh();
-                setSelected(s.id);
-              }}
-            />
+            <div className="min-w-0">
+              <Chat
+                key={current.id}
+                session={current}
+                profileAvailable={current.llm_profile_id !== null}
+                initialDraft={draft?.sessionId === current.id ? draft.text : ""}
+                onChanged={refresh}
+                onForked={async (s) => {
+                  await refresh();
+                  setSelected(s.id);
+                }}
+              />
+            </div>
           )}
         </div>
       )}
