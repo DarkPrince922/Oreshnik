@@ -26,7 +26,7 @@ RUN set -eux; \
 WORKDIR /srv
 COPY requirements.txt .
 RUN python3 -m venv /opt/agentd && /opt/agentd/bin/pip install --no-cache-dir -r requirements.txt
-COPY main.py .
+COPY *.py ./
 
 # The image's own `node` user (uid 1000) runs everything; the volume is its to write.
 RUN mkdir -p /data/agent && chown node:node /data/agent

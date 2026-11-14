@@ -42,6 +42,10 @@ class AgentSession(Base):
     )
     llm_model: Mapped[str | None] = mapped_column(String(200), nullable=True)  # None = the profile's own default
     thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # Codex's own id; set by the first turn
+    # Settings of the session itself, editable between messages and applied to the next one:
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)           # its own system prompt (Codex «developer instructions»)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)  # how hard the model thinks; None = the model's default
+    approval_mode: Mapped[str] = mapped_column(String(8), default="auto")             # auto: no questions · ask: approve commands and file changes
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(default=False)
@@ -64,3 +68,19 @@ class AgentEvent(Base):
     kind: Mapped[str] = mapped_column(String(40))
     payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AgentLive(Base):
+    """What the agent is writing right now and has not finished: a message so far, a command's output so far, the turn's diff, the plan.
+
+    One row per such item, replaced as it grows and deleted when the item is finished (the finished item goes into `agent_events`). The page
+    shows these rows next to the history; they are not history, so they cost nothing once the turn is over.
+    """
+
+    __tablename__ = "agent_live"
+
+    session_id: Mapped[int] = mapped_column(ForeignKey("agent_sessions.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)   # the item's id, or "__diff__" / "__plan__"
+    payload: Mapped[dict] = mapped_column(JSON)
+    rev: Mapped[int] = mapped_column(Integer, default=0)               # +1 at every change: a reader sends only what changed
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

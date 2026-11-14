@@ -594,11 +594,11 @@ def _ops_fail_all_hosts(ops_run_id: int, note: str, *, status: OpsHostStatus = O
 
 
 @celery.task(name="oreshnik.agent_turn")
-def agent_turn(session_id: int, prompt: str) -> None:
-    """One message to the agent: stream the isolated container's events into the session's history."""
+def agent_turn(session_id: int, prompt: str, action: str = "message", extra: dict | None = None) -> None:
+    """One action of a session (a message, compact, shell command, review, revert): stream the isolated container's events into its history."""
     from app.services import agent as agent_service
 
-    agent_service.run_turn(SessionLocal, session_id, prompt)
+    agent_service.run_turn(SessionLocal, session_id, prompt, action, extra)
 
 
 @celery.task(name="oreshnik.reap_stale_agent_turns")
