@@ -47,15 +47,15 @@ const QUICK: { label: string; text: string; hint: string }[] = [
 
 function ToolButton({ icon, children, ...rest }: { icon: ReactNode; children: string; title: string; disabled?: boolean; onClick: () => void }) {
   return (
-    <Button className="h-9 px-3 text-[13px]" {...rest}>
-      {icon}
+    <Button className="group/tool h-9 px-3 text-[13px] hover:-translate-y-px hover:border-accent/40" {...rest}>
+      <span className="text-accent-soft transition-colors group-hover/tool:text-white">{icon}</span>
       {children}
     </Button>
   );
 }
 
 const AgentMark = () => (
-  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent/20 text-accent-soft" title="Агент">
+  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-accent/40 to-accent-glow/20 text-white shadow-[0_0_14px_-2px_rgba(124,92,255,0.6)] ring-1 ring-inset ring-white/10" title="Агент">
     <TerminalIcon />
   </span>
 );
@@ -196,8 +196,10 @@ function Chat({
       : "Что сделать?  !команда — выполнить самому · /goal /compact /review /undo /fork";
 
   return (
-    <Card className="flex h-[calc(100vh-9.5rem)] min-h-[44rem] flex-col">
-      <div className="flex flex-wrap items-start justify-between gap-3 px-5 pb-3 pt-4">
+    <Card className="relative flex h-[calc(100vh-9.5rem)] min-h-[44rem] flex-col overflow-hidden">
+      <span aria-hidden="true" className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-accent-soft/70 to-transparent" />
+      <span aria-hidden="true" className="pointer-events-none absolute -top-24 left-1/2 h-40 w-2/3 -translate-x-1/2 rounded-full bg-accent/10 blur-3xl" />
+      <div className="relative flex flex-wrap items-start justify-between gap-3 px-5 pb-3 pt-4">
         <div className="min-w-0 space-y-1.5">
           <h2 className="truncate text-lg font-semibold text-white">{current.title}</h2>
           <div className="flex flex-wrap gap-1.5 text-[11px]">
@@ -265,7 +267,12 @@ function Chat({
         className="flex-1 space-y-3 overflow-y-auto px-5 py-4"
       >
         {feed.length === 0 && state === "live" && (
-          <p className="pt-10 text-center text-sm text-slate-500">Напишите задачу — агент будет выполнять команды и править файлы в своём контейнере. Файлы сессии — по кнопке «Файлы».</p>
+          <div className="flex flex-col items-center gap-3 pt-12 text-center">
+            <span className="flex h-12 w-12 animate-float items-center justify-center rounded-2xl bg-gradient-to-br from-accent/40 to-accent-glow/20 text-white shadow-[0_0_30px_-4px_rgba(124,92,255,0.7)] ring-1 ring-inset ring-white/10">
+              <TerminalIcon className="h-6 w-6" />
+            </span>
+            <p className="max-w-md text-sm text-slate-400">Напишите задачу — агент будет выполнять команды и править файлы в своём контейнере. Файлы сессии — по кнопке «Файлы».</p>
+          </div>
         )}
         {blocks.map((block, i) => {
           if (block.type === "single" && isUserBlock(block)) return <FeedStep key={block.key} entry={block.entry} answer={answer} />;
@@ -294,7 +301,7 @@ function Chat({
       <form onSubmit={send} className="border-t border-white/5 px-4 pb-4 pt-2">
         <ErrorNote message={error} />
         {!profileAvailable && <p className="mb-2 text-xs text-signal-warn">Профиль LLM этой сессии удалён: создайте новую сессию.</p>}
-        <div className="mb-1.5 flex flex-wrap gap-0.5">
+        <div className="mb-2 flex flex-wrap gap-1.5">
           {QUICK.map((q) => (
             <button
               key={q.text}
@@ -303,15 +310,15 @@ function Chat({
               title={running ? "Пока агент работает, сообщение дополняет ход — команды недоступны" : q.hint}
               onClick={() => quick(q.text)}
               className={clsx(
-                "rounded-lg px-2 py-1.5 font-mono text-xs font-medium transition-colors hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent",
-                q.text === "!" ? "text-signal-ok" : "text-accent-soft"
+                "rounded-full border px-2.5 py-1 font-mono text-xs font-medium transition-all hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0",
+                q.text === "!" ? "border-signal-ok/25 bg-signal-ok/[0.07] text-signal-ok hover:bg-signal-ok/15" : "border-accent/25 bg-accent/[0.07] text-accent-soft hover:bg-accent/15"
               )}
             >
               {q.label}
             </button>
           ))}
         </div>
-        <div className="flex items-end gap-2 rounded-2xl border border-white/[0.12] bg-ink-800/80 py-2 pl-3.5 pr-2 transition-colors focus-within:border-accent/50">
+        <div className="flex items-end gap-2 rounded-2xl border border-white/[0.12] bg-ink-800/80 py-2 pl-3.5 pr-2 transition-all focus-within:border-accent/60 focus-within:shadow-[0_0_0_4px_rgba(124,92,255,0.12),0_10px_40px_-12px_rgba(124,92,255,0.5)]">
           <textarea
             ref={composerBox}
             value={text}
@@ -424,7 +431,10 @@ export default function Agent() {
       <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1.5">
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-semibold tracking-tight text-white">Агент</h1>
+            <span aria-hidden="true" className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-glow text-white shadow-[0_8px_24px_-8px_rgba(124,92,255,0.8)]">
+              <TerminalIcon className="h-5 w-5" />
+            </span>
+            <h1 className="bg-gradient-to-r from-white to-accent-soft bg-clip-text text-2xl font-semibold tracking-tight text-transparent">Агент</h1>
             {health && (
               <Badge tone={health.ok ? "ok" : "bad"}>
                 <span className={clsx("h-1.5 w-1.5 rounded-full", health.ok ? "bg-signal-ok" : "bg-signal-bad")} />

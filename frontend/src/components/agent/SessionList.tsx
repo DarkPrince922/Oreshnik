@@ -20,15 +20,17 @@ function SessionCard({ session: s, active, onSelect, onRemove }: { session: Agen
   return (
     <div
       className={clsx(
-        "group relative rounded-2xl border transition-colors",
-        active ? "border-accent/50 bg-accent/[0.12]" : failed ? "border-signal-bad/30 bg-ink-900/60 hover:bg-white/[0.04]" : "border-white/[0.08] bg-ink-900/60 hover:bg-white/[0.04]"
+        "group relative rounded-2xl border transition-all duration-200",
+        !active && "hover:-translate-y-px",
+        active ? "border-accent/50 bg-gradient-to-br from-accent/[0.20] to-accent/[0.05] shadow-[0_10px_30px_-14px_rgba(124,92,255,0.8)]" : failed ? "border-signal-bad/30 bg-ink-900/60 hover:bg-white/[0.04]" : "border-white/[0.08] bg-ink-900/60 hover:bg-white/[0.04]"
       )}
     >
       <button type="button" className="flex w-full flex-col gap-2 px-3.5 py-3 text-left" onClick={onSelect} aria-current={active ? "true" : undefined}>
         <span className="flex items-center gap-2">
-          <span
-            className={clsx("h-2 w-2 shrink-0", failed && !running ? "rounded-sm bg-signal-bad" : "rounded-full", running ? "bg-signal-ok shadow-[0_0_0_4px_rgba(61,220,151,0.18)]" : !failed && "bg-slate-500")}
-          />
+          <span className="relative flex h-2 w-2 shrink-0">
+            {running && <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-signal-ok" />}
+            <span className={clsx("relative h-2 w-2", failed && !running ? "rounded-sm bg-signal-bad" : "rounded-full", running ? "bg-signal-ok" : !failed && "bg-slate-500")} />
+          </span>
           <span className={clsx("min-w-0 flex-1 truncate text-sm font-semibold", active ? "text-white" : "text-slate-100")}>{s.title}</span>
           {/* the same place holds the delete button while the card is hovered */}
           <span className={clsx("shrink-0 text-[11px]", running ? "text-signal-ok" : failed ? "text-signal-bad group-hover:invisible" : "text-slate-400 group-hover:invisible")}>

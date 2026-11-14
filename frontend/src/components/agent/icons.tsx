@@ -28,3 +28,6 @@ export const MinusIcon = (p: P) => <Icon {...p} strokeWidth={2.2}><path d="M7 12
 export const ClockIcon = (p: P) => <Icon {...p} strokeWidth={2}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></Icon>;
 export const ChevronLeftIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="m15 6-6 6 6 6" /></Icon>;
 export const ChevronRightIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="m9 6 6 6-6 6" /></Icon>;
+export const GaugeIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="M4 16a8 8 0 1 1 16 0" /><path d="m12 16 4-5" /></Icon>;
+export const CoinsIcon = (p: P) => <Icon {...p} strokeWidth={2}><ellipse cx="12" cy="7" rx="7" ry="3" /><path d="M5 7v5c0 1.7 3.1 3 7 3s7-1.3 7-3V7M5 12v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5" /></Icon>;
+export const TurnsIcon = (p: P) => <Icon {...p} strokeWidth={2}><path d="M4 12a8 8 0 0 1 14-5l2 2M20 12a8 8 0 0 1-14 5l-2-2" /><path d="M20 4v5h-5M4 20v-5h5" /></Icon>;

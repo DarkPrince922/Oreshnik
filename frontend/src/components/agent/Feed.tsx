@@ -129,7 +129,7 @@ export function FeedStep({ entry, answer, grouped = false }: { entry: FeedEntry;
   switch (entry.type) {
     case "user":
       return (
-        <div className={clsx("ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border px-4 py-2.5 text-sm text-slate-100", entry.steer ? "border-white/10 bg-white/5" : "border-transparent bg-accent-glow text-white")}>
+        <div className={clsx("ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md border px-4 py-2.5 text-sm text-slate-100", entry.steer ? "border-white/10 bg-white/5" : "border-transparent bg-gradient-to-br from-accent to-accent-glow text-white shadow-[0_8px_24px_-12px_rgba(124,92,255,0.8)]")}>
           {entry.steer && <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-slate-500">добавлено по ходу</span>}
           {entry.text}
         </div>
