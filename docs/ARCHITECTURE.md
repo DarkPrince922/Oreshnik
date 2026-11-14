@@ -1193,7 +1193,7 @@ that already governs Strix scans.
 An apt-get install, Debian bookworm's main repo only, no backports, chosen for dependable availability rather than completeness:
 
 - **dev**: `jq`, `ripgrep` (`rg`), `httpie` (`http`), `zip`/`unzip`, `sqlite3`, `dnsutils` (`dig`), `openssl`, `less`
-- **network / recon**: `nmap`, `netcat-openbsd` (`nc`), `whois`, `traceroute`, `nikto`
+- **network / recon**: `nmap`, `netcat-openbsd` (`nc`), `whois`, `traceroute`; `nikto` from its own repository (it is not in bookworm's main repo), best effort — the image still builds without it
 - `sqlmap`, from PyPI, in its own venv at `/opt/agent-tools` (never the system Python — Debian's PEP 668 refuses a bare `pip install` there anyway — and never
   `agentd`'s own venv, so neither gets a dependency conflict from the other's needs)
 

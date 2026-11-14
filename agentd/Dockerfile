@@ -9,7 +9,8 @@ ARG CODEX_VERSION=0.169.0
 # Baseline toolset for a coding/testing agent — authorized security testing and development only, never against systems you do not
 # own or have written permission to test (see docs/ARCHITECTURE.md §26). Deliberately apt-only, bookworm's main repo, no backports:
 #   dev:     jq, ripgrep (rg), httpie (http), zip/unzip, sqlite3, dnsutils (dig), openssl, less
-#   network: nmap, netcat-openbsd (nc), whois, traceroute, nikto
+#   network: nmap, netcat-openbsd (nc), whois, traceroute
+# (nikto is NOT in bookworm's main repo — "Unable to locate package nikto" — so it is installed from its own repository below.)
 # An admin can ADD more apt packages without touching this file — only AGENT_EXTRA_PACKAGES in .env, which goes straight into
 # the same `apt-get install` below and needs a rebuild (`docker compose build agent`) to take effect, nothing lighter: the image
 # is immutable at runtime (read-only root filesystem, cap_drop: [ALL], no root for the agent process).
@@ -18,9 +19,22 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip git curl ca-certificates openssh-client build-essential \
         jq ripgrep httpie zip unzip sqlite3 dnsutils openssl less \
-        nmap netcat-openbsd whois traceroute nikto \
+        nmap netcat-openbsd whois traceroute \
+        perl libnet-ssleay-perl \
         ${AGENT_EXTRA_PACKAGES} \
     && rm -rf /var/lib/apt/lists/*
+
+# nikto: a Perl script, run from a checkout of its own repository (perl and its TLS module come from apt above). An optional
+# tool must not break the image: if the checkout or the self-test fails, the build goes on without it and says so.
+RUN if git clone --depth 1 https://github.com/sullo/nikto /opt/nikto \
+        && printf '#!/bin/sh\nexec perl /opt/nikto/program/nikto.pl "$@"\n' > /usr/local/bin/nikto \
+        && chmod +x /usr/local/bin/nikto \
+        && rm -rf /opt/nikto/.git \
+        && nikto -Version >/dev/null; then \
+        echo "nikto installed"; \
+    else \
+        rm -rf /opt/nikto /usr/local/bin/nikto; echo "WARNING: nikto was not installed (the agent can still get it itself at runtime)" >&2; \
+    fi
 
 # A couple of security/dev CLIs that are not Debian packages but install cleanly from PyPI: kept in their OWN venv, never the
 # system Python and never agentd's own venv (/opt/agentd below), so neither gets a dependency conflict from the other's needs.
