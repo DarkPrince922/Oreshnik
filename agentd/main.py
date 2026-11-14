@@ -536,6 +536,10 @@ async def _events(session: Session, turn: Turn, queue: "asyncio.Queue[str | None
     session.attached = True
     try:
         if turn.action == "revert":
+            while not queue.empty():  # what was queued first (the thread being attached) comes first
+                first = queue.get_nowait()
+                if first and first != "__done__":
+                    yield first + "\n"
             yield json.dumps({"type": "thread.reverted"}) + "\n"
             finished = True
         while not finished:

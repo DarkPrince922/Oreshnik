@@ -19,8 +19,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _key() -> str:
+def new_session_key() -> str:
     return "s" + secrets.token_hex(12)
+
+
+_key = new_session_key
 
 
 class AgentSessionStatus(str, enum.Enum):

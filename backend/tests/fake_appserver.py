@@ -121,6 +121,10 @@ def run_turn(thread: str, turn_id: str, text: str, params: dict) -> None:
             notify("turn/diff/updated", {"threadId": thread, "turnId": turn_id, "diff": "diff --git a/hello.txt b/hello.txt\nnew file mode 100644\n--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1,2 @@\n+hi\n+there\n"})
         else:
             item_completed(thread, turn_id, {**item, "status": "declined"})
+    elif "bigout" in text:
+        item = {"type": "commandExecution", "id": "big1", "command": "/bin/bash -lc yes", "cwd": cwd, "status": "inProgress", "commandActions": [{"type": "unknown", "command": "yes"}]}
+        item_started(thread, turn_id, item)
+        item_completed(thread, turn_id, {**item, "status": "completed", "aggregatedOutput": "y\n" * 50000, "exitCode": 0})
     elif "plan" in text:
         notify("turn/plan/updated", {"threadId": thread, "turnId": turn_id, "explanation": None,
                                      "plan": [{"step": "Прочитать код", "status": "completed"}, {"step": "Написать тест", "status": "inProgress"}, {"step": "Починить", "status": "pending"}]})

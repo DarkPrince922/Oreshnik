@@ -1,67 +1,50 @@
-"""«Агент»: the panel's chat API, the worker's turn, and agentd — together, against a fake Codex (tests/fake_codex.py).
+"""«Агент»: the panel's chat API, the worker's turn, and the whole path to agentd — against a stand-in for `codex app-server` that speaks the
+protocol the way the real Codex 0.169 did in the recorded exchanges (tests/fake_appserver.py), served by a real agentd (see test_agentd.py)."""
 
-The real Codex 0.169 was exercised separately against a fake Responses endpoint: provider/model through `-c`, the key
-read from the env var named in `env_key`, `resume <thread_id>` carrying the history. What these tests pin is everything
-around it.
-"""
-
-import importlib.util
 import json
-import sys
+import threading
 import time
-from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.core.crypto import encrypt
 from app.core.db import SessionLocal
-from app.models import LLMProfile, Provider
-from app.models.agent import AgentEvent, AgentSession, AgentSessionStatus
+from app.models import Finding, LLMProfile, Provider, Role, ScanStatus
+from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus
 from app.services import agent as agent_service
-from tests.conftest import auth_headers, make_profile, make_user
-
-AGENTD_PATH = Path(__file__).resolve().parents[2] / "agentd" / "main.py"
-TOKEN = "agent-test-token"
-
-
-@pytest.fixture
-def agentd(monkeypatch, tmp_path):
-    spec = importlib.util.spec_from_file_location("agentd_main", AGENTD_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    fake = Path(__file__).parent / "fake_codex.py"
-    monkeypatch.setattr(module, "CODEX_BIN", str(fake))
-    monkeypatch.setattr(module, "DATA_DIR", tmp_path / "agent-data")
-    monkeypatch.setattr(module, "TOKEN", TOKEN)
-    monkeypatch.setattr(module, "STOP_GRACE_SECONDS", 3.0)
-    monkeypatch.setattr(module, "PING_SECONDS", 0.2)
-    return module
+from tests.conftest import auth_headers, make_profile, make_runner, make_scan, make_user
+from tests.test_agentd import TOKEN, agentd  # noqa: F401  (the `agentd` fixture)
 
 
 @pytest.fixture
 def wired(agentd, monkeypatch):
-    """The panel talking to the real agentd app (in-process) that runs the fake Codex."""
+    """The panel talking to the real agentd that runs the stand-in Codex."""
     monkeypatch.setattr(settings, "agent_token", TOKEN)
-    monkeypatch.setattr(
-        agent_service, "agent_client",
-        lambda timeout=10.0: TestClient(agentd.app, base_url="http://agent", headers={"Authorization": f"Bearer {TOKEN}"}),
-    )
+    monkeypatch.setattr(settings, "agent_url", agentd.url)
     return agentd
 
 
-def openai_profile(user_id: int, name: str = "oa") -> LLMProfile:
+def openai_profile(user_id: int, name: str = "oa", models=()) -> LLMProfile:
     with SessionLocal() as db:
-        p = LLMProfile(user_id=user_id, name=name, provider=Provider.openai, model="gpt-5", api_key_enc=encrypt("sk-live-key-9999"), api_key_hint="…9999")
+        p = LLMProfile(user_id=user_id, name=name, provider=Provider.openai, model="gpt-5", models=list(models), api_key_enc=encrypt("sk-live-key-9999"), api_key_hint="…9999")
         db.add(p)
         db.commit()
         db.refresh(p)
         return p
 
 
-def op_user(client, email="op@example.com"):
-    user = make_user(email)
+def custom_gateway(user_id: int, name: str = "gw") -> LLMProfile:
+    with SessionLocal() as db:
+        p = LLMProfile(user_id=user_id, name=name, provider=Provider.custom, model="m", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+        return p
+
+
+def op_user(client, email="op@example.com", role: Role = Role.operator):
+    user = make_user(email, role=role)
     return user, auth_headers(client, email)
 
 
@@ -70,34 +53,74 @@ def events(session_id: int) -> list[AgentEvent]:
         return list(db.query(AgentEvent).filter(AgentEvent.session_id == session_id).order_by(AgentEvent.seq))
 
 
+def kinds_of(session_id: int) -> list[str]:
+    return [e.kind for e in events(session_id)]
+
+
 def load(session_id: int) -> AgentSession:
     with SessionLocal() as db:
         return db.get(AgentSession, session_id)
 
 
-def new_session(client, headers, profile) -> dict:
-    r = client.post("/api/agent/sessions", json={"llm_profile_id": profile.id}, headers=headers)
+def new_session(client, headers, profile, **over) -> dict:
+    r = client.post("/api/agent/sessions", json={"llm_profile_id": profile.id, **over}, headers=headers)
     assert r.status_code == 201, r.text
     return r.json()
 
 
-def wait_idle(session_id: int, timeout: float = 15.0) -> AgentSession:
+def wait_for(predicate, timeout: float = 20.0, what: str = "the condition"):
     end = time.time() + timeout
     while time.time() < end:
-        s = load(session_id)
-        if s.status == AgentSessionStatus.idle:
-            return s
+        value = predicate()
+        if value:
+            return value
         time.sleep(0.05)
-    raise AssertionError("session did not become idle")
+    raise AssertionError(f"{what} never came")
 
 
-# ── API ────────────────────────────────────────────────────────────────────
+def wait_idle(session_id: int, timeout: float = 25.0) -> AgentSession:
+    return wait_for(lambda: (s := load(session_id)).status == AgentSessionStatus.idle and s, timeout, "idle")
 
-def test_disabled_without_token(client, monkeypatch):
+
+def send(client, headers, session_id: int, text: str, path: str = "messages"):
+    return client.post(f"/api/agent/sessions/{session_id}/{path}", json={"text": text}, headers=headers)
+
+
+class Bg:
+    """A request in a background thread: the worker runs inline here, so a message request lasts as long as the turn."""
+
+    def __init__(self, fn):
+        self.result = None
+        self.thread = threading.Thread(target=lambda: setattr(self, "result", fn()), daemon=True)
+        self.thread.start()
+
+    def join(self, timeout: float = 30.0):
+        self.thread.join(timeout)
+        assert not self.thread.is_alive(), "the request did not end"
+        return self.result
+
+
+def start_turn(client, headers, session_id: int, text: str) -> Bg:
+    return Bg(lambda: send(client, headers, session_id, text))
+
+
+def has_event(session_id: int, kind: str):
+    return lambda: next((e for e in events(session_id) if e.kind == kind), None)
+
+
+def report(client, headers, session_id: int) -> dict:
+    send(client, headers, session_id, "report")
+    wait_idle(session_id)
+    last = [e for e in events(session_id) if e.kind == "item.completed" and e.payload["item"]["type"] == "agent_message"][-1]
+    return json.loads(last.payload["item"]["text"])
+
+
+# ── access ──────────────────────────────────────────────────────────────────
+
+def test_disabled_without_a_token(client, monkeypatch):
     monkeypatch.setattr(settings, "agent_token", "")
     user, h = op_user(client)
-    r = client.post("/api/agent/sessions", json={"llm_profile_id": openai_profile(user.id).id}, headers=h)
-    assert r.status_code == 503
+    assert client.post("/api/agent/sessions", json={"llm_profile_id": openai_profile(user.id).id}, headers=h).status_code == 503
     assert client.get("/api/agent/health", headers=h).json()["ok"] is False
 
 
@@ -106,7 +129,7 @@ def test_viewer_and_anonymous_are_refused(client, viewer):
     assert client.get("/api/agent/sessions").status_code == 401
 
 
-def test_claude_profile_is_refused_with_a_reason(client, wired):
+def test_a_claude_profile_is_refused_with_a_reason(client, wired):
     user, h = op_user(client)
     r = client.post("/api/agent/sessions", json={"llm_profile_id": make_profile(user.id).id}, headers=h)
     assert r.status_code == 422 and "Responses" in r.json()["detail"]
@@ -117,180 +140,90 @@ def test_someone_elses_profile_and_session_are_invisible(client, wired):
     b, hb = op_user(client, "b@example.com")
     assert client.post("/api/agent/sessions", json={"llm_profile_id": openai_profile(a.id).id}, headers=hb).status_code == 404
     s = new_session(client, ha, openai_profile(a.id, "mine"))
-    assert client.get(f"/api/agent/sessions/{s['id']}", headers=hb).status_code == 404
-    assert client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "hi"}, headers=hb).status_code == 404
+    sid = s["id"]
+    for method, path, body in (("GET", "", None), ("PATCH", "", {"title": "x"}), ("POST", "/messages", {"text": "hi"}), ("POST", "/steer", {"text": "hi"}),
+                               ("POST", "/stop", None), ("POST", "/fork", None), ("POST", "/actions", {"action": "compact"}), ("GET", "/events", None),
+                               ("POST", "/approvals/1", {"decision": "accept"}), ("GET", "/files", None), ("GET", "/files/content?path=a", None),
+                               ("GET", "/files/download?path=a", None), ("PUT", "/files?path=a", None), ("GET", "/files/archive", None),
+                               ("POST", "/files/clone", {"url": "https://h/o/r"}), ("DELETE", "", None)):
+        r = client.request(method, f"/api/agent/sessions/{sid}{path}", json=body, headers=hb)
+        assert r.status_code == 404, (method, path, r.status_code)
     assert client.get("/api/agent/sessions", headers=hb).json() == []
 
 
-def test_a_turn_stores_the_whole_conversation_and_resumes_the_thread(client, wired):
+# ── a turn ──────────────────────────────────────────────────────────────────
+
+def test_a_turn_stores_the_conversation_and_the_thread_goes_on(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    r = client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "first"}, headers=h)
-    assert r.status_code == 202
+    assert send(client, h, s["id"], "first").status_code == 202
     first = wait_idle(s["id"])
-    assert first.thread_id and first.turn_count == 1 and first.last_error is None
-    assert first.title == "first"  # the title is the first message
-    kinds = [e.kind for e in events(s["id"])]
-    assert kinds[0] == "user" and "thread.started" in kinds and kinds[-1] == "turn.completed"
-    assert [e.seq for e in events(s["id"])] == list(range(len(kinds)))
-
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "second"}, headers=h)
+    assert first.thread_id and first.turn_count == 1 and first.last_error is None and first.title == "first"
+    got = events(s["id"])
+    assert [e.seq for e in got] == list(range(len(got)))
+    assert [e.kind for e in got] == ["user", "turn.started", "item.completed", "turn.completed"]
+    assert got[0].payload == {"text": "first"} and got[2].payload["item"]["text"] == "Привет! Это ответ."
+    done = got[3].payload
+    assert done["status"] == "completed" and done["usage"]["input_tokens"] > 0 and done["usage"]["output_tokens"] > 0
+    send(client, h, s["id"], "second")
     second = wait_idle(s["id"])
-    assert second.thread_id == first.thread_id  # same Codex thread: `resume <id>` was used
-    assert second.turn_count == 2
-    texts = [e.payload["item"]["text"] for e in events(s["id"]) if e.kind == "item.completed" and e.payload["item"]["type"] == "agent_message"]
-    assert texts == ["echo: first", "echo: second"]
+    assert second.thread_id == first.thread_id and second.turn_count == 2
 
 
-def test_what_codex_is_given(client, wired):
-    """Provider, model and key reach Codex the way the real one needs them; nothing of the panel does."""
+def test_the_api_key_never_reaches_the_history(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "report"}, headers=h)
-    wait_idle(s["id"])
-    report = json.loads([e for e in events(s["id"]) if e.kind == "item.completed"][-1].payload["item"]["text"])
-    argv = report["argv"]
-    assert argv[0] == "exec" and "--json" in argv and "--dangerously-bypass-approvals-and-sandbox" in argv
-    assert 'model="gpt-5"' in argv and 'model_provider="oreshnik"' in argv
-    assert any(a.startswith("model_providers.oreshnik=") and 'base_url = "https://api.openai.com/v1"' in a and 'wire_api = "responses"' in a for a in argv)
-    assert argv[-2:] == ["--", "report"]
-    assert report["key_env"] == "[ключ скрыт]"  # the process did get the key (that is what was redacted)
-    assert report["leaked"] == []
-    assert Path(report["codex_home"]).is_dir() and report["cwd"].endswith("/work")
-    # the key is never stored in the history
+    info = report(client, h, s["id"])
+    assert info["key_env"] == "[ключ скрыт]"  # the process did get the key: that is what was redacted
     assert "sk-live-key-9999" not in json.dumps([e.payload for e in events(s["id"])])
 
 
-def test_custom_profile_uses_its_own_base_url(client, wired, monkeypatch):
-    monkeypatch.setattr(settings, "agent_response_fix", False)  # with the proxy on, Codex is given the proxy's address (tested below)
+def test_what_codex_is_given_comes_from_the_session(client, wired):
     user, h = op_user(client)
-    with SessionLocal() as db:
-        p = LLMProfile(user_id=user.id, name="gw", provider=Provider.custom, model="my/model", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
-        db.add(p)
-        db.commit()
-        db.refresh(p)
-    s = new_session(client, h, p)
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "report"}, headers=h)
-    wait_idle(s["id"])
-    report = json.loads([e for e in events(s["id"]) if e.kind == "item.completed"][-1].payload["item"]["text"])
-    assert any('base_url = "http://gw.internal/v1"' in a for a in report["argv"]) and 'model="my/model"' in report["argv"]
+    s = new_session(client, h, openai_profile(user.id, models=["gpt-5", "o3"]), llm_model="o3", instructions="Всегда кратко.", reasoning_effort="low", approval_mode="ask")
+    seen = report(client, h, s["id"])["seen"]
+    assert seen["model"] == "o3" and seen["developerInstructions"] == "Всегда кратко." and seen["effort"] == "low" and seen["approvalPolicy"] == "untrusted"
+    assert seen["sandbox"] == "danger-full-access" and seen["method"] == "thread/start"
 
 
-def test_a_prompt_that_looks_like_an_option_stays_a_prompt(client, wired):
+def test_a_big_command_output_is_cut_before_it_is_stored(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "--help"}, headers=h)
+    send(client, h, s["id"], "bigout")
     wait_idle(s["id"])
-    assert [e.payload["item"]["text"] for e in events(s["id"]) if e.kind == "item.completed" and e.payload["item"]["type"] == "agent_message"] == ["echo: --help"]
+    out = next(e.payload["item"]["aggregated_output"] for e in events(s["id"]) if e.kind == "item.completed")
+    assert len(out) < 21_000 and "обрезано" in out
 
 
 def test_a_failed_turn_is_reported_and_the_chat_stays_usable(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "fail"}, headers=h)
+    send(client, h, s["id"], "fail")
     done = wait_idle(s["id"])
-    assert done.last_error == "boom"
-    assert events(s["id"])[-1].kind == "turn.error"
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "again"}, headers=h)
+    assert done.last_error == "model exploded" and kinds_of(s["id"])[-1] == "turn.error"
+    send(client, h, s["id"], "again")
     assert wait_idle(s["id"]).last_error is None
 
 
-def test_a_second_message_while_running_is_refused(client, wired):
+def test_a_crashing_codex_is_reported_and_the_next_message_works(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    with SessionLocal() as db:  # a turn in progress
-        db.get(AgentSession, s["id"]).status = AgentSessionStatus.running
-        db.commit()
-    assert client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "x"}, headers=h).status_code == 409
-    assert client.delete(f"/api/agent/sessions/{s['id']}", headers=h).status_code == 409
-    assert events(s["id"]) == []  # the refused message left no trace
+    send(client, h, s["id"], "crash")
+    assert "завершился" in wait_idle(s["id"]).last_error
+    send(client, h, s["id"], "again")
+    assert wait_idle(s["id"]).last_error is None
 
 
-@pytest.fixture
-def live(agentd, monkeypatch):
-    """agentd served by a real uvicorn on a local port, reached over real HTTP: the only way to see events *while* a turn runs."""
-    import socket
-    import threading
-
-    import uvicorn
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(agentd.app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.time() + 10
-    while not server.started and time.time() < deadline:
-        time.sleep(0.05)
-    monkeypatch.setattr(settings, "agent_token", TOKEN)
-    monkeypatch.setattr(settings, "agent_url", f"http://127.0.0.1:{port}")
-    yield agentd
-    server.should_exit = True
-    thread.join(10)
-
-
-def test_stop_interrupts_a_running_turn(client, live):
-    import threading
-
-    user, h = op_user(client)
-    s = new_session(client, h, openai_profile(user.id))
-    sent = threading.Thread(target=lambda: client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "hang"}, headers=h))
-    sent.start()  # the worker runs inline here, so the message request lasts as long as the turn
-    deadline = time.time() + 10
-    while time.time() < deadline and not any(e.kind == "item.started" for e in events(s["id"])):
-        time.sleep(0.05)
-    assert any(e.kind == "item.started" for e in events(s["id"])), "the turn never started"
-    assert load(s["id"]).status == AgentSessionStatus.running
-    assert client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h).json()["cancel_requested"] is True
-    sent.join(30)
-    done = wait_idle(s["id"])
-    assert done.last_error is None and done.cancel_requested is False
-    assert events(s["id"])[-1].kind == "turn.stopped"
-
-
-def test_a_silent_long_command_keeps_the_turn_alive(client, live, monkeypatch):
-    """No events for a while must not look like a lost worker: agentd pings and the worker moves the heartbeat."""
-    import threading
-
-    from app.worker.tasks import reap_stale_agent_turns
-
-    monkeypatch.setattr(settings, "agent_stale_seconds", 30)
-    user, h = op_user(client)
-    s = new_session(client, h, openai_profile(user.id))
-    sent = threading.Thread(target=lambda: client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "hang"}, headers=h))
-    sent.start()
-    deadline = time.time() + 10
-    while time.time() < deadline and not any(e.kind == "item.started" for e in events(s["id"])):
-        time.sleep(0.05)
-    before = load(s["id"]).heartbeat_at
-    time.sleep(0.8)  # several pings (PING_SECONDS = 0.2)
-    assert load(s["id"]).heartbeat_at > before
-    assert reap_stale_agent_turns() == 0
-    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
-    sent.join(30)
-
-
-def test_big_output_is_cut_before_it_is_stored(client, wired):
-    user, h = op_user(client)
-    s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "bigout"}, headers=h)
-    wait_idle(s["id"])
-    out = [e for e in events(s["id"]) if e.kind == "item.completed"][0].payload["item"]["aggregated_output"]
-    assert len(out) < 21_000 and "обрезано" in out
-
-
-def test_unreachable_agent_container_is_an_error_not_a_hang(client, monkeypatch):
+def test_an_unreachable_agent_container_is_an_error_not_a_hang(client, monkeypatch):
     monkeypatch.setattr(settings, "agent_token", TOKEN)
     monkeypatch.setattr(settings, "agent_url", "http://127.0.0.1:1")
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "hi"}, headers=h)
-    done = wait_idle(s["id"])
-    assert "Нет связи" in done.last_error
+    send(client, h, s["id"], "hi")
+    assert "Нет связи" in wait_idle(s["id"]).last_error
 
 
-def test_a_lost_worker_is_reaped(client, wired, monkeypatch):
+def test_a_lost_worker_is_reaped_and_what_it_was_writing_is_dropped(client, wired):
     from datetime import datetime, timedelta, timezone
 
     from app.worker.tasks import reap_stale_agent_turns
@@ -301,43 +234,123 @@ def test_a_lost_worker_is_reaped(client, wired, monkeypatch):
         row = db.get(AgentSession, s["id"])
         row.status = AgentSessionStatus.running
         row.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=settings.agent_stale_seconds + 5)
+        db.add(AgentLive(session_id=s["id"], key="m1", payload={"id": "m1", "type": "agent_message", "text": "half"}, rev=3))
         db.commit()
     assert reap_stale_agent_turns() == 1
     after = load(s["id"])
     assert after.status == AgentSessionStatus.idle and "Воркер потерян" in after.last_error
+    with SessionLocal() as db:
+        assert db.query(AgentLive).count() == 0
     assert reap_stale_agent_turns() == 0
 
 
-def test_delete_removes_session_and_history(client, wired, agentd):
+def test_a_message_while_a_turn_runs_is_refused_and_leaves_no_trace(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "hi"}, headers=h)
-    wait_idle(s["id"])
-    key = load(s["id"]).key
-    assert (agentd.DATA_DIR / key).is_dir()
-    assert client.delete(f"/api/agent/sessions/{s['id']}", headers=h).status_code == 204
-    assert not (agentd.DATA_DIR / key).exists() and events(s["id"]) == []
+    bg = start_turn(client, h, s["id"], "slow")
+    wait_for(has_event(s["id"], "turn.started"), what="the turn")
+    before = len(events(s["id"]))
+    assert send(client, h, s["id"], "x").status_code == 409
+    assert client.delete(f"/api/agent/sessions/{s['id']}", headers=h).status_code == 409
+    assert len(events(s["id"])) == before
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
 
 
-def test_websocket_replays_and_resumes(client, wired):
+# ── live view ───────────────────────────────────────────────────────────────
+
+def test_what_is_being_written_is_visible_live_and_gone_when_the_item_is_finished(client, wired):
     user, h = op_user(client)
     s = new_session(client, h, openai_profile(user.id))
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "hi"}, headers=h)
-    wait_idle(s["id"])
+    bg = start_turn(client, h, s["id"], "slow")
+
+    def live_text():
+        with SessionLocal() as db:
+            row = db.query(AgentLive).filter(AgentLive.session_id == s["id"], AgentLive.key == "m1").first()
+            return row.payload["text"] if row else None
+
+    first = wait_for(live_text, what="a live snapshot")
+    later = wait_for(lambda: (t := live_text()) and len(t) > len(first) and t, what="a longer snapshot")
+    assert later.startswith(first)
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
+    with SessionLocal() as db:
+        assert db.query(AgentLive).count() == 0
+
+
+def collect_frames(client, token, session_id, until, timeout=25.0):
+    """The frames the socket sends until `until(frame, all_frames)` holds. Read in a thread, so a frame that never comes fails the test
+    instead of blocking it (the thread ends when the socket closes with the session)."""
+    frames: list[dict] = []
+
+    def read():
+        try:
+            with client.websocket_connect(f"/api/agent/sessions/{session_id}/ws") as ws:
+                ws.send_text(json.dumps({"token": token, "from": 0}))
+                while True:
+                    frames.append(ws.receive_json())
+        except Exception:
+            pass
+
+    threading.Thread(target=read, daemon=True).start()
+    end = time.time() + timeout
+    while time.time() < end:
+        for index, frame in enumerate(list(frames)):
+            if until(frame, frames[: index + 1]):
+                return frames[: index + 1]
+        time.sleep(0.05)
+    raise AssertionError(f"the frame never came; got {[(f['type'], f.get('kind') or f.get('key')) for f in frames]}")
+
+
+def test_the_socket_sends_live_text_growing_and_then_the_finished_event(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
     token = h["Authorization"].split()[1]
-    total = len(events(s["id"]))
-    with client.websocket_connect(f"/api/agent/sessions/{s['id']}/ws") as ws:
-        ws.send_text(json.dumps({"token": token, "from": 0}))
-        assert ws.receive_json() == {"type": "status", "status": "idle"}
-        got = [ws.receive_json() for _ in range(total)]
-    assert [g["seq"] for g in got] == list(range(total)) and got[0]["kind"] == "user"
-    with client.websocket_connect(f"/api/agent/sessions/{s['id']}/ws") as ws:  # reconnect: only what was not seen
-        ws.send_text(json.dumps({"token": token, "from": total - 1}))
-        ws.receive_json()
-        assert ws.receive_json()["seq"] == total - 1
+    bg = start_turn(client, h, s["id"], "hello")
+    frames = collect_frames(client, token, s["id"], lambda f, all_: f["type"] == "event" and f["kind"] == "turn.completed")
+    bg.join()
+    assert frames[0] == {"type": "status", "status": "running"} or frames[0]["type"] == "status"
+    live = [f["payload"]["text"] for f in frames if f["type"] == "live" and f["key"] == "m1"]
+    assert all(a in b for a, b in zip(live, live[1:]))
+    assert any(f["type"] == "event" and f["kind"] == "item.completed" and f["payload"]["item"]["text"] == "Привет! Это ответ." for f in frames)
+    seqs = [f["seq"] for f in frames if f["type"] == "event"]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
-def test_websocket_rejects_a_bad_token_and_a_foreign_session(client, wired):
+def test_a_late_client_gets_the_history_and_what_is_being_written_now(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    token = h["Authorization"].split()[1]
+    bg = start_turn(client, h, s["id"], "slow")
+    wait_for(lambda: len(events(s["id"])) >= 2 and has_event(s["id"], "turn.started")(), what="the turn")
+    time.sleep(0.5)
+    frames = collect_frames(client, token, s["id"], lambda f, all_: any(x["type"] == "live" and x["key"] == "m1" for x in all_))
+    assert [f["kind"] for f in frames if f["type"] == "event"][:2] == ["user", "turn.started"]
+    assert any(f["type"] == "live" and f["key"] == "m1" and f["payload"]["text"].startswith("слово0") for f in frames)
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
+
+
+def test_the_socket_says_when_a_live_item_is_gone(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    token = h["Authorization"].split()[1]
+    bg = start_turn(client, h, s["id"], "slow")
+    watcher = Bg(lambda: collect_frames(client, token, s["id"], lambda f, all_: f["type"] == "live_end"))
+    wait_for(lambda: has_event(s["id"], "turn.started")() and _live_rows(s["id"]), what="an unfinished item")
+    time.sleep(0.6)  # the socket polls: let it see the item before the turn ends
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
+    frames = watcher.join()
+    assert any(f["type"] == "live" and f["key"] == "m1" for f in frames) and frames[-1] == {"type": "live_end", "key": "m1"}
+
+
+def _live_rows(session_id: int) -> int:
+    with SessionLocal() as db:
+        return db.query(AgentLive).filter(AgentLive.session_id == session_id).count()
+
+
+def test_the_socket_rejects_a_bad_token_and_a_foreign_session(client, wired):
     a, ha = op_user(client, "a@example.com")
     _, hb = op_user(client, "b@example.com")
     s = new_session(client, ha, openai_profile(a.id))
@@ -348,116 +361,390 @@ def test_websocket_rejects_a_bad_token_and_a_foreign_session(client, wired):
                 ws.receive_json()
 
 
-# ── agentd on its own ───────────────────────────────────────────────────────
+# ── questions to the user ──────────────────────────────────────────────────
 
-def turn_body(**kw):
-    body = {"session_key": "k1", "prompt": "hi", "model": "m", "base_url": "http://x/v1", "api_key": "secret-key", "timeout_seconds": 30}
-    body.update(kw)
-    return body
-
-
-def post_turn(agentd, **kw):
-    c = TestClient(agentd.app)
-    r = c.post("/turn", json=turn_body(**kw), headers={"Authorization": f"Bearer {TOKEN}"})
-    return r, [json.loads(line) for line in r.text.splitlines() if line.strip()]
-
-
-def test_agentd_needs_the_token(agentd):
-    c = TestClient(agentd.app)
-    assert c.post("/turn", json=turn_body()).status_code == 401
-    assert c.post("/turn", json=turn_body(), headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert c.post("/stop", json={"session_key": "k"}).status_code == 401
-    assert c.delete("/sessions/k").status_code == 401
+def test_approving_a_command_in_the_ask_mode(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), approval_mode="ask")
+    bg = start_turn(client, h, s["id"], "run a command")
+    asked = wait_for(has_event(s["id"], "approval.requested"), what="the question").payload
+    assert asked["approval"]["kind"] == "command" and asked["approval"]["command"] == "echo hi-from-agent"
+    assert not any(e.kind == "item.completed" and e.payload["item"]["type"] == "command_execution" for e in events(s["id"]))
+    assert client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "accept"}, headers=h).status_code == 204
+    bg.join()
+    got = events(s["id"])
+    assert any(e.kind == "approval.resolved" and e.payload["request_id"] == asked["request_id"] for e in got)
+    assert next(e.payload["item"] for e in got if e.kind == "item.completed" and e.payload["item"]["type"] == "command_execution")["status"] == "completed"
 
 
-def test_agentd_refuses_an_unset_token(agentd, monkeypatch):
-    monkeypatch.setattr(agentd, "TOKEN", "")
-    assert TestClient(agentd.app).post("/turn", json=turn_body(), headers={"Authorization": "Bearer "}).status_code == 401
+def test_declining_keeps_the_command_from_running(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), approval_mode="ask")
+    bg = start_turn(client, h, s["id"], "run a command")
+    asked = wait_for(has_event(s["id"], "approval.requested"), what="the question").payload
+    client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "decline"}, headers=h)
+    bg.join()
+    assert next(e.payload["item"] for e in events(s["id"]) if e.kind == "item.completed" and e.payload["item"]["type"] == "command_execution")["status"] == "declined"
 
 
-@pytest.mark.parametrize("kw", [{"session_key": "../etc"}, {"session_key": "a/b"}, {"thread_id": "x; rm -rf /"}, {"model": "a b"}, {"model": "--oss"}])
-def test_agentd_rejects_unsafe_identifiers(agentd, kw):
-    r, _ = post_turn(agentd, **kw)
-    assert r.status_code in (404, 422)
+def test_a_file_change_waits_for_approval_and_its_diff_is_kept(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), approval_mode="ask")
+    bg = start_turn(client, h, s["id"], "patch this")
+    asked = wait_for(has_event(s["id"], "approval.requested"), what="the question").payload
+    assert asked["approval"]["kind"] == "file"
+    client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "accept_session"}, headers=h)
+    bg.join()
+    got = {e.kind: e for e in events(s["id"])}
+    assert "+++ b/hello.txt" in got["turn.diff"].payload["diff"]
+    change = next(e.payload["item"] for e in events(s["id"]) if e.kind == "item.completed" and e.payload["item"]["type"] == "file_change")
+    assert change["changes"][0]["path"] == "hello.txt" and change["changes"][0]["diff"] == "hi\nthere\n"
 
 
-def test_agentd_ends_the_stream_with_an_exit_line_and_hides_the_key(agentd):
-    r, evs = post_turn(agentd, prompt="fail")
-    assert evs[-1]["type"] == "agentd.exit" and evs[-1]["code"] == 1
-    assert "secret-key" not in r.text
+def test_the_agent_can_ask_a_question_and_the_answer_reaches_it(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    bg = start_turn(client, h, s["id"], "ask me")
+    asked = wait_for(has_event(s["id"], "approval.requested"), what="the question").payload
+    assert asked["approval"]["kind"] == "input" and asked["approval"]["questions"][0]["options"][1]["label"] == "синий"
+    r = client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "answer", "answers": {"color": "синий"}}, headers=h)
+    assert r.status_code == 204
+    bg.join()
+    assert any(e.kind == "item.completed" and e.payload["item"].get("text") == "выбрано: синий" for e in events(s["id"]))
 
 
-def test_agentd_kills_a_turn_that_runs_too_long(agentd):
-    start = time.time()
-    _, evs = post_turn(agentd, prompt="hang", timeout_seconds=10)
-    assert evs[-1]["type"] == "agentd.exit" and evs[-1]["timed_out"] is True
-    assert any(e["type"] == "agentd.ping" for e in evs)
-    assert time.time() - start < 40
+def test_a_wrong_or_late_answer_is_refused(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), approval_mode="ask")
+    assert client.post(f"/api/agent/sessions/{s['id']}/approvals/1", json={"decision": "accept"}, headers=h).status_code == 404
+    assert client.post(f"/api/agent/sessions/{s['id']}/approvals/1", json={"decision": "maybe"}, headers=h).status_code == 422
+    bg = start_turn(client, h, s["id"], "run a command")
+    asked = wait_for(has_event(s["id"], "approval.requested"), what="the question").payload
+    assert client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "answer", "answers": {"a": "b"}}, headers=h).status_code == 422
+    client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "accept"}, headers=h)
+    bg.join()
+    assert client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "accept"}, headers=h).status_code == 404
 
 
-def test_toml_quoting_cannot_be_broken_out_of(agentd):
-    body = agentd.Turn(**turn_body(base_url='http://x/v1"\nwire_api = "evil', model="m"))
-    provider = next(a for a in agentd.build_argv(body) if a.startswith("model_providers.oreshnik="))
-    assert provider.count("\n") == 0 and '\\"' in provider
+# ── steering and stopping ───────────────────────────────────────────────────
+
+def test_an_instruction_can_be_added_to_the_turn_that_is_running(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    bg = start_turn(client, h, s["id"], "slow")
+    wait_for(has_event(s["id"], "turn.started"), what="the turn")
+    r = send(client, h, s["id"], "и ещё ура", "steer")
+    assert r.status_code == 200 and r.json()["status"] == "running"
+    bg.join()
+    got = events(s["id"])
+    assert [e.payload for e in got if e.kind == "user"] == [{"text": "slow"}, {"text": "и ещё ура", "steer": True}]
+    assert next(e.payload["item"]["text"] for e in got if e.kind == "item.completed").endswith("(учёл: и ещё ура)")
 
 
-# ── health: Codex must really start ─────────────────────────────────────────
-
-def script(tmp_path, body: str, name: str = "codex"):
-    path = tmp_path / name
-    path.write_text("#!/bin/sh\n" + body)
-    path.chmod(0o755)
-    return str(path)
+def test_steering_needs_a_running_turn(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert send(client, h, s["id"], "x", "steer").status_code == 409
+    assert send(client, h, s["id"], "   ", "steer").status_code == 422
 
 
-def test_health_is_ok_when_codex_starts(agentd, tmp_path, monkeypatch):
-    monkeypatch.setattr(agentd, "CODEX_BIN", script(tmp_path, "echo codex-cli 0.169.0\n"))
-    body = TestClient(agentd.app).get("/health").json()
-    assert body == {"ok": True, "codex": True, "codex_detail": "codex-cli 0.169.0"}
+def test_stop_ends_the_turn_and_says_so(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    bg = start_turn(client, h, s["id"], "slow")
+    wait_for(has_event(s["id"], "turn.started"), what="the turn")
+    assert client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h).json()["cancel_requested"] is True
+    bg.join()
+    done = load(s["id"])
+    assert done.status == AgentSessionStatus.idle and done.last_error is None and done.cancel_requested is False
+    assert kinds_of(s["id"])[-1] == "turn.stopped"
+    send(client, h, s["id"], "hello")
+    assert wait_idle(s["id"]).last_error is None
 
 
-def test_health_catches_a_launcher_whose_binary_is_missing(agentd, tmp_path, monkeypatch):
-    """The real failure seen after a build: `codex` is on the PATH, but its platform package was never installed."""
-    msg = "Error: Missing optional dependency @openai/codex-linux-x64. Reinstall Codex: npm install -g @openai/codex@latest"
-    monkeypatch.setattr(agentd, "CODEX_BIN", script(tmp_path, f"echo '{msg}' >&2\nexit 1\n"))
-    body = TestClient(agentd.app).get("/health").json()
-    assert body["codex"] is False and "Missing optional dependency" in body["codex_detail"]
+# ── settings of the session ─────────────────────────────────────────────────
+
+def test_the_settings_can_be_changed_between_messages(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    first = report(client, h, s["id"])
+    assert first["seen"]["approvalPolicy"] == "never" and first["seen"].get("developerInstructions") is None
+    r = client.patch(f"/api/agent/sessions/{s['id']}", json={"instructions": " Отвечай по-русски. ", "reasoning_effort": "high", "approval_mode": "ask", "title": "Новое имя"}, headers=h)
+    assert r.status_code == 200 and r.json()["instructions"] == "Отвечай по-русски." and r.json()["reasoning_effort"] == "high" and r.json()["title"] == "Новое имя"
+    second = report(client, h, s["id"])
+    assert second["seen"]["effort"] == "high" and second["seen"]["approvalPolicy"] == "untrusted" and second["seen"]["developerInstructions"] == "Отвечай по-русски."
+    assert second["pid"] != first["pid"] and second["seen"]["method"] == "thread/resume"  # a new system prompt needs a fresh process, on the same thread
+    cleared = client.patch(f"/api/agent/sessions/{s['id']}", json={"instructions": "", "reasoning_effort": ""}, headers=h).json()
+    assert cleared["instructions"] is None and cleared["reasoning_effort"] is None
 
 
-def test_health_reports_a_missing_binary(agentd, monkeypatch):
-    monkeypatch.setattr(agentd, "CODEX_BIN", "definitely-not-installed-codex")
-    body = TestClient(agentd.app).get("/health").json()
-    assert body["codex"] is False and "не найден" in body["codex_detail"]
+def test_effort_and_approval_changes_do_not_restart_the_process(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    first = report(client, h, s["id"])
+    client.patch(f"/api/agent/sessions/{s['id']}", json={"reasoning_effort": "low", "approval_mode": "ask"}, headers=h)
+    second = report(client, h, s["id"])
+    assert first["pid"] == second["pid"] and second["seen"]["effort"] == "low" and second["seen"]["approvalPolicy"] == "untrusted"
 
 
-def test_health_does_not_start_codex_on_every_poll(agentd, tmp_path, monkeypatch):
-    counter = tmp_path / "runs"
-    monkeypatch.setattr(agentd, "CODEX_BIN", script(tmp_path, f"echo x >> {counter}\necho v\n"))
-    client = TestClient(agentd.app)
-    for _ in range(3):
-        assert client.get("/health").json()["codex"] is True
-    assert len(counter.read_text().splitlines()) == 1
+@pytest.mark.parametrize("body", [{"reasoning_effort": "extreme"}, {"approval_mode": "yolo"}, {"instructions": "x" * 20_001}, {"title": ""}])
+def test_invalid_settings_are_refused(client, wired, body):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert client.patch(f"/api/agent/sessions/{s['id']}", json=body, headers=h).status_code == 422
 
 
-def test_the_panel_shows_why_codex_does_not_start(wired, tmp_path, monkeypatch):
-    monkeypatch.setattr(wired, "CODEX_BIN", script(tmp_path, "echo 'Missing optional dependency @openai/codex-linux-x64' >&2\nexit 1\n"))
-    health = agent_service.agent_health()
-    assert health["ok"] is False and "не запускается" in health["detail"] and "Missing optional dependency" in health["detail"]
+def test_settings_can_be_given_when_the_session_is_created(client, wired):
+    user, h = op_user(client)
+    r = client.post("/api/agent/sessions", json={"llm_profile_id": openai_profile(user.id).id, "approval_mode": "yolo"}, headers=h)
+    assert r.status_code == 422
+    s = new_session(client, h, openai_profile(user.id, "ok"), instructions="  ", reasoning_effort="")
+    assert s["instructions"] is None and s["reasoning_effort"] is None and s["approval_mode"] == "auto"
 
 
-def test_the_panel_says_the_agent_is_fine_when_codex_starts(wired, tmp_path, monkeypatch):
-    monkeypatch.setattr(wired, "CODEX_BIN", script(tmp_path, "echo codex-cli 0.169.0\n"))
-    assert agent_service.agent_health() == {"ok": True, "detail": "Агент на связи"}
+# ── compress, review, a command of your own, undo ─────────────────────────────
+
+def act(client, headers, session_id: int, **body):
+    return client.post(f"/api/agent/sessions/{session_id}/actions", json=body, headers=headers)
 
 
-# ── gateways refuse Codex's non-function tools ──────────────────────────────
-
-def report_argv(client, headers, profile) -> list[str]:
-    s = new_session(client, headers, profile)
-    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "report"}, headers=headers)
+def test_the_conversation_can_be_compressed(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    send(client, h, s["id"], "hello")
     wait_idle(s["id"])
-    return json.loads([e for e in events(s["id"]) if e.kind == "item.completed"][-1].payload["item"]["text"])["argv"]
+    assert act(client, h, s["id"], action="compact").status_code == 202
+    wait_idle(s["id"])
+    got = events(s["id"])
+    assert got[-4].kind == "action" and got[-4].payload == {"action": "compact"}
+    assert any(e.kind == "item.completed" and e.payload["item"]["type"] == "context_compaction" for e in got)
 
+
+def test_the_user_can_run_a_command_in_the_session(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert act(client, h, s["id"], action="shell").status_code == 422 and act(client, h, s["id"], action="shell", command="  ").status_code == 422
+    assert act(client, h, s["id"], action="shell", command="ls -la").status_code == 202
+    wait_idle(s["id"])
+    got = events(s["id"])
+    assert got[0].kind == "action" and got[0].payload == {"action": "shell", "command": "ls -la"}
+    item = next(e.payload["item"] for e in got if e.kind == "item.completed")
+    assert item["source"] == "userShell" and item["aggregated_output"] == "ran: ls -la\n"
+
+
+def test_the_changes_can_be_reviewed(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert act(client, h, s["id"], action="review").status_code == 202
+    wait_idle(s["id"])
+    assert events(s["id"])[0].payload == {"action": "review", "target": {"type": "uncommittedChanges"}}
+    reviews = [e.payload["item"] for e in events(s["id"]) if e.kind == "item.completed" and e.payload["item"]["type"] == "review_mode"]
+    assert [r["entered"] for r in reviews] == [True, False]
+    assert act(client, h, s["id"], action="review", target={"type": "baseBranch", "branch": "--bad"}).status_code in (202, 502, 422)  # refused by agentd or run: never a crash
+    wait_idle(s["id"])
+
+
+def test_the_last_turn_can_be_undone_one_after_another(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert act(client, h, s["id"], action="revert").status_code == 409  # nothing to undo yet
+    send(client, h, s["id"], "one")
+    wait_idle(s["id"])
+    send(client, h, s["id"], "two")
+    wait_idle(s["id"])
+    turns = [e.payload["turn_id"] for e in events(s["id"]) if e.kind == "turn.started"]
+    assert len(turns) == 2
+    assert act(client, h, s["id"], action="revert").status_code == 202
+    wait_idle(s["id"])
+    assert [e.payload for e in events(s["id"]) if e.kind == "thread.reverted"] == [{"turn_id": turns[1]}]
+    assert act(client, h, s["id"], action="revert").status_code == 202
+    wait_idle(s["id"])
+    assert [e.payload["turn_id"] for e in events(s["id"]) if e.kind == "thread.reverted"] == [turns[1], turns[0]]
+    assert act(client, h, s["id"], action="revert").status_code == 409  # everything is undone
+
+
+def test_nothing_can_be_started_while_a_turn_runs(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    bg = start_turn(client, h, s["id"], "slow")
+    wait_for(has_event(s["id"], "turn.started"), what="the turn")
+    for body in ({"action": "compact"}, {"action": "shell", "command": "ls"}, {"action": "review"}, {"action": "revert"}):
+        assert act(client, h, s["id"], **body).status_code == 409
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
+
+
+# ── a copy of the session ──────────────────────────────────────────────────────
+
+def test_a_fork_has_the_history_the_files_and_the_settings(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), instructions="Кратко.", approval_mode="ask")
+    bg = start_turn(client, h, s["id"], "patch this")
+    asked = wait_for(has_event(s["id"], "approval.requested"), what="the question").payload
+    client.post(f"/api/agent/sessions/{s['id']}/approvals/{asked['request_id']}", json={"decision": "accept"}, headers=h)
+    bg.join()
+    wait_idle(s["id"])
+    copy = client.post(f"/api/agent/sessions/{s['id']}/fork", headers=h)
+    assert copy.status_code == 201, copy.text
+    c = copy.json()
+    assert c["id"] != s["id"] and c["title"].endswith("(копия)") and c["instructions"] == "Кратко." and c["approval_mode"] == "ask" and c["status"] == "idle"
+    assert [(e.seq, e.kind) for e in events(c["id"])] == [(e.seq, e.kind) for e in events(s["id"])]
+    assert load(c["id"]).thread_id == load(s["id"]).thread_id and load(c["id"]).key != load(s["id"]).key
+    listing = client.get(f"/api/agent/sessions/{c['id']}/files", headers=h).json()
+    assert "hello.txt" in [e["name"] for e in listing["entries"]]
+    # the copy goes on from the same conversation, and the original is untouched
+    info = report(client, h, c["id"])
+    assert info["seen"]["method"] == "thread/resume" and info["cwd"].endswith(load(c["id"]).key + "/work")
+    assert len(events(c["id"])) > len(events(s["id"]))
+
+
+def test_a_running_session_cannot_be_forked(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    bg = start_turn(client, h, s["id"], "slow")
+    wait_for(has_event(s["id"], "turn.started"), what="the turn")
+    assert client.post(f"/api/agent/sessions/{s['id']}/fork", headers=h).status_code == 409
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
+
+
+def test_a_fork_counts_against_the_limit_of_sessions(client, wired, monkeypatch):
+    monkeypatch.setattr(settings, "max_agent_sessions_per_user", 1)
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    send(client, h, s["id"], "hello")
+    wait_idle(s["id"])
+    assert client.post(f"/api/agent/sessions/{s['id']}/fork", headers=h).status_code == 409
+
+
+def test_deleting_removes_the_history_and_the_files(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    send(client, h, s["id"], "patch this")
+    wait_idle(s["id"])
+    key = load(s["id"]).key
+    assert (wired.module.DATA_DIR / key).is_dir()
+    assert client.delete(f"/api/agent/sessions/{s['id']}", headers=h).status_code == 204
+    assert not (wired.module.DATA_DIR / key).exists() and events(s["id"]) == []
+
+
+# ── the session's files ──────────────────────────────────────────────────────
+
+def test_files_can_be_uploaded_listed_read_downloaded_and_zipped(client, wired):
+    import io
+    import zipfile
+
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    base = f"/api/agent/sessions/{s['id']}/files"
+    r = client.put(f"{base}?path=docs/a.txt", content=b"hello\nworld", headers=h)
+    assert r.status_code == 200 and r.json() == {"path": "docs/a.txt", "size": 11}
+    assert [e["name"] for e in client.get(base, headers=h).json()["entries"]] == ["docs"]
+    inner = client.get(base, params={"path": "docs"}, headers=h).json()
+    assert inner["path"] == "docs" and inner["entries"][0]["name"] == "a.txt"
+    assert client.get(f"{base}/content", params={"path": "docs/a.txt"}, headers=h).json()["text"] == "hello\nworld"
+    download = client.get(f"{base}/download", params={"path": "docs/a.txt"}, headers=h)
+    assert download.status_code == 200 and download.content == b"hello\nworld" and "a.txt" in download.headers["content-disposition"]
+    archive = client.get(f"{base}/archive", headers=h)
+    assert archive.status_code == 200 and "docs/a.txt" in zipfile.ZipFile(io.BytesIO(archive.content)).namelist()
+
+
+def test_the_files_endpoints_pass_on_the_containers_refusals(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    base = f"/api/agent/sessions/{s['id']}/files"
+    assert client.get(f"{base}/content", params={"path": "../x"}, headers=h).status_code == 400
+    assert client.get(f"{base}/content", params={"path": "missing"}, headers=h).status_code == 404
+    assert client.get(f"{base}/download", params={"path": "missing"}, headers=h).status_code == 404
+    assert client.put(f"{base}?path=/etc/passwd", content=b"x", headers=h).status_code == 400
+    assert client.post(f"{base}/clone", json={"url": "git@github.com:o/r.git"}, headers=h).status_code == 422
+    assert client.post(f"{base}/clone", json={"url": ""}, headers=h).status_code == 422
+
+
+def test_files_are_off_without_a_token_and_report_a_missing_container(client, wired, monkeypatch):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    base = f"/api/agent/sessions/{s['id']}/files"
+    monkeypatch.setattr(settings, "agent_url", "http://127.0.0.1:1")
+    assert client.get(base, headers=h).status_code == 502 and client.get(f"{base}/archive", headers=h).status_code == 502
+    assert client.put(f"{base}?path=a", content=b"x", headers=h).status_code == 502
+    monkeypatch.setattr(settings, "agent_token", "")
+    assert client.get(base, headers=h).status_code == 503
+
+
+# ── «Разобрать в агенте» ──────────────────────────────────────────────────────
+
+def scan_with_results(user_id: int, **extra):
+    from pathlib import Path
+
+    from app.services.scan_files import scan_dir
+
+    scan = make_scan(user_id, make_runner().id, status=ScanStatus.succeeded, targets=["https://shop.example"], instruction="только оплата", **extra)
+    run = scan_dir(scan.id) / "strix_runs" / "r1"
+    (run / "vulnerabilities").mkdir(parents=True)
+    (run / "run.json").write_text("{}")
+    (run / "penetration_test_report.md").write_text("# Отчёт\nНайдена SQL-инъекция")
+    (run / "vulnerabilities.json").write_text("[]")
+    (run / "vulnerabilities" / "vuln-1.md").write_text("# SQLi in /pay")
+    with SessionLocal() as db:
+        db.add(Finding(scan_id=scan.id, vuln_id="vuln-1", title="SQL-инъекция в /pay", severity="high", target="https://shop.example", endpoint="/pay", method="POST", data={"poc": "' OR 1=1"}))
+        db.commit()
+    return scan
+
+
+def test_a_scans_results_become_the_start_of_a_session(client, wired):
+    user, h = op_user(client)
+    scan = scan_with_results(user.id)
+    profile = openai_profile(user.id, models=["gpt-5", "o3"])
+    r = client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": profile.id, "llm_model": "o3"}, headers=h)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["session"]["title"].startswith(f"Скан #{scan.id}: https://shop.example") and body["session"]["llm_model"] == "o3" and body["files"] >= 5
+    assert str(scan.id) in body["draft"] and "scan/README.md" in body["draft"] and "Находок: 1" in body["draft"]
+    base = f"/api/agent/sessions/{body['session']['id']}/files"
+    names = [e["name"] for e in client.get(base, params={"path": "scan"}, headers=h).json()["entries"]]
+    assert {"README.md", "findings.json", "report.md", "vulnerabilities.json", "vulnerabilities"} <= set(names)
+    readme = client.get(f"{base}/content", params={"path": "scan/README.md"}, headers=h).json()["text"]
+    assert "https://shop.example" in readme and "только оплата" in readme
+    findings = json.loads(client.get(f"{base}/content", params={"path": "scan/findings.json"}, headers=h).json()["text"])
+    assert findings[0]["title"] == "SQL-инъекция в /pay" and findings[0]["severity"] == "high" and findings[0]["details"] == {"poc": "' OR 1=1"}
+    assert "SQL-инъекция" in client.get(f"{base}/content", params={"path": "scan/report.md"}, headers=h).json()["text"]
+    assert "SQLi in /pay" in client.get(f"{base}/content", params={"path": "scan/vulnerabilities/vuln-1.md"}, headers=h).json()["text"]
+
+
+def test_a_scan_without_files_on_disk_still_gives_its_stored_findings(client, wired):
+    user, h = op_user(client)
+    scan = make_scan(user.id, make_runner().id, status=ScanStatus.succeeded)
+    r = client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": openai_profile(user.id).id}, headers=h)
+    assert r.status_code == 201 and r.json()["files"] == 2 and "Находок: 0" in r.json()["draft"]
+
+
+def test_scans_of_other_people_are_not_available_to_an_operator_but_to_an_admin(client, wired):
+    owner, _ = op_user(client, "owner@example.com")
+    scan = scan_with_results(owner.id)
+    stranger, hs = op_user(client, "stranger@example.com")
+    assert client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": openai_profile(stranger.id).id}, headers=hs).status_code == 404
+    admin, ha = op_user(client, "boss@example.com", Role.admin)
+    assert client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": openai_profile(admin.id).id}, headers=ha).status_code == 201
+
+
+def test_from_scan_checks_the_profile_the_model_and_the_scan(client, wired):
+    user, h = op_user(client)
+    scan = make_scan(user.id, make_runner().id, status=ScanStatus.succeeded)
+    assert client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": make_profile(user.id).id}, headers=h).status_code == 422  # Claude
+    assert client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": openai_profile(user.id).id, "llm_model": "nope"}, headers=h).status_code == 422
+    assert client.post("/api/agent/from-scan/9999", json={"llm_profile_id": openai_profile(user.id, "x").id}, headers=h).status_code == 404
+    assert client.get("/api/agent/sessions", headers=h).json() == []  # nothing was left half-made
+
+
+def test_from_scan_is_closed_to_viewers_and_when_the_agent_is_off(client, wired, viewer, monkeypatch):
+    assert client.post("/api/agent/from-scan/1", json={"llm_profile_id": 1}, headers=viewer).status_code == 403
+    user, h = op_user(client)
+    monkeypatch.setattr(settings, "agent_token", "")
+    assert client.post("/api/agent/from-scan/1", json={"llm_profile_id": 1}, headers=h).status_code == 503
+
+
+# ── gateways ────────────────────────────────────────────────────────────────
 
 FUNCTION_ONLY = ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "goals", "--disable", "image_generation"]
 
@@ -466,41 +753,31 @@ def has_run(argv: list[str], run: list[str]) -> bool:
     return any(argv[i:i + len(run)] == run for i in range(len(argv)))
 
 
-def test_a_gateway_gets_function_tools_only(client, wired):
-    """The real failure: 400 "This endpoint supports function tools only" from a custom gateway."""
+def provider_arg(argv: list[str]) -> str:
+    return next(a for a in argv if a.startswith("model_providers.oreshnik="))
+
+
+def test_a_gateway_gets_function_tools_only_and_goes_through_the_proxy(client, wired):
     user, h = op_user(client)
-    with SessionLocal() as db:
-        p = LLMProfile(user_id=user.id, name="gw", provider=Provider.custom, model="m", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
-        db.add(p)
-        db.commit()
-        db.refresh(p)
-    assert has_run(report_argv(client, h, p), FUNCTION_ONLY)
+    argv = report(client, h, new_session(client, h, custom_gateway(user.id))["id"])["argv"]
+    assert has_run(argv, FUNCTION_ONLY)
+    assert f'base_url = "http://127.0.0.1:{wired.port}/compat/' in provider_arg(argv) and "gw.internal" not in provider_arg(argv)
 
 
-def test_openai_itself_keeps_all_of_codexs_tools(client, wired):
+def test_openai_itself_keeps_all_tools_and_is_not_proxied(client, wired):
     user, h = op_user(client)
-    argv = report_argv(client, h, openai_profile(user.id))
-    assert "--disable" not in argv and 'web_search="disabled"' not in argv
+    argv = report(client, h, new_session(client, h, openai_profile(user.id))["id"])["argv"]
+    assert "--disable" not in argv and 'web_search="disabled"' not in argv and 'base_url = "https://api.openai.com/v1"' in provider_arg(argv)
 
 
-def test_the_setting_overrides_the_automatic_choice(client, wired, monkeypatch):
+def test_the_settings_override_the_automatic_choices(client, wired, monkeypatch):
     user, h = op_user(client)
     monkeypatch.setattr(settings, "agent_tools", "functions")
-    assert has_run(report_argv(client, h, openai_profile(user.id, "a")), FUNCTION_ONLY)
+    assert has_run(report(client, h, new_session(client, h, openai_profile(user.id, "a"))["id"])["argv"], FUNCTION_ONLY)
     monkeypatch.setattr(settings, "agent_tools", "full")
-    with SessionLocal() as db:
-        p = LLMProfile(user_id=user.id, name="gw2", provider=Provider.custom, model="m", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
-        db.add(p)
-        db.commit()
-        db.refresh(p)
-    assert "--disable" not in report_argv(client, h, p)
-
-
-def test_resuming_keeps_the_function_only_flags_before_the_thread_id(agentd):
-    body = agentd.Turn(**turn_body(thread_id="thread-1", function_tools_only=True))
-    argv = agentd.build_argv(body)
-    assert argv[:3] == [agentd.CODEX_BIN, "exec", "resume"] and has_run(argv, FUNCTION_ONLY)
-    assert argv.index("thread-1") > argv.index("image_generation") and argv[-2:] == ["--", "hi"]
+    monkeypatch.setattr(settings, "agent_response_fix", False)
+    argv = report(client, h, new_session(client, h, custom_gateway(user.id))["id"])["argv"]
+    assert "--disable" not in argv and 'base_url = "http://gw.internal/v1"' in provider_arg(argv)
 
 
 def test_agent_tools_setting_is_validated():
@@ -514,148 +791,20 @@ def test_agent_tools_setting_is_validated():
         Settings(_env_file=None, agent_tools="some")
 
 
-# ── the compat proxy: a gateway's usage, completed ──────────────────────────────
+# ── health ────────────────────────────────────────────────────────────────────
 
-BROKEN = {"type": "response.completed", "response": {"id": "r1", "usage": {"input_tokens": 7, "input_tokens_details": {}, "output_tokens": 3, "output_tokens_details": {}}}}
-
-
-def sse(event: dict) -> str:
-    return "data: " + json.dumps(event, separators=(",", ":"))
-
-
-def test_the_missing_usage_numbers_are_filled_in(agentd):
-    fixed = json.loads(agentd.fix_sse_line(sse(BROKEN))[5:])["response"]["usage"]
-    assert fixed == {"input_tokens": 7, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 3,
-                     "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 10}
+def test_the_panel_shows_why_codex_does_not_start(client, wired, tmp_path, monkeypatch):
+    path = tmp_path / "codex"
+    path.write_text("#!/bin/sh\necho 'Missing optional dependency @openai/codex-linux-x64' >&2\nexit 1\n")
+    path.chmod(0o755)
+    monkeypatch.setattr(wired.module, "CODEX_BIN", str(path))
+    health = agent_service.agent_health()
+    assert health["ok"] is False and "не запускается" in health["detail"] and "Missing optional dependency" in health["detail"]
 
 
-def test_numbers_the_gateway_did_send_are_kept(agentd):
-    event = {"type": "response.completed", "response": {"usage": {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
-             "input_tokens_details": {"cached_tokens": 64, "text_tokens": 100}, "output_tokens_details": {"reasoning_tokens": 2}}}}
-    usage = json.loads(agentd.fix_sse_line(sse(event))[5:])["response"]["usage"]
-    assert usage["input_tokens_details"] == {"cached_tokens": 64, "text_tokens": 100} and usage["output_tokens_details"] == {"reasoning_tokens": 2}
-    assert usage["total_tokens"] == 105
-
-
-def test_a_chat_style_usage_in_a_responses_stream_is_mapped(agentd):
-    event = {"type": "response.completed", "response": {"usage": {"prompt_tokens": 9, "completion_tokens": 4}}}
-    usage = json.loads(agentd.fix_sse_line(sse(event))[5:])["response"]["usage"]
-    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (9, 4, 13)
-
-
-@pytest.mark.parametrize("line", [
-    "", "event: response.completed", ": keep-alive", "data: [DONE]", "data: not json {",
-    sse({"type": "response.output_text.delta", "delta": "hi", "usage": "word"}),  # not a final event
-    sse({"type": "response.completed", "response": {"id": "r"}}),                   # a final event without usage
-    sse({"type": "response.completed", "response": {"usage": None}}),
-])
-def test_every_other_line_passes_through_untouched(agentd, line):
-    assert agentd.fix_sse_line(line) == line
-
-
-def test_the_proxy_is_closed_to_everyone_but_this_container(agentd):
-    agentd._compat["tok"] = "http://127.0.0.1:1/v1"
-    outside = TestClient(agentd.app)  # its client address is not loopback
-    assert outside.post("/compat/tok/v1/responses", json={}).status_code == 404
-    assert outside.post("/compat/unknown/v1/responses", json={}).status_code == 404
-
-
-def run_upstream(events: list[str], seen: list):
-    """A gateway that streams `events` and remembers the request it got."""
-    import threading
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def do_POST(self):
-            body = self.rfile.read(int(self.headers["Content-Length"]))
-            seen.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": json.loads(body)})
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            for line in events:
-                self.wfile.write((line + "\n").encode())
-            self.wfile.flush()
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
-
-
-def test_a_gateways_stream_comes_through_with_a_complete_usage(live, agentd):
-    import httpx
-
-    seen: list = []
-    delta = sse({"type": "response.output_text.delta", "delta": "Привет"})
-    upstream = run_upstream(["event: response.created", sse({"type": "response.created", "response": {"id": "r1"}}), "", "event: response.output_text.delta", delta, "",
-                             "event: response.completed", sse(BROKEN), "", "data: [DONE]", ""], seen)
-    try:
-        agentd._compat["tok"] = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
-        agentd.PORT = int(settings.agent_url.rsplit(":", 1)[1])
-        r = httpx.post(f"{settings.agent_url}/compat/tok/responses", json={"model": "m", "input": []}, headers={"Authorization": "Bearer gateway-key"}, timeout=20)
-    finally:
-        upstream.shutdown()
-    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
-    assert seen[0]["path"] == "/v1/responses" and seen[0]["auth"] == "Bearer gateway-key"  # the key is the caller's: nothing is stored here
-    assert seen[0]["body"] == {"model": "m", "input": []}
-    lines = r.text.split("\n")
-    assert delta in lines and "data: [DONE]" in lines and "event: response.completed" in lines  # the rest is untouched
-    done = json.loads(next(l for l in lines if '"response.completed"' in l and l.startswith("data:"))[5:])["response"]["usage"]
-    assert done["input_tokens_details"] == {"cached_tokens": 0} and done["output_tokens_details"] == {"reasoning_tokens": 0}
-
-
-def custom_gateway(user_id: int, name: str = "gw") -> LLMProfile:
-    with SessionLocal() as db:
-        p = LLMProfile(user_id=user_id, name=name, provider=Provider.custom, model="m", base_url="http://gw.internal/v1",
-                       api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
-        db.add(p)
-        db.commit()
-        db.refresh(p)
-        return p
-
-
-def provider_arg(argv: list[str]) -> str:
-    return next(a for a in argv if a.startswith("model_providers.oreshnik="))
-
-
-def test_a_gateway_turn_goes_through_the_proxy_and_the_token_is_dropped_after(client, wired):
-    user, h = op_user(client)
-    argv = report_argv(client, h, custom_gateway(user.id))
-    assert f'base_url = "http://127.0.0.1:{wired.PORT}/compat/' in provider_arg(argv)
-    assert "gw.internal" not in provider_arg(argv)  # Codex never talks to the gateway itself
-    assert wired._compat == {}  # the per-turn route does not outlive the turn
-
-
-def test_openai_itself_is_not_proxied(client, wired):
-    user, h = op_user(client)
-    assert 'base_url = "https://api.openai.com/v1"' in provider_arg(report_argv(client, h, openai_profile(user.id)))
-
-
-def test_the_setting_switches_the_proxy_off(client, wired, monkeypatch):
-    user, h = op_user(client)
-    monkeypatch.setattr(settings, "agent_response_fix", False)
-    assert 'base_url = "http://gw.internal/v1"' in provider_arg(report_argv(client, h, custom_gateway(user.id)))
-
-
-# ── a Codex that reports the turn over and does not exit ────────────────────────
-
-def test_a_process_that_lingers_after_the_turn_is_over_is_ended_and_not_an_error(agentd, monkeypatch):
-    monkeypatch.setattr(agentd, "EXIT_GRACE_SECONDS", 0.5)
-    start = time.time()
-    _, evs = post_turn(agentd, prompt="linger", timeout_seconds=30)
-    assert time.time() - start < 20  # not the 60 s the process would have slept
-    assert [e["type"] for e in evs if e["type"] == "turn.completed"] == ["turn.completed"]
-    assert evs[-1]["type"] == "agentd.exit" and evs[-1]["code"] == 0 and evs[-1]["lingered"] is True and evs[-1]["timed_out"] is False
-
-
-def test_a_process_that_exits_by_itself_is_not_marked_as_lingering(agentd):
-    _, evs = post_turn(agentd, prompt="hi")
-    assert evs[-1]["code"] == 0 and evs[-1]["lingered"] is False
-
-
-def test_only_the_end_of_turn_events_start_the_grace(agentd):
-    assert agentd._is_final_event('{"type":"turn.completed","usage":{}}') and agentd._is_final_event('{"type":"turn.failed","error":{}}')
-    assert not agentd._is_final_event('{"type":"item.completed","item":{}}')
-    assert not agentd._is_final_event("not json") and not agentd._is_final_event("[1]")
+def test_the_panel_says_the_agent_is_fine_when_codex_starts(client, wired, tmp_path, monkeypatch):
+    path = tmp_path / "codex"
+    path.write_text("#!/bin/sh\necho codex-cli 0.169.0\n")
+    path.chmod(0o755)
+    monkeypatch.setattr(wired.module, "CODEX_BIN", str(path))
+    assert agent_service.agent_health() == {"ok": True, "detail": "Агент на связи"}

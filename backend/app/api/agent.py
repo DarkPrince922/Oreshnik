@@ -21,7 +21,7 @@ from app.api.deps import require_operator
 from app.core.config import settings
 from app.core.db import SessionLocal, get_db
 from app.core.security import decode_access_token
-from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus
+from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus, new_session_key
 from app.models.llm_profile import LLMProfile
 from app.models.scan import Finding, Scan
 from app.models.user import Role, User
@@ -286,7 +286,7 @@ def fork_session(session_id: int, user: User = Depends(require_operator), db: Se
     if count >= settings.max_agent_sessions_per_user:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Не больше {settings.max_agent_sessions_per_user} сессий: удалите ненужные")
     copy = AgentSession(
-        user_id=user.id, title=f"{source.title} (копия)"[:200], llm_profile_id=source.llm_profile_id, llm_model=source.llm_model,
+        key=new_session_key(), user_id=user.id, title=f"{source.title} (копия)"[:200], llm_profile_id=source.llm_profile_id, llm_model=source.llm_model,
         thread_id=source.thread_id, instructions=source.instructions, reasoning_effort=source.reasoning_effort, approval_mode=source.approval_mode,
         turn_count=source.turn_count, next_seq=source.next_seq,
     )

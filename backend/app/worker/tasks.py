@@ -622,6 +622,7 @@ def reap_stale_agent_turns() -> int:
             session.status = AgentSessionStatus.idle
             session.last_error = message
             session.cancel_requested = False
+            agent_service.live_delete(db, session.id)  # what it was in the middle of writing is not going to be finished
             reaped.append(session.key)
         db.commit()
     for key in reaped:
