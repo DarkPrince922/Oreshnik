@@ -37,3 +37,15 @@ def cleanup_containers(label: str) -> int:
     except Exception as exc:  # docker missing/unreachable — never fail the scan over cleanup
         log.warning("container cleanup for %s failed: %s", label, exc)
         return 0
+
+
+def ensure_network(name: str) -> None:
+    """Create the sandbox network if it is missing. Best effort and idempotent (a concurrent create just fails harmlessly)."""
+    docker = shutil.which("docker")
+    if not docker or not name:
+        return
+    try:
+        if subprocess.run([docker, "network", "inspect", name], capture_output=True, timeout=30).returncode != 0:
+            subprocess.run([docker, "network", "create", name], capture_output=True, timeout=30)
+    except Exception as exc:
+        log.warning("could not ensure docker network %s: %s", name, exc)

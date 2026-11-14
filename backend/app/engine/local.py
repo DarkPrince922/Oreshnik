@@ -18,8 +18,8 @@ import time
 from collections.abc import Callable
 
 from app.core.config import settings
-from app.engine.base import RunResult, ScanSpec, strix_llm_timeout_env, strix_privacy_env, strix_reasoning_env
-from app.engine.docker_cleanup import cleanup_containers
+from app.engine.base import RunResult, ScanSpec, strix_llm_timeout_env, strix_privacy_env, strix_reasoning_env, strix_sandbox_env
+from app.engine.docker_cleanup import cleanup_containers, ensure_network
 from app.services.scan_files import INSTRUCTION_NAME
 
 log = logging.getLogger("oreshnik.local_runner")
@@ -88,6 +88,7 @@ class LocalRunner:
         env.update(strix_privacy_env())
         env.update(strix_reasoning_env())
         env.update(strix_llm_timeout_env())
+        env.update(strix_sandbox_env())
         return env
 
     # ── execution ────────────────────────────────────────────────────────
@@ -103,6 +104,8 @@ class LocalRunner:
         if spec.instruction:
             (spec.work_dir / INSTRUCTION_NAME).write_text(spec.instruction, encoding="utf-8")
 
+        if settings.strix_sandbox_network:
+            ensure_network(settings.strix_sandbox_network)
         argv = self.build_argv(spec)
         on_line(f"$ {' '.join(argv)}")
         try:

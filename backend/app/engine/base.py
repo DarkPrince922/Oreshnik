@@ -39,6 +39,13 @@ def strix_llm_timeout_env() -> dict[str, str]:
     return {"LLM_PREFLIGHT_TIMEOUT": str(settings.llm_preflight_timeout)}
 
 
+def strix_sandbox_env() -> dict[str, str]:
+    """`STRIX_DOCKER_SANDBOX_NETWORK` when the admin set a sandbox network (no host port is then published), else nothing."""
+    from app.core.config import settings
+
+    return {"STRIX_DOCKER_SANDBOX_NETWORK": settings.strix_sandbox_network} if settings.strix_sandbox_network else {}
+
+
 @dataclass
 class ScanSpec:
     scan_id: int

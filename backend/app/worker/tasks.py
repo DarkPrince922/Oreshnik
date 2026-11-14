@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal
 from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
+from app.engine.retry import run_with_port_retry
 from app.models.llm_profile import LLMProfile
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
@@ -373,7 +374,7 @@ def scan_run(scan_id: int) -> str:
             ssh=snap.ssh,
         )
         tailer.start()
-        result = engine.run(spec, writer.write, _CancelProbe(scan_id))
+        result = run_with_port_retry(engine, spec, writer.write, _CancelProbe(scan_id))
     except _Preflight as exc:
         early_error = str(exc)
     except Exception as exc:
