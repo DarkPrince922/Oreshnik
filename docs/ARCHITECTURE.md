@@ -927,6 +927,16 @@ silently skips when it cannot fetch it. The first image built that way started f
 `GET /health` of agentd also really starts it (`codex --version`, remembered for a minute) instead of only looking for a file on the PATH, and the
 panel's badge on the «Агент» page shows the reason («Codex в контейнере агента не запускается: …»).
 
+### Gateways that accept only function tools (`AGENT_TOOLS`)
+
+A custom OpenAI-compatible gateway answered the agent with `400 This endpoint supports function tools only` (the same message Strix got, §18a). Run for real, Codex 0.169
+against a request-logging endpoint sends, by default, `function` tools **plus** a built-in `web_search` tool and a `namespace` tool (`multi_agent_v1`). With
+`-c web_search="disabled" --disable multi_agent` only `function` tools remain (`exec_command`, `write_stdin`, `request_user_input`, `view_image`, and the goal tools — switched off too with
+`--disable goals`, like `image_generation`, to keep the list short for the simpler models behind gateways); the same flags work for `exec resume` and the history still carries over.
+The panel sends `function_tools_only` with each turn: **on for `custom` and Grok profiles, off for OpenAI itself** (its API takes every tool type, and web search is useful there).
+The setting `AGENT_TOOLS` = `auto` (default) | `functions` | `full` overrides this for all profiles (also editable in «Настройки»). Not verified: that a particular gateway then works end to
+end — the request is function-only, but a model behind it still has to call tools through its Responses API.
+
 ### Limits
 
 The agent can do anything inside its container, including reading what you paste into the chat and using the model key it was given

@@ -21,7 +21,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import STRIX_API_TYPES, STRIX_REASONING_EFFORTS, settings
+from app.core.config import AGENT_TOOLS, STRIX_API_TYPES, STRIX_REASONING_EFFORTS, settings
 
 log = logging.getLogger("oreshnik.settings")
 
@@ -86,6 +86,8 @@ SPECS: tuple[Spec, ...] = (
     Spec("ops_host_timeout_seconds", "Операции", "Предел времени на хост", "Сколько секунд скрипт может выполняться на одном хосте.", "int", 1, 7200, unit="с"),
     # ── Агент ──
     Spec("agent_turn_timeout_seconds", "Агент", "Предел времени одного хода", "Один ход — одно сообщение агенту. Дольше — ход прерывается.", "int", 10, 86400, unit="с"),
+    Spec("agent_tools", "Агент", "Какие инструменты видит модель", "auto: только обычные функции для шлюзов (custom, Grok) и всё, что умеет Codex, — для OpenAI. Шлюз, отвечающий "
+         "«This endpoint supports function tools only», требует functions.", "choice", choices=AGENT_TOOLS),
     Spec("max_agent_sessions_per_user", "Агент", "Сессий на аккаунт", "", "int", 1, 1000),
     Spec("agent_stale_seconds", "Агент", "Ход без признаков жизни", "Если воркер хода молчит столько секунд, ход считается потерянным.", "int", 30, 86400, unit="с"),
     # ── Вход ──

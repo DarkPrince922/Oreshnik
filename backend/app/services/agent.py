@@ -52,6 +52,16 @@ def endpoint_for(profile: LLMProfile, model: str | None = None) -> tuple[str, st
     return RESPONSES_BASE_URLS[profile.provider], model
 
 
+def function_tools_only(profile: LLMProfile) -> bool:
+    """Whether the agent should offer its model plain function tools only. A gateway (a `custom` profile, or Grok's own API, which
+    is not OpenAI's) often refuses Codex's other tool types; OpenAI's own API takes them all. `AGENT_TOOLS` overrides this."""
+    if settings.agent_tools == "functions":
+        return True
+    if settings.agent_tools == "full":
+        return False
+    return profile.provider != Provider.openai
+
+
 def trim(value, limit: int = MAX_STRING):
     """The event with every long string cut (a marker says so) — recursively, so a nested command output is covered too."""
     if isinstance(value, str):
@@ -126,11 +136,14 @@ def forget_session(key: str) -> None:
         log.warning("agent cleanup failed: %s", exc)
 
 
-def stream_turn(*, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str) -> Iterator[dict]:
+def stream_turn(
+    *, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str, function_tools_only: bool = False
+) -> Iterator[dict]:
     """The agent's events for one turn, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
         "session_key": key, "prompt": prompt, "thread_id": thread_id, "model": model, "base_url": base_url,
         "api_key": api_key, "timeout_seconds": settings.agent_turn_timeout_seconds,
+        "function_tools_only": function_tools_only,
     }
     timeout = httpx.Timeout(10.0, read=settings.agent_turn_timeout_seconds + 60.0)
     try:
@@ -168,7 +181,10 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str) ->
             raise AgentError("Профиль LLM удалён: выберите другой")
         base_url, model = endpoint_for(profile, chosen_model)
         api_key = decrypt(profile.api_key_enc)
-        for event in stream_turn(key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key):
+        for event in stream_turn(
+            key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key,
+            function_tools_only=function_tools_only(profile),
+        ):
             etype = str(event.get("type", ""))
             if etype == "agentd.ping":
                 with db_factory() as db:

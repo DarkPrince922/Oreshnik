@@ -447,3 +447,67 @@ def test_the_panel_shows_why_codex_does_not_start(wired, tmp_path, monkeypatch):
 def test_the_panel_says_the_agent_is_fine_when_codex_starts(wired, tmp_path, monkeypatch):
     monkeypatch.setattr(wired, "CODEX_BIN", script(tmp_path, "echo codex-cli 0.169.0\n"))
     assert agent_service.agent_health() == {"ok": True, "detail": "Агент на связи"}
+
+
+# ── gateways refuse Codex's non-function tools ──────────────────────────────
+
+def report_argv(client, headers, profile) -> list[str]:
+    s = new_session(client, headers, profile)
+    client.post(f"/api/agent/sessions/{s['id']}/messages", json={"text": "report"}, headers=headers)
+    wait_idle(s["id"])
+    return json.loads([e for e in events(s["id"]) if e.kind == "item.completed"][-1].payload["item"]["text"])["argv"]
+
+
+FUNCTION_ONLY = ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "goals", "--disable", "image_generation"]
+
+
+def has_run(argv: list[str], run: list[str]) -> bool:
+    return any(argv[i:i + len(run)] == run for i in range(len(argv)))
+
+
+def test_a_gateway_gets_function_tools_only(client, wired):
+    """The real failure: 400 "This endpoint supports function tools only" from a custom gateway."""
+    user, h = op_user(client)
+    with SessionLocal() as db:
+        p = LLMProfile(user_id=user.id, name="gw", provider=Provider.custom, model="m", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+    assert has_run(report_argv(client, h, p), FUNCTION_ONLY)
+
+
+def test_openai_itself_keeps_all_of_codexs_tools(client, wired):
+    user, h = op_user(client)
+    argv = report_argv(client, h, openai_profile(user.id))
+    assert "--disable" not in argv and 'web_search="disabled"' not in argv
+
+
+def test_the_setting_overrides_the_automatic_choice(client, wired, monkeypatch):
+    user, h = op_user(client)
+    monkeypatch.setattr(settings, "agent_tools", "functions")
+    assert has_run(report_argv(client, h, openai_profile(user.id, "a")), FUNCTION_ONLY)
+    monkeypatch.setattr(settings, "agent_tools", "full")
+    with SessionLocal() as db:
+        p = LLMProfile(user_id=user.id, name="gw2", provider=Provider.custom, model="m", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+    assert "--disable" not in report_argv(client, h, p)
+
+
+def test_resuming_keeps_the_function_only_flags_before_the_thread_id(agentd):
+    body = agentd.Turn(**turn_body(thread_id="thread-1", function_tools_only=True))
+    argv = agentd.build_argv(body)
+    assert argv[:3] == [agentd.CODEX_BIN, "exec", "resume"] and has_run(argv, FUNCTION_ONLY)
+    assert argv.index("thread-1") > argv.index("image_generation") and argv[-2:] == ["--", "hi"]
+
+
+def test_agent_tools_setting_is_validated():
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    assert Settings(_env_file=None).agent_tools == "auto"
+    assert Settings(_env_file=None, agent_tools=" Functions ").agent_tools == "functions"
+    with pytest.raises(ValidationError, match="AGENT_TOOLS"):
+        Settings(_env_file=None, agent_tools="some")

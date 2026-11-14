@@ -9,6 +9,9 @@ PLACEHOLDER = "CHANGE_ME"
 # Strix's own `STRIX_API_TYPE` values and apply to every profile.
 STRIX_API_TYPES = ("auto", "responses", "chat_completions")
 
+# Which tools the agent (Codex) offers its model: "auto" = plain function tools only for a gateway, everything Codex has for OpenAI itself.
+AGENT_TOOLS = ("auto", "functions", "full")
+
 # Strix's own accepted values for STRIX_REASONING_EFFORT (strix.config.settings.ReasoningEffort).
 STRIX_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
@@ -94,6 +97,18 @@ class Settings(BaseSettings):
     # Операции: how long one host's script may run before it is given up on and marked failed.
     ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
 
+    @field_validator("agent_tools", mode="before")
+    @classmethod
+    def _normalize_agent_tools(cls, value: object) -> object:
+        return value.strip().lower() or "auto" if isinstance(value, str) else value
+
+    @field_validator("agent_tools")
+    @classmethod
+    def _check_agent_tools(cls, value: str) -> str:
+        if value not in AGENT_TOOLS:
+            raise ValueError(f"AGENT_TOOLS must be one of {', '.join(AGENT_TOOLS)}, got {value!r}")
+        return value
+
     @field_validator("strix_api_type", mode="before")
     @classmethod
     def _normalize_api_type(cls, value: object) -> object:
@@ -139,6 +154,7 @@ class Settings(BaseSettings):
     # Wall-clock limit of ONE turn (one message to the agent).
     agent_turn_timeout_seconds: int = Field(default=1800, ge=10, le=24 * 3600)
     max_agent_sessions_per_user: int = 20
+    agent_tools: str = "auto"
     # A turn whose worker has not stored an event for this long is given up on.
     agent_stale_seconds: int = Field(default=300, ge=30)
 

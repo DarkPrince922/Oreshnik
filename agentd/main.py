@@ -57,6 +57,9 @@ class Turn(BaseModel):
     base_url: str = Field(max_length=500)
     api_key: str = Field(min_length=1, max_length=2000)
     timeout_seconds: int = Field(default=1800, ge=10, le=24 * 3600)
+    # Offer the model plain function tools only. A gateway that is not OpenAI itself usually refuses Codex's other tool types with
+    # 400 "This endpoint supports function tools only": the built-in web_search and the multi_agent namespace.
+    function_tools_only: bool = False
 
 
 class Stop(BaseModel):
@@ -91,6 +94,11 @@ def build_argv(turn: Turn) -> list[str]:
         "-c", 'model_provider="oreshnik"',
         "-c", f"model_providers.oreshnik={provider}",
     ]
+    if turn.function_tools_only:
+        # Checked with the real Codex 0.169 against a request-logging endpoint: by default it sends function tools plus a `web_search`
+        # tool and a `namespace` tool (multi_agent_v1); with these only `function` tools are left (exec_command, write_stdin, view_image…).
+        # `goals` and `image_generation` are switched off too, to keep the tool list short for the simpler models behind such gateways.
+        argv += ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "goals", "--disable", "image_generation"]
     if turn.thread_id:
         argv.append(turn.thread_id)
     argv += ["--", turn.prompt]  # after "--": a prompt starting with "-" can never be read as an option
