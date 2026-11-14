@@ -26,7 +26,7 @@ const components: Components = {
     ) : (
       <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[0.85em] text-accent-soft [overflow-wrap:anywhere]">{children}</code>
     ),
-  pre: (p) => <pre className="my-4 overflow-x-auto rounded-xl border border-white/10 bg-ink-950 p-4 text-xs" {...strip(p)} />,
+  pre: (p) => <pre className="my-4 whitespace-pre-wrap rounded-xl border border-white/10 bg-ink-950 p-4 text-xs [overflow-wrap:anywhere]" {...strip(p)} />,
   table: (p) => (
     <div className="my-4 overflow-x-auto rounded-xl border border-white/10">
       <table className="w-full text-left text-sm" {...strip(p)} />

@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     # LLM_PREFLIGHT_TIMEOUT, 30 s by default). Raise it for a slow gateway or a model that thinks long before its first token;
     # it does not help when the runner cannot reach the endpoint at all.
     llm_preflight_timeout: int = Field(default=30, ge=1, le=600)
+    # Docker network for Strix's sandbox containers (Strix's own STRIX_DOCKER_SANDBOX_NETWORK). Empty = Strix's default: it
+    # publishes the sandbox's Caido port on a random host port chosen by dockerd, which can collide ("failed to bind host
+    # port ... address already in use") when scans start together. With a network name nothing is published on the host at all
+    # and Strix talks to the container by its IP — works on a Linux Docker host, not on Docker Desktop. The panel creates
+    # the network if it does not exist.
+    strix_sandbox_network: str = Field(default="", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.-]{0,62})?$")
+    # How many times a scan is started again when the sandbox could not bind its host port (the clash above), before it fails.
+    sandbox_start_retries: int = Field(default=2, ge=0, le=10)
 
     # Операции: how long one host's script may run before it is given up on and marked failed.
     ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
