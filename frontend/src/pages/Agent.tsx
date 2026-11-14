@@ -5,10 +5,11 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { FeedStep, type Answer } from "../components/agent/Feed";
 import FilesModal from "../components/agent/FilesModal";
+import GoalModal from "../components/agent/GoalModal";
 import SettingsModal from "../components/agent/SettingsModal";
 import ModelSelect from "../components/ModelSelect";
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, Modal, PageHeader, Spinner } from "../components/ui";
-import { buildFeed, canSend, lastStepRunning, readComposer, turnFinished, usableProfiles, waitingForUser } from "../lib/agentModel";
+import { buildFeed, canSend, contextView, formatTokens, goalResumable, goalStatusLabel, lastStepRunning, readComposer, turnFinished, usableProfiles, waitingForUser } from "../lib/agentModel";
 import {
   answerAgentApproval,
   createAgentSession,
@@ -62,6 +63,7 @@ function Chat({
   const [menu, setMenu] = useState(false);
   const [settings, setSettings] = useState(false);
   const [files, setFiles] = useState(false);
+  const [goalOpen, setGoalOpen] = useState<string | null>(null); // the text to start the goal form with; null = closed
   const [current, setCurrent] = useState(session);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -80,7 +82,15 @@ function Chat({
     prevStatus.current = status;
   }, [status, onChanged]);
 
+  // The header shows the goal's progress and the context: refresh them when a turn ends or the goal changes, not only when the session stops.
+  const marks = events.reduce((n, e) => n + (e.kind === "turn.completed" || e.kind.startsWith("goal.") ? 1 : 0), 0);
+  useEffect(() => {
+    if (marks > 0) onChanged();
+  }, [marks, onChanged]);
+
   const running = status === "running";
+  const context = contextView(current.context_used, current.context_window);
+  const goal = current.goal;
   const waiting = waitingForUser(feed);
   const composer = readComposer(text, status);
 
@@ -115,11 +125,16 @@ function Chat({
         return attempt(() => runAgentAction(session.id, { action: "shell", command: composer.command }));
       case "action":
         if (composer.action === "fork") return doFork();
+        if (composer.action === "goal") {
+          setGoalOpen(composer.argument);
+          setText("");
+          return;
+        }
         if (composer.action === "review") {
           const target = composer.argument ? ({ type: "baseBranch", branch: composer.argument } as const) : undefined;
           return attempt(() => runAgentAction(session.id, { action: "review", target }));
         }
-        return attempt(() => runAgentAction(session.id, { action: composer.action as "compact" | "revert" }));
+        return attempt(() => runAgentAction(session.id, { action: composer.action === "compact" ? "compact" : "revert" }));
     }
   };
 
@@ -156,7 +171,7 @@ function Chat({
     ? "Агент ждёт вашего ответа выше…"
     : running
       ? "Агент работает. Напишите — это дополнит ход. «Стоп» — прервать"
-      : "Что сделать?  !команда — выполнить самому · /compact /review /undo /fork";
+      : "Что сделать?  !команда — выполнить самому · /goal /compact /review /undo /fork";
 
   return (
     <Card className="flex h-[calc(100vh-14rem)] min-h-[30rem] flex-col">
@@ -189,6 +204,7 @@ function Chat({
               <button type="button" aria-label="Закрыть меню" className="fixed inset-0 z-10 cursor-default" onClick={() => setMenu(false)} />
               <div className="absolute right-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-xl border border-white/10 bg-ink-900 shadow-xl">
                 <MenuItem onClick={() => { setMenu(false); setSettings(true); }}>Настройки сессии…</MenuItem>
+                <MenuItem disabled={running} onClick={() => { setMenu(false); setGoalOpen(""); }}>Поставить цель…</MenuItem>
                 <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "compact" }))}>Сжать контекст</MenuItem>
                 <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "review" }))}>Код-ревью изменений</MenuItem>
                 <MenuItem disabled={running} onClick={() => action(() => runAgentAction(session.id, { action: "revert" }))}>Откатить последний ход</MenuItem>
@@ -198,6 +214,60 @@ function Chat({
           )}
         </div>
       </div>
+
+      {(context.percent !== null || current.tokens_in > 0 || goal) && (
+        <div className="space-y-2 border-b border-white/5 px-5 py-2">
+          {(context.percent !== null || current.tokens_in > 0) && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
+              {context.percent !== null && (
+                <span className="flex items-center gap-2" title={current.context_window_known ? "Сколько места в контексте модели занято после последнего хода" : "Codex не знает эту модель: размер окна взят по умолчанию и может не совпадать с настоящим"}>
+                  контекст
+                  <span className="h-1.5 w-28 overflow-hidden rounded-full bg-white/10">
+                    <span className={clsx("block h-full rounded-full", context.tone === "bad" ? "bg-signal-bad" : context.tone === "warn" ? "bg-signal-warn" : "bg-accent")} style={{ width: `${Math.max(2, context.percent)}%` }} />
+                  </span>
+                  <span className={context.tone === "bad" ? "text-signal-bad" : context.tone === "warn" ? "text-signal-warn" : "text-slate-300"}>
+                    {current.context_window_known ? "" : "≈"}
+                    {context.percent}%
+                  </span>
+                  <span>
+                    {formatTokens(current.context_used ?? 0)} из {formatTokens(current.context_window ?? 0)}
+                  </span>
+                </span>
+              )}
+              <span>
+                всего за сессию: {formatTokens(current.tokens_in)} на входе · {formatTokens(current.tokens_out)} на выходе
+              </span>
+              {context.suggestCompact && !running && (
+                <button type="button" className="text-accent-soft underline decoration-dotted" onClick={() => action(() => runAgentAction(session.id, { action: "compact" }))}>
+                  сжать контекст
+                </button>
+              )}
+            </div>
+          )}
+          {goal && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <Badge tone={goal.status === "complete" ? "ok" : goal.status === "active" ? "accent" : "warn"}>цель {goalStatusLabel(goal.status)}</Badge>
+              <span className="min-w-0 flex-1 truncate text-slate-300" title={goal.objective}>
+                {goal.objective}
+              </span>
+              <span className="text-[11px] text-slate-500">
+                {formatTokens(goal.tokens_used)}
+                {goal.token_budget ? ` из ${formatTokens(goal.token_budget)}` : ""} токенов
+              </span>
+              {goalResumable(goal, status) && (
+                <button type="button" className="text-[11px] text-accent-soft underline decoration-dotted" onClick={() => action(() => runAgentAction(session.id, { action: "goal" }))}>
+                  продолжить
+                </button>
+              )}
+              {!running && (
+                <button type="button" className="text-[11px] text-slate-500 underline decoration-dotted hover:text-slate-300" onClick={() => action(() => runAgentAction(session.id, { action: "goal_clear" }))}>
+                  снять
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div
         ref={scroller}
@@ -238,6 +308,19 @@ function Chat({
 
       <SettingsModal open={settings} session={current} onClose={() => setSettings(false)} onSaved={(s) => { setCurrent(s); onChanged(); }} />
       <FilesModal open={files} session={current} onClose={() => setFiles(false)} />
+      <GoalModal
+        open={goalOpen !== null}
+        initial={goalOpen ?? ""}
+        onClose={() => setGoalOpen(null)}
+        onStart={async (objective, budget) => {
+          try {
+            await runAgentAction(session.id, { action: "goal", objective, token_budget: budget });
+            stick.current = true;
+          } catch (err) {
+            throw new Error(errorMessage(err));
+          }
+        }}
+      />
     </Card>
   );
 }

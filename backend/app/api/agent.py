@@ -50,6 +50,8 @@ def _out(db: Session, session: AgentSession) -> AgentSessionOut:
         llm_profile_name=profile.name if profile else None,
         llm_model=session.llm_model or (profile.model if profile else None),
         instructions=session.instructions, reasoning_effort=session.reasoning_effort, approval_mode=session.approval_mode or "auto",
+        web_search=session.web_search or "auto", goal=session.goal, context_used=session.context_used, context_window=session.context_window,
+        context_window_known=session.context_window_known is not False, tokens_in=session.tokens_in or 0, tokens_out=session.tokens_out or 0,
         status=session.status, turn_count=session.turn_count,
         last_error=session.last_error, cancel_requested=session.cancel_requested, event_count=session.next_seq,
         created_at=session.created_at, updated_at=session.updated_at,
@@ -121,6 +123,7 @@ def _new_session(db: Session, user: User, profile: LLMProfile, body: AgentSessio
     session = AgentSession(
         user_id=user.id, title=title or body.title.strip() or NEW_TITLE, llm_profile_id=profile.id, llm_model=validate_model(profile, body.llm_model),
         instructions=(body.instructions or "").strip() or None, reasoning_effort=body.reasoning_effort, approval_mode=body.approval_mode,
+        web_search=body.web_search,
     )
     db.add(session)
     db.commit()
@@ -153,6 +156,8 @@ def update_session(session_id: int, body: AgentSessionUpdate, user: User = Depen
         session.reasoning_effort = body.reasoning_effort
     if body.approval_mode is not None:
         session.approval_mode = body.approval_mode
+    if body.web_search is not None:
+        session.web_search = body.web_search
     db.commit()
     db.refresh(session)
     return _out(db, session)
@@ -259,6 +264,28 @@ def run_action(session_id: int, body: AgentAction, user: User = Depends(require_
     elif body.action == "review":
         extra["review_target"] = body.target or {"type": "uncommittedChanges"}
         note["target"] = extra["review_target"]
+    elif body.action == "goal":
+        # The agent then works by itself, turn after turn, until the goal is reached or its token budget is spent — so a budget is not optional.
+        if body.objective:
+            if body.token_budget is None:
+                raise HTTPException(422, "Для цели нужен бюджет токенов")
+            if body.token_budget > settings.agent_goal_max_tokens:
+                raise HTTPException(422, f"Бюджет цели не больше {settings.agent_goal_max_tokens} токенов (см. «Настройки»)")
+            prompt = note["objective"] = body.objective
+            extra["goal_budget"] = note["token_budget"] = body.token_budget
+        else:
+            if not session.goal:
+                raise HTTPException(422, "Напишите цель")
+            if session.goal.get("status") == "complete":
+                raise HTTPException(status.HTTP_409_CONFLICT, "Цель уже достигнута: поставьте новую")
+            if body.token_budget is not None:
+                if body.token_budget > settings.agent_goal_max_tokens:
+                    raise HTTPException(422, f"Бюджет цели не больше {settings.agent_goal_max_tokens} токенов (см. «Настройки»)")
+                extra["goal_budget"] = note["token_budget"] = body.token_budget
+            note["resume"] = True
+    elif body.action == "goal_clear":
+        if not session.goal:
+            raise HTTPException(status.HTTP_409_CONFLICT, "У сессии нет цели")
     elif body.action == "revert":
         turn_id = _last_turn_id(db, session.id)
         if turn_id is None:
@@ -288,7 +315,8 @@ def fork_session(session_id: int, user: User = Depends(require_operator), db: Se
     copy = AgentSession(
         key=new_session_key(), user_id=user.id, title=f"{source.title} (копия)"[:200], llm_profile_id=source.llm_profile_id, llm_model=source.llm_model,
         thread_id=source.thread_id, instructions=source.instructions, thread_instructions=source.thread_instructions, reasoning_effort=source.reasoning_effort, approval_mode=source.approval_mode,
-        turn_count=source.turn_count, next_seq=source.next_seq,
+        turn_count=source.turn_count, next_seq=source.next_seq, web_search=source.web_search, goal=source.goal,
+        context_used=source.context_used, context_window=source.context_window, context_window_known=source.context_window_known,
     )
     try:
         agent_service.fork_files(source.key, copy.key)

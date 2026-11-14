@@ -19,7 +19,7 @@ import time
 out_lock = threading.Lock()
 inbox: "queue.Queue[dict]" = queue.Queue()
 answers: dict = {}            # server request id -> (event, response)
-state = {"turn": None, "interrupt": threading.Event(), "steers": [], "seen": {}, "counter": 0}
+state = {"turn": None, "interrupt": threading.Event(), "steers": [], "seen": {}, "counter": 0, "goal": None}
 threads_file = os.path.join(os.environ.get("CODEX_HOME", "."), "fake_threads.json")
 
 
@@ -82,6 +82,8 @@ def run_turn(thread: str, turn_id: str, text: str, params: dict) -> None:
     state["interrupt"].clear()
     cwd = params.get("cwd") or os.getcwd()
     notify("turn/started", {"threadId": thread, "turn": {"id": turn_id, "status": "inProgress", "items": []}})
+    if state["seen"].get("model") == "unknown-model":
+        notify("warning", {"threadId": thread, "message": "Model metadata for `unknown-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."})
     item_started(thread, turn_id, {"type": "userMessage", "id": new_id("um"), "content": [{"type": "text", "text": text}]})
     status, error = "completed", None
     policy = state["seen"].get("approvalPolicy")
@@ -164,10 +166,57 @@ def run_turn(thread: str, turn_id: str, text: str, params: dict) -> None:
     for _ in range(2):
         notify("thread/tokenUsage/updated", {"threadId": thread, "turnId": turn_id, "tokenUsage": {
             "total": {"totalTokens": 100 * (state["counter"] + 1), "inputTokens": 80 * (state["counter"] + 1), "cachedInputTokens": 0, "outputTokens": 20, "reasoningOutputTokens": 0},
-            "last": {"totalTokens": 62, "inputTokens": 50, "cachedInputTokens": 0, "outputTokens": 12, "reasoningOutputTokens": 0}}})
+            "last": {"totalTokens": 62, "inputTokens": 50, "cachedInputTokens": 0, "outputTokens": 12, "reasoningOutputTokens": 0},
+            "modelContextWindow": 258400}})
         break
     state["turn"] = None
     notify("turn/completed", {"threadId": thread, "turn": {"id": turn_id, "status": status, "error": error, "items": []}})
+
+
+def goal_out(thread: str) -> dict:
+    g = state["goal"]
+    return {"threadId": thread, "objective": g["objective"], "status": g["status"], "tokenBudget": g.get("budget"), "tokensUsed": g["used"],
+            "timeUsedSeconds": 1, "createdAt": 1, "updatedAt": 2}
+
+
+def goal_changed(thread: str) -> None:
+    save_thread(thread, {"goal": state["goal"]})
+    notify("thread/goal/updated", {"threadId": thread, "turnId": state["turn"], "goal": goal_out(thread)})
+
+
+def goal_loop(thread: str) -> None:
+    """Like the real Codex: while the goal is active, turn follows turn without anybody asking. Done after 3 steps ("forever": never),
+    or when the token budget is spent; "silent": active, but no turn ever starts."""
+    step = 0
+    time.sleep(0.05)
+    while state.get("goal") and state["goal"]["status"] == "active" and "silent" not in state["goal"]["objective"]:
+        step += 1
+        turn_id = new_id("turn")
+        state["turn"] = turn_id
+        state["interrupt"].clear()
+        notify("turn/started", {"threadId": thread, "turn": {"id": turn_id, "status": "inProgress", "items": []}})
+        time.sleep(0.25)
+        if state["interrupt"].is_set():
+            state["turn"] = None
+            notify("turn/completed", {"threadId": thread, "turn": {"id": turn_id, "status": "interrupted", "error": None, "items": []}})
+            return
+        item_completed(thread, turn_id, {"type": "agentMessage", "id": "g1", "text": f"шаг {step} к цели"})
+        if state.get("goal"):
+            goal = state["goal"]
+            goal["used"] += 62
+            total = goal["used"]
+            notify("thread/tokenUsage/updated", {"threadId": thread, "turnId": turn_id, "tokenUsage": {
+                "total": {"totalTokens": total, "inputTokens": total - 12 * step, "cachedInputTokens": 0, "outputTokens": 12 * step, "reasoningOutputTokens": 0},
+                "last": {"totalTokens": 62, "inputTokens": 50, "cachedInputTokens": 0, "outputTokens": 12, "reasoningOutputTokens": 0}, "modelContextWindow": 1000}})
+            if goal.get("budget") and goal["used"] >= goal["budget"]:
+                goal["status"] = "budgetLimited"
+                goal_changed(thread)
+            elif step >= 3 and "forever" not in goal["objective"]:
+                goal["status"] = "complete"
+                goal_changed(thread)
+        state["turn"] = None
+        notify("turn/completed", {"threadId": thread, "turn": {"id": turn_id, "status": "completed", "error": None, "items": []}})
+        time.sleep(0.05)
 
 
 def handle(message: dict) -> None:
@@ -186,10 +235,42 @@ def handle(message: dict) -> None:
             thread = new_id("thr")
         state["seen"].update({k: params.get(k) for k in ("approvalPolicy", "sandbox", "developerInstructions", "model", "cwd")})
         state["seen"]["method"] = method
-        save_thread(thread, {"cwd": params.get("cwd")})
+        state["goal"] = known_threads().get(thread, {}).get("goal") if method == "thread/resume" else None
+        save_thread(thread, {"goal": state["goal"]})
         state["thread"] = thread
         send({"id": rid, "result": {"thread": thread_obj(thread)}})
         notify("thread/started", {"thread": thread_obj(thread)})
+        if state["goal"] and state["goal"]["status"] == "active":  # a goal left active goes on by itself the moment the thread is back
+            threading.Thread(target=goal_loop, args=(thread,), daemon=True).start()
+    elif method in ("thread/goal/set", "thread/goal/get", "thread/goal/clear"):
+        if "goals" in " ".join(sys.argv) and "--disable" in sys.argv and sys.argv[sys.argv.index("goals") - 1] == "--disable":
+            send({"id": rid, "error": {"code": -32600, "message": "goals feature is disabled"}})
+            return
+        thread = params["threadId"]
+        if method == "thread/goal/get":
+            send({"id": rid, "result": {"goal": goal_out(thread) if state.get("goal") else None}})
+        elif method == "thread/goal/clear":
+            state["goal"] = None
+            save_thread(thread, {"goal": None})
+            send({"id": rid, "result": {"cleared": True}})
+            notify("thread/goal/cleared", {"threadId": thread})
+        else:
+            goal = state.get("goal")
+            if params.get("objective"):
+                goal = {"objective": params["objective"], "status": "active", "budget": None, "used": 0}
+            if goal is None:
+                send({"id": rid, "error": {"code": -32600, "message": "no goal to update"}})
+                return
+            was_active = goal["status"] == "active" and state.get("goal") is goal
+            goal["status"] = params.get("status") or goal["status"]
+            if params.get("tokenBudget") is not None:
+                goal["budget"] = params["tokenBudget"]
+            state["goal"] = goal
+            state["seen"]["goalSet"] = params
+            send({"id": rid, "result": {"goal": goal_out(thread)}})
+            goal_changed(thread)
+            if goal["status"] == "active" and not was_active and state["turn"] is None:
+                threading.Thread(target=goal_loop, args=(thread,), daemon=True).start()
     elif method == "turn/start":
         text = "".join(i.get("text", "") for i in params.get("input", []))
         for k in ("approvalPolicy", "effort", "model"):

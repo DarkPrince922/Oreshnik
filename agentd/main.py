@@ -52,6 +52,7 @@ IDLE_SECONDS = float(os.environ.get("AGENT_IDLE_SECONDS", "900"))          # a s
 MAX_PROCESSES = int(os.environ.get("AGENT_MAX_PROCESSES", "8"))
 APPROVAL_TIMEOUT = float(os.environ.get("AGENT_APPROVAL_TIMEOUT_SECONDS", "900"))  # an unanswered question is declined after this
 INTERRUPT_WAIT = float(os.environ.get("AGENT_INTERRUPT_WAIT_SECONDS", "10"))
+GOAL_NEXT_TURN_WAIT = float(os.environ.get("AGENT_GOAL_NEXT_TURN_WAIT_SECONDS", "20"))  # an active goal whose next turn does not start in this time is over
 ORPHAN_SECONDS = 30.0   # a turn nobody ever started reading is given up on after this long
 
 _PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "TZ", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
@@ -86,7 +87,7 @@ def require_token(authorization: str = Header(default="")) -> None:
 
 class Turn(BaseModel):
     session_key: str
-    action: Literal["message", "compact", "shell", "review", "revert"] = "message"
+    action: Literal["message", "compact", "shell", "review", "revert", "goal", "goal_clear"] = "message"
     prompt: str = Field(default="", max_length=100_000)     # the message, or the shell command
     thread_id: str | None = None
     model: str
@@ -107,6 +108,13 @@ class Turn(BaseModel):
     approval_mode: Literal["auto", "ask"] = "auto"                      # ask: Codex asks before commands and file changes
     review_target: dict | None = None
     revert_before: str | None = None
+    # Web search of Codex itself: "auto" = off for gateways (they refuse the tool), on otherwise.
+    web_search: Literal["auto", "on", "off"] = "auto"
+    # Goals: an objective Codex keeps working on BY ITSELF, turn after turn, until it is done or its token budget is spent (checked with
+    # the real Codex: an active goal starts turns without anybody asking). So the feature is off unless the session uses it, a goal always
+    # has a budget, every self-started turn is read by the panel, and a goal is paused whenever nobody is reading.
+    goals: bool = False
+    goal_budget: int | None = Field(default=None, ge=1000, le=50_000_000)
 
     @field_validator("effort")
     @classmethod
@@ -121,6 +129,10 @@ class Turn(BaseModel):
     def _by_action(self) -> "Turn":
         if self.action in ("message", "shell") and not self.prompt.strip():
             raise ValueError("prompt is required")
+        if self.action == "goal" and self.prompt.strip() and self.goal_budget is None:
+            raise ValueError("a new goal needs goal_budget")
+        if self.action in ("goal", "goal_clear") and not self.goals:
+            raise ValueError("goals are off for this turn")
         if self.action == "revert" and not (self.revert_before and _THREAD_RE.match(self.revert_before)):
             raise ValueError("revert_before is required")
         if self.action == "review":
@@ -196,6 +208,10 @@ class Session:
     usage_last: dict | None = None
     pending: dict[str, dict] = field(default_factory=dict)    # request id -> {"id": raw id, "kind": ...} awaiting the user
     compat_token: str | None = None
+    goal: dict | None = None               # the thread's goal as Codex last reported it
+    goal_mode: bool = False                # this stream follows a goal: Codex's self-started turns belong to it
+    goal_wait: float = 0.0                 # when the last turn of the goal ended (the next one must start soon, or the run is over)
+    fallback_window: bool = False          # Codex does not know this model: its context window is a default, not a fact
     last_used: float = field(default_factory=time.monotonic)
 
     def emit(self, event: dict) -> None:
@@ -250,18 +266,21 @@ def spawn_argv(turn: Turn, base_url: str) -> list[str]:
         raise HTTPException(422, "bad model")
     provider = "{ name = \"Oreshnik\", base_url = " + toml_string(base_url) + f", env_key = \"{KEY_ENV}\", wire_api = \"responses\" }}"
     argv = [CODEX_BIN, "app-server", "-c", f"model={toml_string(turn.model)}", "-c", 'model_provider="oreshnik"', "-c", f"model_providers.oreshnik={provider}"]
+    # Checked with the real Codex 0.169 against a request-logging endpoint: by default it sends function tools plus a `web_search`
+    # tool and a `namespace` tool (multi_agent_v1); without those only `function` tools are left (exec_command, write_stdin, view_image…).
+    if turn.web_search == "off" or (turn.web_search == "auto" and turn.function_tools_only):
+        argv += ["-c", 'web_search="disabled"']
     if turn.function_tools_only:
-        # Checked with the real Codex 0.169 against a request-logging endpoint: by default it sends function tools plus a `web_search`
-        # tool and a `namespace` tool (multi_agent_v1); with these only `function` tools are left (exec_command, write_stdin, view_image…).
-        # `goals` and `image_generation` are switched off too, to keep the tool list short for the simpler models behind such gateways.
-        argv += ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "goals", "--disable", "image_generation"]
+        argv += ["--disable", "multi_agent", "--disable", "image_generation"]
+    if not turn.goals:
+        argv += ["--disable", "goals"]  # otherwise the model could set itself a goal and Codex would go on working unasked
     return argv
 
 
 def fingerprint(turn: Turn) -> str:
     """What cannot change under a running process: the endpoint, the key and the tool set. A change restarts it. (Not the system prompt:
     a thread that exists keeps the one it was started with, however often the process is restarted.)"""
-    raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses])
+    raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses, turn.web_search, turn.goals])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -333,6 +352,14 @@ async def ensure_server(session: Session, turn: Turn) -> None:
             session.thread_new = True
         session.thread_id = result["thread"]["id"]
         session.fingerprint = fp
+        if turn.goals and not session.thread_new:
+            try:  # a goal left active (the container was stopped mid-run) would start working the moment the thread is back
+                found = goal_view((await server.request("thread/goal/get", {"threadId": session.thread_id}, timeout=15)).get("goal"))
+                session.goal = found
+                if found and found["status"] == "active" and turn.action != "goal":
+                    await pause_goal(session)
+            except (RpcError, ConnectionError, TimeoutError):
+                pass
     except BaseException:
         tail = bytes(server.stderr_tail).decode("utf-8", "replace").replace(turn.api_key, "[key]").strip()
         await _stop_server(session)
@@ -373,7 +400,23 @@ def on_notification(session: Session, message: dict) -> None:
 
     if method == "turn/started":
         session.active_turn = (params.get("turn") or {}).get("id")
+        session.goal_wait = 0.0
+        if not session.busy:  # a turn nobody asked for and nobody reads (an active goal): stop it
+            asyncio.create_task(_unattended(session))
+            return
         session.emit({"type": "turn.started", "turn_id": session.active_turn})
+    elif method == "thread/goal/updated":
+        session.goal = goal_view(params.get("goal"))
+        session.emit({"type": "goal.updated", "goal": session.goal})
+        if session.goal and session.goal["status"] == "active" and not session.goal_mode:
+            asyncio.create_task(pause_goal(session))  # only a goal the user started may run
+        elif session.goal_mode and session.goal and session.goal["status"] != "active" and session.active_turn is None and session.sink is not None:
+            session.sink.put_nowait("__done__")
+    elif method == "thread/goal/cleared":
+        session.goal = None
+        session.emit({"type": "goal.cleared"})
+        if session.goal_mode and session.active_turn is None and session.sink is not None:
+            session.sink.put_nowait("__done__")
     elif method in ("item/started", "item/completed"):
         item = normalize_item(params.get("item") or {}, cwd, completed=(method == "item/completed"))
         if item is None:
@@ -427,6 +470,8 @@ def on_notification(session: Session, message: dict) -> None:
         session.pending.pop(request_id, None)
         session.emit({"type": "approval.resolved", "request_id": request_id})
     elif method == "warning":
+        if "fallback metadata" in str(params.get("message") or ""):
+            session.fallback_window = True
         session.emit({"type": "item.completed", "item": {"id": "", "type": "error", "message": str(params.get("message") or "")}})
     elif method == "error":
         # Not necessarily the end: with `willRetry` Codex is about to ask the model again. Shown quietly; a failed turn reports itself
@@ -448,11 +493,53 @@ def on_notification(session: Session, message: dict) -> None:
             "type": "turn.completed", "turn_id": turn.get("id"), "status": turn.get("status") or "completed",
             "error": (error.get("message") if isinstance(error, dict) else error) or None,
             "usage": usage_from(session.usage_last, session.usage_base),
+            "context": context_view(session),
         })
         session.active_turn = None
-        if session.sink is not None:
+        goal_on = session.goal_mode and session.goal is not None and session.goal["status"] == "active" and turn.get("status") == "completed"
+        if goal_on:
+            # The goal is not reached yet: Codex starts the next turn by itself. Keep reading; each turn is accounted on its own.
+            session.usage_base = dict((session.usage_last or {}).get("total") or {})
+            session.diff = session.plan = None
+            session.goal_wait = time.monotonic()
+        elif session.sink is not None:
             session.sink.put_nowait("__done__")
     session.wake()
+
+
+def goal_view(goal: Any) -> dict | None:
+    if not isinstance(goal, dict):
+        return None
+    return {
+        "objective": str(goal.get("objective") or ""), "status": str(goal.get("status") or ""), "token_budget": goal.get("tokenBudget"),
+        "tokens_used": goal.get("tokensUsed") or 0, "seconds_used": goal.get("timeUsedSeconds") or 0,
+    }
+
+
+def context_view(session: Session) -> dict | None:
+    """How full the model's context is after the turn: the size of the last request against the window Codex assumes for the model."""
+    usage = session.usage_last or {}
+    last = usage.get("last") or {}
+    if not isinstance(last.get("totalTokens"), int):
+        return None
+    window = usage.get("modelContextWindow")
+    return {"used": last["totalTokens"], "window": window if isinstance(window, int) and window > 0 else None, "window_known": not session.fallback_window}
+
+
+async def pause_goal(session: Session) -> None:
+    server = session.server
+    if server is None or not server.alive or session.thread_id is None:
+        return
+    try:
+        await server.request("thread/goal/set", {"threadId": session.thread_id, "status": "paused"}, timeout=15)
+    except (RpcError, ConnectionError, TimeoutError):
+        pass
+
+
+async def _unattended(session: Session) -> None:
+    await pause_goal(session)
+    await interrupt(session)
+    session.active_turn = None
 
 
 _last_flush: dict[str, float] = {}
@@ -543,6 +630,22 @@ async def dispatch(session: Session, turn: Turn) -> None:
         await server.request("review/start", {"threadId": thread, "target": turn.review_target}, timeout=60)
     elif turn.action == "revert":
         await server.request("thread/revert", {"threadId": thread, "beforeTurnId": turn.revert_before}, timeout=60)
+    elif turn.action == "goal":
+        # A new objective (with its budget), or — with no text — the existing goal set going again. Codex then starts turns by itself.
+        params = {"threadId": thread, "status": "active"}
+        if turn.prompt.strip():
+            params["objective"] = turn.prompt.strip()
+        if turn.goal_budget is not None:
+            params["tokenBudget"] = turn.goal_budget
+        session.goal_mode = True
+        session.goal_wait = time.monotonic()
+        result = await server.request("thread/goal/set", params, timeout=60)
+        session.goal = goal_view(result.get("goal"))
+        session.emit({"type": "goal.updated", "goal": session.goal})
+    elif turn.action == "goal_clear":
+        await server.request("thread/goal/clear", {"threadId": thread}, timeout=60)
+        session.goal = None
+        session.emit({"type": "goal.cleared"})
 
 
 async def _events(session: Session, turn: Turn, queue: "asyncio.Queue[str | None]"):
@@ -553,6 +656,12 @@ async def _events(session: Session, turn: Turn, queue: "asyncio.Queue[str | None
     finished = False
     session.attached = True
     try:
+        if turn.action == "goal_clear":
+            while not queue.empty():
+                first = queue.get_nowait()
+                if first and first != "__done__":
+                    yield first + "\n"
+            finished = True
         if turn.action == "revert":
             while not queue.empty():  # what was queued first (the thread being attached) comes first
                 first = queue.get_nowait()
@@ -572,6 +681,8 @@ async def _events(session: Session, turn: Turn, queue: "asyncio.Queue[str | None
                 if not session.dirty:
                     yield '{"type":"agentd.ping"}\n'
             flush_live(session)
+            if session.goal_mode and session.goal_wait and session.active_turn is None and time.monotonic() - session.goal_wait > GOAL_NEXT_TURN_WAIT:
+                finished = True  # the goal is still "active" but Codex started no further turn: the run is over
             while True:  # everything the handler queued meanwhile, in order
                 if line == "__done__":
                     finished = True
@@ -597,6 +708,14 @@ async def _events(session: Session, turn: Turn, queue: "asyncio.Queue[str | None
                     await asyncio.sleep(0.1)
                 if session.active_turn and session.server is not None:
                     await _stop_server(session)  # it did not stop: end the process (the thread stays on disk)
+        if session.goal_mode:
+            # Nobody reads from here on: a goal must not go on working by itself.
+            with anyio.CancelScope(shield=True):
+                if session.goal is not None and session.goal["status"] == "active":
+                    await pause_goal(session)
+                    await asyncio.sleep(0.2)  # let the "paused" notification reach the queue
+            session.goal_mode = False
+            session.goal_wait = 0.0
         session.sink = None
         session.busy = False
         session.attached = False
@@ -650,6 +769,11 @@ async def stop(body: Stop) -> dict:
     session = _sessions.get(body.session_key)
     if session is None or not session.busy:
         return {"stopped": False}
+    if session.goal_mode:
+        # Between two turns of a goal there is nothing to interrupt: pausing the goal is what stops the run (and ends the stream).
+        await pause_goal(session)
+        await interrupt(session)
+        return {"stopped": True}
     return {"stopped": await interrupt(session)}
 
 

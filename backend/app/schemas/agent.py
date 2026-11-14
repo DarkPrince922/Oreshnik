@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.models.agent import AgentSessionStatus
-from app.services.agent import APPROVAL_MODES, EFFORTS
+from app.services.agent import APPROVAL_MODES, EFFORTS, WEB_SEARCH_MODES
 
 
 class AgentSessionCreate(BaseModel):
@@ -15,6 +15,7 @@ class AgentSessionCreate(BaseModel):
     instructions: str | None = Field(default=None, max_length=20_000)
     reasoning_effort: str | None = None
     approval_mode: str = "auto"
+    web_search: str = "auto"
 
     @field_validator("reasoning_effort")
     @classmethod
@@ -26,12 +27,23 @@ class AgentSessionCreate(BaseModel):
     def _mode(cls, v: str) -> str:
         return _check_mode(v)
 
+    @field_validator("web_search")
+    @classmethod
+    def _web(cls, v: str) -> str:
+        return _check_web(v)
+
 
 def _check_effort(v: str | None) -> str | None:
     if v in (None, ""):
         return None
     if v not in EFFORTS:
         raise ValueError(f"допустимо: {', '.join(EFFORTS)}")
+    return v
+
+
+def _check_web(v: str) -> str:
+    if v not in WEB_SEARCH_MODES:
+        raise ValueError(f"допустимо: {', '.join(WEB_SEARCH_MODES)}")
     return v
 
 
@@ -48,6 +60,7 @@ class AgentSessionUpdate(BaseModel):
     instructions: str | None = Field(default=None, max_length=20_000)   # empty string clears it
     reasoning_effort: str | None = None                                 # empty string = the model's default
     approval_mode: str | None = None
+    web_search: str | None = None
 
     @field_validator("reasoning_effort")
     @classmethod
@@ -58,6 +71,11 @@ class AgentSessionUpdate(BaseModel):
     @classmethod
     def _mode(cls, v: str | None) -> str | None:
         return None if v is None else _check_mode(v)
+
+    @field_validator("web_search")
+    @classmethod
+    def _web(cls, v: str | None) -> str | None:
+        return None if v is None else _check_web(v)
 
 
 class AgentMessage(BaseModel):
@@ -74,11 +92,14 @@ class AgentMessage(BaseModel):
 class AgentAction(BaseModel):
     """Something to do in the session other than a message: compress the conversation, review the changes, run a command yourself, undo the last turn."""
 
-    action: Literal["compact", "review", "shell", "revert"]
+    action: Literal["compact", "review", "shell", "revert", "goal", "goal_clear"]
     command: str | None = Field(default=None, max_length=10_000)   # shell
+    # goal: a new objective with its token budget — or neither, to set the session's paused goal going again
+    objective: str | None = Field(default=None, max_length=4000)
+    token_budget: int | None = Field(default=None, ge=10_000)
     target: dict[str, Any] | None = None                          # review: {"type": "uncommittedChanges"} | baseBranch+branch | commit+sha | custom+instructions
 
-    @field_validator("command")
+    @field_validator("command", "objective")
     @classmethod
     def _strip(cls, v: str | None) -> str | None:
         return v.strip() or None if v else None
@@ -107,6 +128,13 @@ class AgentSessionOut(BaseModel):
     instructions: str | None
     reasoning_effort: str | None
     approval_mode: str
+    web_search: str
+    goal: dict | None            # {objective, status, token_budget, tokens_used, seconds_used} or None
+    context_used: int | None     # tokens in the model's context after the last turn
+    context_window: int | None   # the window Codex assumes for the model
+    context_window_known: bool   # False: Codex does not know the model; the window is its default, not a fact
+    tokens_in: int               # spent by the session in total
+    tokens_out: int
     status: AgentSessionStatus
     turn_count: int
     last_error: str | None

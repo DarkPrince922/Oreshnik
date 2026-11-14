@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     agent_tools: str = "auto"
     # Complete the usage numbers in a gateway's final stream event (see agentd's compat proxy). Never applied to OpenAI itself.
     agent_response_fix: bool = True
+    # A goal makes the agent work by itself, turn after turn: the token budget one goal may get at most (the user picks a number up to this).
+    agent_goal_max_tokens: int = Field(default=5_000_000, ge=10_000, le=50_000_000)
     # A turn whose worker has not stored an event for this long is given up on.
     agent_stale_seconds: int = Field(default=300, ge=30)
 

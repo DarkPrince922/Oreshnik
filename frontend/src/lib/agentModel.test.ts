@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentEvent } from "./api";
-import { buildFeed, canSend, formatTokens, lastStepRunning, readComposer, turnFinished, usableProfiles, waitingForUser, type FeedEntry } from "./agentModel";
+import { buildFeed, canSend, contextView, formatTokens, goalResumable, goalStatusLabel, lastStepRunning, parseBudget, readComposer, turnFinished, usableProfiles, waitingForUser, type FeedEntry } from "./agentModel";
 
 let seq = 0;
 const ev = (kind: string, payload: Record<string, unknown> = {}): AgentEvent => ({ seq: seq++, kind, payload });
@@ -37,7 +37,7 @@ describe("buildFeed: the history", () => {
     reset();
     const feed = buildFeed([ev("user", { text: "slow" }), ev("turn.started", { turn_id: "a" }), ev("user", { text: "и ещё ура", steer: true }), msg("m1", "ответ")]);
     expect(feed[1]).toMatchObject({ type: "user", steer: true, text: "и ещё ура" });
-    expect(feed[2].key).toBe("t1:m1");
+    expect(feed[2].key).toBe("t1.1:m1");
   });
 
   it("shows the actions the user took", () => {
@@ -134,7 +134,7 @@ describe("buildFeed: what is being written now", () => {
     reset();
     const history = [ev("user", { text: "x" }), ev("turn.started", { turn_id: "a" }), msg("m1", "Готовый ответ")];
     const feed = buildFeed(history, { m1: { id: "m1", type: "agent_message", text: "Готов" } });
-    expect(feed.filter((f) => f.type === "message")).toEqual([{ type: "message", key: "t1:m1", text: "Готовый ответ", live: false }]);
+    expect(feed.filter((f) => f.type === "message")).toEqual([{ type: "message", key: "t1.1:m1", text: "Готовый ответ", live: false }]);
   });
 
   it("a snapshot appears after what the history already shows, in the current turn", () => {
@@ -264,5 +264,63 @@ describe("formatTokens", () => {
     expect(formatTokens(950)).toBe("950");
     expect(formatTokens(12_345)).toBe("12.3k");
     expect(formatTokens(250_000)).toBe("250k");
+  });
+});
+
+describe("goals", () => {
+  it("the feed says when a goal stops being worked on, and why — not after every turn of it", () => {
+    reset();
+    const goal = (status: string, used = 0) => ev("goal.updated", { goal: { objective: "зелёные тесты", status, token_budget: 100000, tokens_used: used } });
+    const feed = buildFeed([ev("action", { action: "goal", objective: "зелёные тесты", token_budget: 100000 }), goal("active"), msg("g1", "шаг 1"), goal("budgetLimited", 100200), ev("action", { action: "goal", resume: true }), goal("active"), goal("complete", 120000), ev("action", { action: "goal_clear" }), ev("goal.cleared")]);
+    expect(feed.filter((f) => f.type === "action").map((f) => (f as { text: string }).text)).toEqual(["Цель: зелёные тесты", "Продолжить работу над целью", "Снять цель"]);
+    expect(feed.filter((f) => f.type === "notice").map((f) => [(f as { tone: string }).tone, (f as { text: string }).text])).toEqual([
+      ["warn", "Цель остановлена: бюджет токенов исчерпан · потрачено 100k из 100k токенов"],
+      ["info", "Цель достигнута · потрачено 120k из 100k токенов"],
+      ["info", "Цель снята"],
+    ]);
+  });
+  it("keeps the steps of every self-started turn of a goal, though their ids repeat", () => {
+    reset();
+    const step = (text: string) => [ev("turn.started", { turn_id: text }), msg("g1", text), ev("turn.completed", { turn_id: text, usage: {} })];
+    const feed = buildFeed([ev("action", { action: "goal", objective: "x", token_budget: 100000 }), ...step("шаг 1"), ...step("шаг 2"), ...step("шаг 3")], { g1: { id: "g1", type: "agent_message", text: "шаг 4 пишет" } });
+    expect(feed.filter((f) => f.type === "message").map((f) => (f as { text: string }).text)).toEqual(["шаг 1", "шаг 2", "шаг 3"]);
+  });
+  it("labels every status and keeps an unknown one readable", () => {
+    for (const s of ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"]) expect(goalStatusLabel(s)).not.toBe(s);
+    expect(goalStatusLabel("somethingNew")).toBe("somethingNew");
+  });
+  it("only a goal that is neither reached nor running can be set going again", () => {
+    expect(goalResumable({ status: "paused" }, "idle")).toBe(true);
+    expect(goalResumable({ status: "budgetLimited" }, "idle")).toBe(true);
+    expect(goalResumable({ status: "complete" }, "idle")).toBe(false);
+    expect(goalResumable({ status: "paused" }, "running")).toBe(false);
+    expect(goalResumable(null, "idle")).toBe(false);
+  });
+  it("reads a budget typed by a person", () => {
+    expect(parseBudget("500000")).toBe(500000);
+    expect(parseBudget(" 500k ")).toBe(500000);
+    expect(parseBudget("1.5m")).toBe(1500000);
+    expect(parseBudget("2М")).toBe(2000000);
+    expect(parseBudget("0,5м")).toBe(500000);
+    expect(parseBudget("5000")).toBeNull(); // too small to be meant
+    expect(parseBudget("много")).toBeNull();
+    expect(parseBudget("")).toBeNull();
+  });
+  it("/goal is a command of the box", () => {
+    expect(readComposer("/goal довести тесты до зелёного", "idle")).toEqual({ kind: "action", action: "goal", argument: "довести тесты до зелёного" });
+  });
+});
+
+describe("contextView", () => {
+  it("is unknown until a turn has reported it", () => {
+    expect(contextView(null, 258400)).toEqual({ percent: null, tone: "ok", suggestCompact: false });
+    expect(contextView(100, null)).toEqual({ percent: null, tone: "ok", suggestCompact: false });
+    expect(contextView(100, 0).percent).toBeNull();
+  });
+  it("turns into a percentage with a warning as it fills up", () => {
+    expect(contextView(25840, 258400)).toEqual({ percent: 10, tone: "ok", suggestCompact: false });
+    expect(contextView(190000, 258400)).toMatchObject({ percent: 74, tone: "warn", suggestCompact: true });
+    expect(contextView(250000, 258400)).toMatchObject({ percent: 97, tone: "bad", suggestCompact: true });
+    expect(contextView(999999, 258400).percent).toBe(100);
   });
 });

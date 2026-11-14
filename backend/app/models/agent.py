@@ -9,7 +9,7 @@ import enum
 import secrets
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -52,6 +52,15 @@ class AgentSession(Base):
     thread_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)  # how hard the model thinks; None = the model's default
     approval_mode: Mapped[str] = mapped_column(String(8), default="auto")             # auto: no questions · ask: approve commands and file changes
+    web_search: Mapped[str] = mapped_column(String(8), default="auto")               # Codex's own web search: auto | on | off
+    # The goal of the session as Codex last reported it ({objective, status, token_budget, tokens_used, seconds_used}); None = no goal.
+    goal: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # How full the model's context was after the last turn, and what the session has spent in total (kept across restarts of the thread).
+    context_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_window_known: Mapped[bool] = mapped_column(default=True)                 # False: Codex does not know the model, the window is its default
+    tokens_in: Mapped[int] = mapped_column(BigInteger, default=0)
+    tokens_out: Mapped[int] = mapped_column(BigInteger, default=0)
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(default=False)

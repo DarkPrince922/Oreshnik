@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { useEffect, useState, type FormEvent } from "react";
 
-import { REASONING_EFFORTS, errorMessage, updateAgentSession, type AgentSession, type ApprovalMode } from "../../lib/api";
+import { REASONING_EFFORTS, errorMessage, updateAgentSession, type AgentSession, type ApprovalMode, type WebSearchMode } from "../../lib/api";
 import { Button, ErrorNote, Field, Modal } from "../ui";
 
 const EFFORT_LABEL: Record<string, string> = { minimal: "минимальная", low: "низкая", medium: "средняя", high: "высокая", xhigh: "максимальная" };
@@ -12,6 +12,7 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
   const [instructions, setInstructions] = useState(session.instructions ?? "");
   const [effort, setEffort] = useState(session.reasoning_effort ?? "");
   const [mode, setMode] = useState<ApprovalMode>(session.approval_mode);
+  const [web, setWeb] = useState<WebSearchMode>(session.web_search);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -21,6 +22,7 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
     setInstructions(session.instructions ?? "");
     setEffort(session.reasoning_effort ?? "");
     setMode(session.approval_mode);
+    setWeb(session.web_search);
     setError(null);
   }, [open, session]);
 
@@ -30,7 +32,7 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
     setBusy(true);
     setError(null);
     try {
-      const saved = await updateAgentSession(session.id, { title: title.trim() || session.title, instructions: instructions.trim(), reasoning_effort: effort, approval_mode: mode });
+      const saved = await updateAgentSession(session.id, { title: title.trim() || session.title, instructions: instructions.trim(), reasoning_effort: effort, approval_mode: mode, web_search: web });
       onSaved(saved);
       onClose();
     } catch (err) {
@@ -63,6 +65,17 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
                 {EFFORT_LABEL[x]}
               </option>
             ))}
+          </select>
+        </Field>
+
+        <Field
+          label="Поиск в интернете"
+          hint="Встроенный веб-поиск Codex. «Авто»: включён для OpenAI и выключен для шлюзов (custom, Grok) — они обычно отклоняют этот инструмент ошибкой «function tools only». «Включён» для шлюза ставьте, только если он точно его поддерживает."
+        >
+          <select className="field" value={web} onChange={(e) => setWeb(e.target.value as WebSearchMode)}>
+            <option value="auto">авто</option>
+            <option value="on">включён</option>
+            <option value="off">выключен</option>
           </select>
         </Field>
 

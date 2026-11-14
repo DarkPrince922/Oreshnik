@@ -1127,3 +1127,42 @@ approvals (command, file change, question; decline; late and wrong answers; time
 `tests/test_agentd_normalize.py` (14) — the pure translation. `tests/test_agent.py` (57) — the panel's API through the worker to agentd: ownership of everything, history and live snapshots, the socket (live, late client, `live_end`),
 questions, steering, stopping, settings and the instructions hand-over, actions, undo one after another, fork, files, scans, gateways. Frontend: `agentModel.test.ts` (28; feed, live overlay, questions, undo, composer commands),
 `diff.test.ts` (11), `files.test.ts`.
+
+
+## 24. «Агент»: context and spend, goals, web search
+
+Three additions to the chat, each checked on the real Codex 0.169 first.
+
+### How full the context is, and what the session has spent
+
+`thread/tokenUsage/updated` carries the thread's running total, the last model call and `modelContextWindow`. After every turn agentd reports `context = {used: tokens of the last
+call, window, window_known}` and the turn's own usage; the panel keeps `context_used`, `context_window` and the session's totals (`tokens_in`, `tokens_out`, summed turn by turn, so
+they survive a restarted thread). The header shows a bar («контекст 76% · 196k из 258k»), the totals, and offers «сжать контекст» from 70%. **Caveat shown in the page:** for a model Codex does
+not know (its warning "Model metadata … not found. Defaulting to fallback metadata" — every gateway model so far) the window is Codex's default (258 400), not the model's real one; the
+percentage is then marked «≈». There is no cost in money: the panel has no prices for arbitrary gateway models.
+
+### Goals — the agent working by itself
+
+`thread/goal/set` gives the thread an objective (and a token budget). **Found by running it:** an *active* goal makes Codex start turns **by itself** — right after it is set and after every turn —
+until the model marks it complete (`update_goal`), it is paused, or the budget is spent (`budgetLimited`; with a budget of 1000 tokens the run ended after 17 turns). Unattended, that is an agent spending tokens
+with nobody watching. So:
+
+- Codex's goal feature is **off** (`--disable goals`) unless the session has a goal. This also closes a hole that existed for OpenAI profiles: with the feature on by default the model was offered `create_goal` and could have started such a loop on its own.
+- A goal is started only by the user («Поставить цель…» or `/goal текст`) and **must have a token budget** (10 000 … `AGENT_GOAL_MAX_TOKENS`, default ceiling 5M, editable in «Настройки»; the form proposes 500k). The turn's time limit applies to the whole run as well.
+- The run is one stream: agentd keeps reading across Codex's self-started turns (each is stored and counted on its own), and ends when the goal stops being active, when no next turn starts within 20 s, on Stop, on the time limit, or when the panel hangs up.
+- **Nobody reading = goal paused.** At the end of every such stream an active goal is set to `paused`; Stop pauses first (between two turns there is nothing to interrupt); a goal found active when a thread is resumed (the container died mid-run) is paused before anything else;
+  a turn that starts with no reader is interrupted. Checked on the real Codex: a paused goal does not start turns, an ordinary message with a paused goal is one turn, and with the feature off the model is not offered the goal tools.
+- The header shows the goal, its status and tokens used of the budget, with «продолжить» (sets the same goal going again) and «снять». The feed gets a line when the goal's status changes, not after every turn.
+
+### Web search
+
+Per session: **auto** (as before: on for OpenAI, off for gateways, which refuse the tool), **on**, **off**. "On" for a gateway is the user's call — a gateway that does not implement it answers 400, as documented above. A change restarts the session's process on the same thread.
+
+### Also fixed here
+
+The feed keyed a step by (user action, item id); a goal runs many Codex turns inside one action and their item ids repeat, so later steps replaced earlier ones. Steps are now keyed by Codex turn as well.
+
+### Tests
+
+`test_agentd.py` +18 (context, the guessed window, web search choices, a goal to completion, to its budget, Stop, resume, a hung-up reader, no next turn, clear, an active goal left behind, refusals), `test_agent.py` +11 (the same through the panel, totals, the budget ceiling, fork),
+`agentModel.test.ts` +8. Real Codex through the final agentd: budget run to `budgetLimited`, nothing calling the model afterwards, Stop → paused, a paused goal stays quiet, resume, completion by the model, clear, goal tools absent when off.

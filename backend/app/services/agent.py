@@ -31,6 +31,7 @@ MAX_STRING = 20_000
 MAX_EVENTS_PER_SESSION = 20_000
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 APPROVAL_MODES = ("auto", "ask")
+WEB_SEARCH_MODES = ("auto", "on", "off")
 LIVE_KEYS_DIFF, LIVE_KEYS_PLAN = "__diff__", "__plan__"
 
 
@@ -206,6 +207,7 @@ def stream_turn(
     *, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str, function_tools_only: bool = False,
     normalize_responses: bool = False, action: str = "message", instructions: str | None = None, effort: str | None = None,
     approval_mode: str = "auto", review_target: dict | None = None, revert_before: str | None = None, applied_instructions: str | None = None,
+    web_search: str = "auto", goals: bool = False, goal_budget: int | None = None,
 ) -> Iterator[dict]:
     """The agent's events for one action, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
@@ -214,6 +216,7 @@ def stream_turn(
         "function_tools_only": function_tools_only, "normalize_responses": normalize_responses,
         "instructions": instructions, "applied_instructions": applied_instructions, "effort": effort, "approval_mode": approval_mode,
         "review_target": review_target, "revert_before": revert_before,
+        "web_search": web_search, "goals": goals, "goal_budget": goal_budget,
     }
     timeout = httpx.Timeout(60.0, read=settings.agent_turn_timeout_seconds + 60.0)
     try:
@@ -248,6 +251,9 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
         instructions, effort, approval_mode = session.instructions, session.reasoning_effort, session.approval_mode or "auto"
         applied_instructions = session.thread_instructions
+        web_search = session.web_search or "auto"
+        # The goal feature of Codex is on only for a session that uses it: otherwise the model could set itself a goal and work unasked.
+        goals = session.goal is not None or action in ("goal", "goal_clear")
         profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
 
     error: str | None = None
@@ -261,6 +267,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             function_tools_only=function_tools_only(profile), normalize_responses=normalize_responses(profile),
             instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
             review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
+            web_search=web_search, goals=goals, goal_budget=extra.get("goal_budget"),
         ):
             error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
     except AgentError as exc:
@@ -282,6 +289,10 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         session.cancel_requested = False
         session.turn_count += 1
         db.commit()
+
+
+def _int(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 def _handle_event(db_factory: Callable[[], Session], session_id: int, event: dict, error: str | None, extra: dict) -> str | None:
@@ -320,11 +331,32 @@ def _handle_event(db_factory: Callable[[], Session], session_id: int, event: dic
         elif etype == "turn.completed":
             if event.get("status") == "failed" and error is None:
                 error = str(event.get("error") or "Агент сообщил об ошибке")[:500]
-            append_event(db, session_id, "turn.completed", {k: event.get(k) for k in ("turn_id", "status", "error", "usage")})
+            append_event(db, session_id, "turn.completed", {k: event.get(k) for k in ("turn_id", "status", "error", "usage", "context")})
+            session = db.get(AgentSession, session_id)
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            session.tokens_in = (session.tokens_in or 0) + _int(usage.get("input_tokens"))
+            session.tokens_out = (session.tokens_out or 0) + _int(usage.get("output_tokens"))
+            context = event.get("context")
+            if isinstance(context, dict) and isinstance(context.get("used"), int):
+                session.context_used = context["used"]
+                session.context_window = context["window"] if isinstance(context.get("window"), int) else None
+                session.context_window_known = context.get("window_known") is not False
         elif etype == "turn.started":
             append_event(db, session_id, "turn.started", {"turn_id": event.get("turn_id")})
         elif etype in ("approval.requested", "approval.resolved"):
             append_event(db, session_id, etype, {k: v for k, v in event.items() if k != "type"})
+        elif etype == "goal.updated" and isinstance(event.get("goal"), dict):
+            session = db.get(AgentSession, session_id)
+            before = session.goal or {}
+            session.goal = event["goal"]
+            # Codex reports the goal after every turn (its counters move): the feed gets a line only when something the user cares about changed.
+            if (before.get("status"), before.get("objective"), before.get("token_budget")) != tuple(event["goal"].get(k) for k in ("status", "objective", "token_budget")):
+                append_event(db, session_id, "goal.updated", {"goal": event["goal"]})
+        elif etype == "goal.cleared":
+            session = db.get(AgentSession, session_id)
+            if session.goal is not None:
+                session.goal = None
+                append_event(db, session_id, "goal.cleared", {})
         elif etype == "thread.reverted":
             append_event(db, session_id, "thread.reverted", {"turn_id": extra.get("revert_before")})
         elif etype == "agentd.error":

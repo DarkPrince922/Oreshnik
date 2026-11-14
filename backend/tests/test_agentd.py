@@ -192,7 +192,7 @@ def test_what_codex_is_started_and_told(agentd):
     argv = report["argv"]
     assert argv[0] == "app-server" and 'model="m"' in argv and 'model_provider="oreshnik"' in argv
     assert any(a.startswith("model_providers.oreshnik=") and 'base_url = "http://x/v1"' in a and 'wire_api = "responses"' in a for a in argv)
-    assert "--disable" not in argv  # the full tool set unless asked for function tools only
+    assert argv[-2:] == ["--disable", "goals"] and argv.count("--disable") == 1 and 'web_search="disabled"' not in argv  # the full tool set, but no self-set goals
     assert report["key_env"] == KEY and report["leaked"] == []
     assert Path(report["codex_home"]).is_dir() and report["cwd"].endswith("/work") and (Path(report["cwd"]) / ".git").is_dir()
     seen = report["seen"]
@@ -202,8 +202,20 @@ def test_what_codex_is_started_and_told(agentd):
 
 def test_a_gateway_gets_function_tools_only(agentd):
     argv = agentd.report(function_tools_only=True)["argv"]
-    run = ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "goals", "--disable", "image_generation"]
+    run = ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "image_generation", "--disable", "goals"]
     assert any(argv[i:i + len(run)] == run for i in range(len(argv)))
+
+
+@pytest.mark.parametrize("gateway,choice,off", [(True, "auto", True), (True, "on", False), (True, "off", True), (False, "auto", False), (False, "off", True), (False, "on", False)])
+def test_web_search_follows_the_sessions_choice(agentd, gateway, choice, off):
+    argv = agentd.report(function_tools_only=gateway, web_search=choice)["argv"]
+    assert ('web_search="disabled"' in argv) is off
+
+
+def test_changing_web_search_restarts_the_process_on_the_same_thread(agentd):
+    first = agentd.report(web_search="on")
+    second = agentd.report(web_search="off")
+    assert first["pid"] != second["pid"] and second["seen"]["method"] == "thread/resume"
 
 
 def test_the_toml_in_the_command_line_cannot_be_broken_out_of(agentd):
@@ -732,3 +744,107 @@ def test_a_gateway_turn_goes_through_the_proxy_and_the_route_is_dropped_with_the
 def test_openai_itself_is_not_proxied(agentd):
     provider = next(a for a in agentd.report(base_url="https://api.openai.com/v1")["argv"] if a.startswith("model_providers.oreshnik="))
     assert 'base_url = "https://api.openai.com/v1"' in provider and agentd.module._compat == {}
+
+
+# ── context, goals ────────────────────────────────────────────────────────────────
+
+def test_a_turn_reports_how_full_the_context_is(agentd):
+    done = next(e for e in agentd.turn("hello") if e["type"] == "turn.completed")
+    assert done["context"] == {"used": 62, "window": 258400, "window_known": True}
+
+
+def test_the_window_of_a_model_codex_does_not_know_is_marked_as_a_guess(agentd):
+    done = next(e for e in agentd.turn("hello", model="unknown-model") if e["type"] == "turn.completed")
+    assert done["context"]["window_known"] is False and done["context"]["window"] == 258400
+
+
+def goal_turn(agentd, objective="довести тесты до зелёного", **over):
+    return agentd.turn(action="goal", prompt=objective, goals=True, goal_budget=over.pop("goal_budget", 100_000), **over)
+
+
+def test_a_goal_runs_turn_after_turn_until_it_is_reached(agentd):
+    events = goal_turn(agentd)
+    assert [e["item"]["text"] for e in events if e["type"] == "item.completed"] == ["шаг 1 к цели", "шаг 2 к цели", "шаг 3 к цели"]
+    assert sum(1 for e in events if e["type"] == "turn.started") == 3 and sum(1 for e in events if e["type"] == "turn.completed") == 3
+    goals = [e["goal"] for e in events if e["type"] == "goal.updated"]
+    assert goals[0]["status"] == "active" and goals[0]["objective"] == "довести тесты до зелёного" and goals[0]["token_budget"] == 100_000
+    assert goals[-1]["status"] == "complete" and goals[-1]["tokens_used"] == 186
+    assert [e["usage"]["output_tokens"] for e in events if e["type"] == "turn.completed"] == [12, 12, 12]  # each turn is accounted on its own
+    assert events[-1]["type"] == "agentd.exit" and events[-1]["timed_out"] is False
+
+
+def test_a_goal_stops_when_its_token_budget_is_spent(agentd):
+    events = goal_turn(agentd, "работай forever", goal_budget=1000 if False else 1000)
+    assert [e["goal"]["status"] for e in events if e["type"] == "goal.updated"][-1] == "budgetLimited"
+    assert sum(1 for e in events if e["type"] == "turn.started") == 17  # 62 tokens a turn against a budget of 1000
+
+
+def test_stop_pauses_the_goal_so_it_does_not_go_on_by_itself(agentd):
+    running = agentd.start("работай forever", action="goal", goals=True, goal_budget=10_000_000)
+    running.wait_for(lambda e: e["type"] == "item.completed")
+    assert agentd.call("POST", "/stop", json={"session_key": "k1"}).json() == {"stopped": True}
+    events = running.finish()
+    assert [e["goal"]["status"] for e in events if e["type"] == "goal.updated"][-1] == "paused"
+    turns = sum(1 for e in events if e["type"] == "turn.started")
+    time.sleep(1.5)  # nothing goes on behind our back: the next message finds the session free and the goal still paused
+    report = agentd.report(goals=True)
+    assert report["seen"]["goalSet"]["status"] == "paused" and turns >= 1
+
+
+def test_a_paused_goal_can_be_set_going_again_without_retyping_it(agentd):
+    running = agentd.start("работай forever", action="goal", goals=True, goal_budget=10_000_000)
+    running.wait_for(lambda e: e["type"] == "item.completed")
+    agentd.call("POST", "/stop", json={"session_key": "k1"})
+    running.finish()
+    again = agentd.start("", action="goal", goals=True)
+    again.wait_for(lambda e: e["type"] == "item.completed")
+    first = next(e["goal"] for e in again.events if e["type"] == "goal.updated")
+    assert first["status"] == "active" and first["objective"] == "работай forever" and first["token_budget"] == 10_000_000
+    agentd.call("POST", "/stop", json={"session_key": "k1"})
+    again.finish()
+
+
+def test_a_hung_up_reader_pauses_the_goal_too(agentd):
+    running = agentd.start("работай forever", action="goal", goals=True, goal_budget=10_000_000)
+    running.wait_for(lambda e: e["type"] == "item.completed")
+    running.hang_up()
+    deadline = time.time() + 15
+    while time.time() < deadline and agentd.call("POST", "/turn", json=agentd.body("again", goals=True)).status_code == 409:
+        time.sleep(0.3)
+    assert agentd.report(goals=True)["seen"]["goalSet"]["status"] == "paused"
+
+
+def test_a_goal_whose_next_turn_never_starts_ends_the_run(agentd, monkeypatch):
+    monkeypatch.setattr(agentd.module, "GOAL_NEXT_TURN_WAIT", 1.0)
+    start = time.time()
+    events = goal_turn(agentd, "silent цель")
+    assert events[-1]["type"] == "agentd.exit" and time.time() - start < 15
+    assert [e["goal"]["status"] for e in events if e["type"] == "goal.updated"][-1] == "paused"  # and it is not left active
+
+
+def test_a_goal_can_be_cleared(agentd):
+    goal_turn(agentd)
+    events = agentd.turn(action="goal_clear", prompt="", goals=True)
+    assert "goal.cleared" in kinds(events) and events[-1]["type"] == "agentd.exit"
+
+
+def test_a_goal_left_active_does_not_start_working_when_the_thread_comes_back(agentd):
+    """E.g. the container was stopped in the middle of a goal: the next ordinary message must not wake an unattended worker."""
+    running = agentd.start("работай forever", action="goal", goals=True, goal_budget=10_000_000)
+    running.wait_for(lambda e: e["type"] == "item.completed")
+    thread = next(e["thread_id"] for e in running.events if e["type"] == "thread.started")
+    session = agentd.module._sessions["k1"]
+    os.killpg(session.server.proc.pid, 9)  # dies with the goal still "active" on disk
+    running.finish()
+    events = agentd.turn("hello", goals=True, thread_id=thread)
+    assert [e["item"]["text"] for e in events if e["type"] == "item.completed" and e["item"]["type"] == "agent_message"] == ["Привет! Это ответ."]
+    time.sleep(1.0)
+    assert agentd.report(goals=True)["seen"]["goalSet"]["status"] == "paused"
+
+
+def test_goals_are_refused_unless_the_session_uses_them_and_a_new_goal_needs_a_budget(agentd):
+    assert agentd.call("POST", "/turn", json=agentd.body("цель", action="goal", goal_budget=5000)).status_code == 422          # goals off
+    assert agentd.call("POST", "/turn", json=agentd.body("цель", action="goal", goals=True)).status_code == 422               # no budget
+    assert agentd.call("POST", "/turn", json=agentd.body("цель", action="goal", goals=True, goal_budget=10)).status_code == 422  # absurd budget
+    assert agentd.call("POST", "/turn", json=agentd.body("", action="goal", goals=True)).status_code == 502                   # nothing to resume
+    assert agentd.report()["argv"][-2:] == ["--disable", "goals"] and agentd.report(goals=True)["argv"][-1] != "goals"

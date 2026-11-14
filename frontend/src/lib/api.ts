@@ -504,6 +504,15 @@ export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/
 
 export type AgentSessionStatus = "idle" | "running";
 export type ApprovalMode = "auto" | "ask";
+export type WebSearchMode = "auto" | "on" | "off";
+/** A goal makes the agent work by itself, turn after turn, until it is reached or its token budget is spent. */
+export interface AgentGoal {
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete" | string;
+  token_budget: number | null;
+  tokens_used: number;
+  seconds_used: number;
+}
 export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
 export interface AgentSession {
@@ -516,6 +525,15 @@ export interface AgentSession {
   instructions: string | null;
   reasoning_effort: string | null;
   approval_mode: ApprovalMode;
+  web_search: WebSearchMode;
+  goal: AgentGoal | null;
+  /** Tokens in the model's context after the last turn, and the window Codex assumes for the model (a guess when `context_window_known` is false). */
+  context_used: number | null;
+  context_window: number | null;
+  context_window_known: boolean;
+  /** Spent by the session in total. */
+  tokens_in: number;
+  tokens_out: number;
   status: AgentSessionStatus;
   turn_count: number;
   last_error: string | null;
@@ -546,11 +564,14 @@ export interface AgentSettingsInput {
   instructions?: string | null;
   reasoning_effort?: string | null;
   approval_mode?: ApprovalMode;
+  web_search?: WebSearchMode;
 }
 export type ReviewTarget = { type: "uncommittedChanges" } | { type: "baseBranch"; branch: string } | { type: "commit"; sha: string } | { type: "custom"; instructions: string };
 export type AgentActionInput =
   | { action: "compact" }
   | { action: "revert" }
+  | { action: "goal"; objective?: string; token_budget?: number }
+  | { action: "goal_clear" }
   | { action: "shell"; command: string }
   | { action: "review"; target?: ReviewTarget };
 export type ApprovalDecision = "accept" | "accept_session" | "decline" | "cancel" | "answer";

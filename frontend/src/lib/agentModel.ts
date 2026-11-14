@@ -136,6 +136,8 @@ function planFrom(key: string, p: Obj, live: boolean): FeedEntry {
 
 const ACTION_TEXT: Record<string, (p: Obj) => string> = {
   compact: () => "Сжать контекст",
+  goal: (p) => (p.resume === true ? "Продолжить работу над целью" : `Цель: ${str(p.objective)}`),
+  goal_clear: () => "Снять цель",
   shell: (p) => `$ ${str(p.command)}`,
   review: (p) => {
     const t = obj(p.target);
@@ -155,6 +157,8 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
   };
 
   let turn = 0;
+  let part = 0; // Codex's own turns inside one user action: a goal runs many, and their item ids repeat
+  const scope = () => `${turn}.${part}`;
   let inputPos = 0; // where the entry that started the current turn sits in the feed (an undo cuts from here)
   const turnPos = new Map<string, number>();
   for (const event of events) {
@@ -164,6 +168,7 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
         const steer = p.steer === true;
         if (!steer) {
           turn += 1;
+          part = 0;
           inputPos = order.length;
         }
         put(`u${event.seq}`, { type: "user", key: `u${event.seq}`, text: str(p.text), steer });
@@ -171,12 +176,14 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
       }
       case "action": {
         turn += 1;
+        part = 0;
         inputPos = order.length;
         const text = (ACTION_TEXT[str(p.action)] ?? (() => str(p.action)))(p);
         put(`x${event.seq}`, { type: "action", key: `x${event.seq}`, text });
         break;
       }
       case "turn.started": {
+        part += 1;
         if (str(p.turn_id)) turnPos.set(str(p.turn_id), inputPos);
         break;
       }
@@ -184,15 +191,15 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
       case "item.updated":
       case "item.completed": {
         const item = obj(p.item);
-        const key = `t${turn}:${str(item.id) || event.seq}`;
+        const key = `t${scope()}:${str(item.id) || event.seq}`;
         put(key, fromItem(key, item, event.kind !== "item.completed"));
         break;
       }
       case "turn.diff":
-        put(`d${turn}`, { type: "diff", key: `d${turn}`, diff: str(p.diff), live: false });
+        put(`d${scope()}`, { type: "diff", key: `d${scope()}`, diff: str(p.diff), live: false });
         break;
       case "turn.plan":
-        put(`p${turn}`, planFrom(`p${turn}`, p, false));
+        put(`p${scope()}`, planFrom(`p${scope()}`, p, false));
         break;
       case "approval.requested": {
         const id = str(p.request_id);
@@ -209,6 +216,15 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
         put(`c${event.seq}`, { type: "usage", key: `c${event.seq}`, inputTokens: num(usage.input_tokens), outputTokens: num(usage.output_tokens) });
         break;
       }
+      case "goal.updated": {
+        const g = obj(p.goal);
+        const status = str(g.status);
+        if (status !== "active") put(`g${event.seq}`, { type: "notice", key: `g${event.seq}`, tone: status === "complete" ? "info" : "warn", text: goalStatusText(status, num(g.tokens_used), typeof g.token_budget === "number" ? g.token_budget : null) });
+        break;
+      }
+      case "goal.cleared":
+        put(`g${event.seq}`, { type: "notice", key: `g${event.seq}`, tone: "info", text: "Цель снята" });
+        break;
       case "thread.reverted": {
         // The conversation went back to before that turn (the files stay as they are): what it produced leaves the feed.
         const cut = turnPos.get(str(p.turn_id));
@@ -235,11 +251,11 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
   // still be on the way out (the socket sends the event first and says the snapshot is gone a moment later).
   for (const [id, item] of Object.entries(live)) {
     if (id === DIFF_KEY) {
-      if (!entries.has(`d${turn}`)) put(`d${turn}`, { type: "diff", key: `d${turn}`, diff: str(item.diff), live: true });
+      if (!entries.has(`d${scope()}`)) put(`d${scope()}`, { type: "diff", key: `d${scope()}`, diff: str(item.diff), live: true });
     } else if (id === PLAN_KEY) {
-      if (!entries.has(`p${turn}`)) put(`p${turn}`, planFrom(`p${turn}`, item, true));
-    } else if (!entries.has(`t${turn}:${id}`)) {
-      put(`t${turn}:${id}`, fromItem(`t${turn}:${id}`, item, true));
+      if (!entries.has(`p${scope()}`)) put(`p${scope()}`, planFrom(`p${scope()}`, item, true));
+    } else if (!entries.has(`t${scope()}:${id}`)) {
+      put(`t${scope()}:${id}`, fromItem(`t${scope()}:${id}`, item, true));
     }
   }
   return order.map((k) => entries.get(k)!);
@@ -269,9 +285,9 @@ export type Composer =
   | { kind: "message"; text: string }
   | { kind: "steer"; text: string }
   | { kind: "shell"; command: string }
-  | { kind: "action"; action: "compact" | "review" | "revert" | "fork"; argument: string };
+  | { kind: "action"; action: "compact" | "review" | "revert" | "fork" | "goal"; argument: string };
 
-const SLASH: Record<string, "compact" | "review" | "revert" | "fork"> = { "/compact": "compact", "/review": "review", "/undo": "revert", "/fork": "fork" };
+const SLASH: Record<string, "compact" | "review" | "revert" | "fork" | "goal"> = { "/compact": "compact", "/review": "review", "/undo": "revert", "/fork": "fork", "/goal": "goal" };
 
 /** What the text in the box means: a message (or, while the agent works, an instruction added to its turn), `!command` for a command of your
  * own, or a slash command like Codex's own. */
@@ -298,4 +314,48 @@ export function usableProfiles<T extends { provider: string }>(profiles: T[]): T
 
 export function formatTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n);
+}
+
+const GOAL_STATUS: Record<string, string> = {
+  active: "в работе",
+  paused: "на паузе",
+  blocked: "агент упёрся: нужна ваша помощь",
+  usageLimited: "остановлена: лимит провайдера",
+  budgetLimited: "остановлена: бюджет токенов исчерпан",
+  complete: "достигнута",
+};
+export const goalStatusLabel = (status: string): string => GOAL_STATUS[status] ?? status;
+
+function goalStatusText(status: string, used: number, budget: number | null): string {
+  return `Цель ${goalStatusLabel(status)} · потрачено ${formatTokens(used)}${budget ? ` из ${formatTokens(budget)}` : ""} токенов`;
+}
+
+/** A goal that is neither reached nor running can be set going again. */
+export function goalResumable(goal: { status: string } | null, status: "idle" | "running"): boolean {
+  return goal !== null && status === "idle" && goal.status !== "complete" && goal.status !== "active";
+}
+
+export interface ContextView {
+  /** 0..100, how full the model's context is; null when it is not known yet. */
+  percent: number | null;
+  tone: "ok" | "warn" | "bad";
+  /** Worth offering «Сжать контекст». */
+  suggestCompact: boolean;
+}
+
+export function contextView(used: number | null, window: number | null): ContextView {
+  if (used === null || !window || window <= 0) return { percent: null, tone: "ok", suggestCompact: false };
+  const percent = Math.min(100, Math.round((used / window) * 100));
+  return { percent, tone: percent >= 90 ? "bad" : percent >= 70 ? "warn" : "ok", suggestCompact: percent >= 70 };
+}
+
+export const DEFAULT_GOAL_BUDGET = 500_000;
+
+/** The budget typed for a goal: a whole number of tokens, "500k" and "2m" allowed. */
+export function parseBudget(raw: string): number | null {
+  const m = /^\s*(\d+(?:[.,]\d+)?)\s*([kкmм]?)\s*$/i.exec(raw);
+  if (!m) return null;
+  const unit = m[2].toLowerCase();
+  const value = Math.round(Number(m[1].replace(",", ".")) * (unit === "k" || unit === "к" ? 1_000 : unit === "m" || unit === "м" ? 1_000_000 : 1));
+  return value >= 10_000 ? value : null;
 }

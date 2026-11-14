@@ -761,7 +761,7 @@ def test_from_scan_is_closed_to_viewers_and_when_the_agent_is_off(client, wired,
 
 # ── gateways ────────────────────────────────────────────────────────────────
 
-FUNCTION_ONLY = ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "goals", "--disable", "image_generation"]
+FUNCTION_ONLY = ["-c", 'web_search="disabled"', "--disable", "multi_agent", "--disable", "image_generation", "--disable", "goals"]
 
 
 def has_run(argv: list[str], run: list[str]) -> bool:
@@ -782,7 +782,7 @@ def test_a_gateway_gets_function_tools_only_and_goes_through_the_proxy(client, w
 def test_openai_itself_keeps_all_tools_and_is_not_proxied(client, wired):
     user, h = op_user(client)
     argv = report(client, h, new_session(client, h, openai_profile(user.id))["id"])["argv"]
-    assert "--disable" not in argv and 'web_search="disabled"' not in argv and 'base_url = "https://api.openai.com/v1"' in provider_arg(argv)
+    assert "multi_agent" not in argv and 'web_search="disabled"' not in argv and 'base_url = "https://api.openai.com/v1"' in provider_arg(argv)
 
 
 def test_the_settings_override_the_automatic_choices(client, wired, monkeypatch):
@@ -792,7 +792,7 @@ def test_the_settings_override_the_automatic_choices(client, wired, monkeypatch)
     monkeypatch.setattr(settings, "agent_tools", "full")
     monkeypatch.setattr(settings, "agent_response_fix", False)
     argv = report(client, h, new_session(client, h, custom_gateway(user.id))["id"])["argv"]
-    assert "--disable" not in argv and 'base_url = "http://gw.internal/v1"' in provider_arg(argv)
+    assert "multi_agent" not in argv and 'base_url = "http://gw.internal/v1"' in provider_arg(argv)
 
 
 def test_agent_tools_setting_is_validated():
@@ -823,3 +823,145 @@ def test_the_panel_says_the_agent_is_fine_when_codex_starts(client, wired, tmp_p
     path.chmod(0o755)
     monkeypatch.setattr(wired.module, "CODEX_BIN", str(path))
     assert agent_service.agent_health() == {"ok": True, "detail": "Агент на связи"}
+
+
+# ── context and spend ────────────────────────────────────────────────────────
+
+def test_the_session_knows_how_full_the_context_is_and_what_it_has_spent(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert (s["context_used"], s["context_window"], s["tokens_in"], s["tokens_out"]) == (None, None, 0, 0)
+    send(client, h, s["id"], "hello")
+    wait_idle(s["id"])
+    one = client.get(f"/api/agent/sessions/{s['id']}", headers=h).json()
+    assert one["context_used"] == 62 and one["context_window"] == 258400 and one["context_window_known"] is True
+    assert one["tokens_in"] > 0 and one["tokens_out"] > 0
+    send(client, h, s["id"], "hello")
+    wait_idle(s["id"])
+    two = client.get(f"/api/agent/sessions/{s['id']}", headers=h).json()
+    assert two["tokens_in"] > one["tokens_in"] and two["tokens_out"] > one["tokens_out"]  # the total grows, turn by turn
+    assert events(s["id"])[-1].payload["context"] == {"used": 62, "window": 258400, "window_known": True}
+
+
+def test_a_window_codex_only_assumes_is_marked(client, wired):
+    user, h = op_user(client)
+    with SessionLocal() as db:
+        p = LLMProfile(user_id=user.id, name="unk", provider=Provider.custom, model="unknown-model", base_url="http://gw.internal/v1", api_key_enc=encrypt("k" * 20), api_key_hint="…kkkk")
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+    s = new_session(client, h, p)
+    send(client, h, s["id"], "hello")
+    wait_idle(s["id"])
+    assert client.get(f"/api/agent/sessions/{s['id']}", headers=h).json()["context_window_known"] is False
+
+
+# ── web search ────────────────────────────────────────────────────────────────
+
+def test_web_search_is_a_setting_of_the_session(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert s["web_search"] == "auto" and 'web_search="disabled"' not in report(client, h, s["id"])["argv"]
+    assert client.patch(f"/api/agent/sessions/{s['id']}", json={"web_search": "off"}, headers=h).json()["web_search"] == "off"
+    assert 'web_search="disabled"' in report(client, h, s["id"])["argv"]
+    gw = new_session(client, h, custom_gateway(user.id), web_search="on")
+    assert 'web_search="disabled"' not in report(client, h, gw["id"])["argv"]  # the user insisted: the gateway gets the tool
+    assert client.patch(f"/api/agent/sessions/{s['id']}", json={"web_search": "maybe"}, headers=h).status_code == 422
+    assert client.post("/api/agent/sessions", json={"llm_profile_id": openai_profile(user.id, "x").id, "web_search": "maybe"}, headers=h).status_code == 422
+
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+def goal(client, headers, session_id: int, **body):
+    return client.post(f"/api/agent/sessions/{session_id}/actions", json={"action": "goal", **body}, headers=headers)
+
+
+def session_json(client, headers, session_id: int) -> dict:
+    return client.get(f"/api/agent/sessions/{session_id}", headers=headers).json()
+
+
+def test_a_goal_makes_the_agent_work_turn_after_turn_until_it_is_reached(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert goal(client, h, s["id"], objective="довести тесты до зелёного", token_budget=100_000).status_code == 202
+    done = wait_idle(s["id"])
+    assert done.last_error is None and done.goal["status"] == "complete" and done.goal["objective"] == "довести тесты до зелёного" and done.goal["tokens_used"] == 186
+    got = events(s["id"])
+    assert got[0].kind == "action" and got[0].payload == {"action": "goal", "objective": "довести тесты до зелёного", "token_budget": 100_000}
+    assert [e.payload["item"]["text"] for e in got if e.kind == "item.completed"] == ["шаг 1 к цели", "шаг 2 к цели", "шаг 3 к цели"]
+    assert [e.payload["goal"]["status"] for e in got if e.kind == "goal.updated"] == ["active", "complete"]  # a line when it changes, not after every turn
+    assert sum(1 for e in got if e.kind == "turn.completed") == 3 and done.tokens_out == 36  # every self-started turn is counted
+
+
+def test_a_goal_needs_an_objective_and_a_budget_within_the_ceiling(client, wired, monkeypatch):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert goal(client, h, s["id"]).status_code == 422                                           # nothing to resume, nothing typed
+    assert goal(client, h, s["id"], objective="цель").status_code == 422                         # no budget
+    assert goal(client, h, s["id"], objective="цель", token_budget=500).status_code == 422       # absurdly small
+    monkeypatch.setattr(settings, "agent_goal_max_tokens", 50_000)
+    r = goal(client, h, s["id"], objective="цель", token_budget=60_000)
+    assert r.status_code == 422 and "не больше 50000" in r.json()["detail"]
+    assert events(s["id"]) == [] and load(s["id"]).status == AgentSessionStatus.idle
+    assert client.post(f"/api/agent/sessions/{s['id']}/actions", json={"action": "goal_clear"}, headers=h).status_code == 409
+
+
+def test_a_goal_stops_at_its_budget(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    goal(client, h, s["id"], objective="работай forever", token_budget=10_000)
+    done = wait_idle(s["id"], timeout=120)
+    assert done.goal["status"] == "budgetLimited" and done.goal["tokens_used"] >= 10_000 and done.last_error is None
+
+
+def test_stop_pauses_the_goal_and_it_can_be_set_going_again_or_cleared(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    bg = Bg(lambda: goal(client, h, s["id"], objective="работай forever", token_budget=1_000_000))
+    wait_for(lambda: any(e.kind == "item.completed" for e in events(s["id"])), what="the first step")
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    bg.join()
+    paused = wait_idle(s["id"])
+    assert paused.goal["status"] == "paused" and kinds_of(s["id"])[-1] == "turn.stopped"
+    steps = sum(1 for e in events(s["id"]) if e.kind == "item.completed")
+    time.sleep(1.2)
+    assert sum(1 for e in events(s["id"]) if e.kind == "item.completed") == steps and load(s["id"]).status == AgentSessionStatus.idle  # it does not go on by itself
+
+    again = Bg(lambda: goal(client, h, s["id"]))  # no text: the same goal, going again
+    wait_for(lambda: sum(1 for e in events(s["id"]) if e.kind == "item.completed") > steps, what="another step")
+    client.post(f"/api/agent/sessions/{s['id']}/stop", headers=h)
+    again.join()
+    wait_idle(s["id"])
+    assert [e.payload for e in events(s["id"]) if e.kind == "action"][-1] == {"action": "goal", "resume": True}
+
+    assert client.post(f"/api/agent/sessions/{s['id']}/actions", json={"action": "goal_clear"}, headers=h).status_code == 202
+    cleared = wait_idle(s["id"])
+    assert cleared.goal is None and "goal.cleared" in kinds_of(s["id"])
+
+
+def test_a_reached_goal_cannot_be_resumed(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    goal(client, h, s["id"], objective="цель", token_budget=100_000)
+    wait_idle(s["id"])
+    assert goal(client, h, s["id"]).status_code == 409
+
+
+def test_codexs_goal_feature_is_on_only_for_a_session_that_has_a_goal(client, wired):
+    """Otherwise the model could set itself a goal and Codex would go on working with nobody watching."""
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id))
+    assert report(client, h, s["id"])["argv"][-2:] == ["--disable", "goals"]
+    goal(client, h, s["id"], objective="цель", token_budget=100_000)
+    wait_idle(s["id"])
+    assert "goals" not in report(client, h, s["id"])["argv"]
+    assert load(s["id"]).goal["status"] == "complete"  # an ordinary message does not wake a goal that is over
+
+
+def test_a_fork_keeps_the_goal_the_web_search_choice_and_the_context(client, wired):
+    user, h = op_user(client)
+    s = new_session(client, h, openai_profile(user.id), web_search="off")
+    goal(client, h, s["id"], objective="цель", token_budget=100_000)
+    wait_idle(s["id"])
+    c = client.post(f"/api/agent/sessions/{s['id']}/fork", headers=h).json()
+    assert c["web_search"] == "off" and c["goal"]["status"] == "complete" and c["context_used"] == 62
