@@ -36,6 +36,7 @@ from app.schemas.scan import (
 from app.services.activity import ActivityTailer
 from app.services.artifacts import SEVERITY_ORDER
 from app.services.scan_files import (
+    LogWriter,
     activity_path,
     agents_path,
     find_run_dir,
@@ -211,6 +212,10 @@ def continue_scan(
     By default the scan continues **in place**: the same scan (same id, log, agents and findings) goes back to the
     queue and Strix picks the run up where it left off; the instruction reaches the root agent. With `as_new_scan`
     a NEW scan is created on a copy of the run instead, and this one stays exactly as it is.
+
+    A scan that failed or was stopped **before Strix created a run** (the model was unreachable, Docker failed, it was
+    stopped in the queue) has nothing to resume: for it "continue" starts the same scan again from the beginning, with the
+    same targets, mode and instruction (a new instruction, if given, replaces the old one).
     """
     scan = _get_visible(db, user, scan_id)
     in_place = not body.as_new_scan
@@ -222,10 +227,12 @@ def continue_scan(
         )
     if scan.status not in FINAL_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, "Скан ещё выполняется — продолжить можно только завершённый")
-    try:
-        check_resumable(scan.id, scan.run_name)
-    except ResumeError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    restart = scan.run_name is None and scan.status in (ScanStatus.failed, ScanStatus.cancelled)
+    if not restart:
+        try:
+            check_resumable(scan.id, scan.run_name)
+        except ResumeError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
     runner = scan.runner
     if runner is None:
@@ -274,14 +281,15 @@ def continue_scan(
             f"Лимит бюджета общий для всего прогона, а уже потрачено ${scan.cost:.2f}. Укажите больше или оставьте пустым.",
         )
 
-    # Strix names the sandbox containers after the run, so one run must never be active twice.
-    busy = db.scalar(
-        select(Scan.id)
-        .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == scan.run_name, Scan.run_name == scan.run_name))
-        .limit(1)
-    )
-    if busy is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"Этот прогон уже продолжается в скане #{busy}")
+    # Strix names the sandbox containers after the run, so one run must never be active twice. (A restart has no run yet.)
+    if not restart:
+        busy = db.scalar(
+            select(Scan.id)
+            .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == scan.run_name, Scan.run_name == scan.run_name))
+            .limit(1)
+        )
+        if busy is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Этот прогон уже продолжается в скане #{busy}")
 
     # Same room rules as a new scan, on the runner this one goes back to (and it takes the runner's row lock until the
     # commit below, so a second request cannot count the same free place).
@@ -289,6 +297,24 @@ def continue_scan(
         check_runner_capacity(db, user, runner, list(scan.targets))
     except ScanRequestError as exc:
         raise HTTPException(exc.status_code, exc.detail)
+
+    if restart and not in_place:
+        # Somebody else's scan that never started: a plain new scan of the same thing, on your key. Nothing links them —
+        # there is no run to carry over.
+        fresh = Scan(
+            user_id=user.id,
+            runner_id=runner.id,
+            llm_profile_id=profile.id if profile else None,
+            llm_model=model,
+            targets=list(scan.targets),
+            scan_mode=scan.scan_mode,
+            instruction=body.instruction or scan.instruction,
+            max_budget=body.max_budget,
+            status=ScanStatus.queued,
+        )
+        db.add(fresh)
+        db.commit()
+        return _enqueue(db, fresh, user)
 
     if not in_place:
         child = Scan(
@@ -312,6 +338,37 @@ def continue_scan(
     # In place. The seconds the scan was active so far are banked, because started_at restarts with the next run.
     now = datetime.now(timezone.utc)
     ran = (scan.finished_at - scan.started_at).total_seconds() if scan.started_at and scan.finished_at else 0.0
+    if restart:
+        # The same scan from the beginning: no run to resume, so nothing about resuming changes.
+        moved = db.execute(
+            update(Scan)
+            .where(Scan.id == scan.id, Scan.status.in_(FINAL_STATUSES), Scan.run_name.is_(None))
+            .values(
+                status=ScanStatus.queued,
+                status_detail=None,
+                exit_code=None,
+                started_at=None,
+                finished_at=None,
+                heartbeat_at=None,
+                elapsed_base=scan.elapsed_base + max(ran, 0.0),
+                instruction=body.instruction or scan.instruction,
+                max_budget=body.max_budget,
+                llm_profile_id=profile.id if profile else scan.llm_profile_id,
+                llm_model=model,
+            )
+        ).rowcount
+        db.commit()
+        if moved == 0:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Скан уже продолжается")
+        try:  # the log carries on after the failed attempt: mark where the new one begins
+            marker = LogWriter(scan.id)
+            marker.write("[oreshnik] ── Повторный запуск: прошлая попытка не дошла до старта Strix ──")
+            marker.close()
+        except OSError as exc:
+            log.warning("scan %s: could not mark the restart in the log: %s", scan.id, exc)
+        response.status_code = status.HTTP_200_OK
+        return _enqueue(db, scan, user)
+
     history = list(scan.resume_history or []) + [
         {"at": now.isoformat(), "instruction": body.instruction, "max_budget": body.max_budget}
     ]

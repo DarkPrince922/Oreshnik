@@ -134,7 +134,8 @@ def test_only_finished_scans_can_be_continued(client, operator, mock_runner, sta
 
 def test_a_scan_without_run_data_cannot_be_continued(client, operator, mock_runner):
     me = client.get("/api/auth/me", headers=operator).json()["id"]
-    never_ran = make_scan(me, mock_runner.id, status=ScanStatus.failed)
+    # (a scan that FAILED before Strix created a run is started again instead: tests/test_restart.py)
+    never_ran = make_scan(me, mock_runner.id, status=ScanStatus.succeeded)
     assert "не дошёл до запуска" in cont(client, operator, never_ran.id, instruction="x").json()["detail"]
     scan = make_scan(me, mock_runner.id, status=ScanStatus.failed, run_name="r1")
     run = _fake_run_dir(scan.id)

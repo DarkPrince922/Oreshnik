@@ -6,7 +6,7 @@ import { useAuth } from "../lib/auth";
 import ModelSelect from "./ModelSelect";
 import { continueScan, errorMessage, listProfiles, type LLMProfile, type Scan } from "../lib/api";
 import { modelToSend, resolveChoice, type Choice } from "../lib/modelChoice";
-import { budgetProblem, canContinueInPlace, defaultBudget, instructionRequired, parseBudget } from "../lib/continueScan";
+import { budgetProblem, canContinueInPlace, defaultBudget, instructionRequired, parseBudget, type ContinueKind } from "../lib/continueScan";
 import { formatCost } from "../lib/format";
 import { Button, ErrorNote, Field, Modal } from "./ui";
 
@@ -15,14 +15,19 @@ import { Button, ErrorNote, Field, Modal } from "./ui";
  *
  * By default the scan continues IN PLACE: the same scan (same number, log, agents and findings) goes back to work and the
  * instruction reaches the root agent. Optionally a NEW scan is created on a copy of the run, and this one stays as it is.
+ *
+ * `kind="restart"`: the scan failed or was stopped before Strix created a run (e.g. the model was unreachable), so there is
+ * nothing to resume — the same scan starts again from the beginning. No instruction is asked for: it keeps its own.
  */
 export default function ContinueModal({
   scan,
+  kind = "resume",
   open,
   onClose,
   onContinued,
 }: {
   scan: Scan;
+  kind?: ContinueKind;
   open: boolean;
   onClose: () => void;
   /** The scan went back to work in place (it is the same scan, updated). */
@@ -32,8 +37,9 @@ export default function ContinueModal({
   const { user } = useAuth();
   const inPlaceAllowed = canContinueInPlace(scan, user?.id);
   const [asNew, setAsNew] = useState(false);
-  const newScan = asNew || !inPlaceAllowed;
-  const needsInstruction = instructionRequired(scan);
+  const restart = kind === "restart";
+  const newScan = (asNew && !restart) || !inPlaceAllowed;
+  const needsInstruction = !restart && instructionRequired(scan);
   const needsProfile = scan.runner_kind !== null && scan.runner_kind !== "mock";
 
   const [instruction, setInstruction] = useState("");
@@ -79,7 +85,7 @@ export default function ContinueModal({
     setError(null);
     try {
       const result = await continueScan(scan.id, {
-        instruction: instruction.trim() || null,
+        instruction: restart ? null : instruction.trim() || null,
         max_budget: parseBudget(budget),
         llm_profile_id: needsProfile ? profileId : null,
         llm_model: needsProfile ? modelToSend(profiles ?? [], choice) : null,
@@ -99,8 +105,16 @@ export default function ContinueModal({
     <Modal open={open} onClose={onClose} title={`Продолжить скан #${scan.id}`}>
       <form onSubmit={submit} className="space-y-4">
         <p className="rounded-lg border border-white/10 bg-white/5 px-3.5 py-3 text-xs leading-relaxed text-slate-400" data-testid="continue-explainer">
-          Strix продолжит этот же прогон: агенты помнят всё, что уже сделали, а ваша инструкция уйдёт корневому агенту.{" "}
-          {newScan ? (
+          {restart ? (
+            <>
+              Скан не дошёл до старта Strix (например, модель была недоступна), поэтому продолжать нечего:{" "}
+              <span className="text-slate-200">он запустится заново</span> — с теми же целями, режимом и инструкцией.{" "}
+              {newScan ? "Будет создан новый скан, а этот останется как есть." : "Номер скана тот же, лог дописывается в конец."}
+            </>
+          ) : (
+            <>Strix продолжит этот же прогон: агенты помнят всё, что уже сделали, а ваша инструкция уйдёт корневому агенту. </>
+          )}
+          {restart ? null : newScan ? (
             <>
               Создаётся <span className="text-slate-200">новый скан</span>, а этот остаётся без изменений. Находки и стоимость в
               новом скане накопительные — включают то, что найдено здесь.
@@ -113,6 +127,7 @@ export default function ContinueModal({
           )}
         </p>
 
+        {!restart && (
         <Field
           label={needsInstruction ? "Что делать дальше" : "Что делать дальше (необязательно)"}
           hint={
@@ -130,7 +145,11 @@ export default function ContinueModal({
             required={needsInstruction}
           />
         </Field>
+        )}
 
+        {restart && !inPlaceAllowed && <p className="text-xs text-signal-warn">Это чужой скан: он запустится как новый скан на вашем ключе.</p>}
+
+        {!restart && (
         <label className="flex items-start gap-3 text-xs leading-relaxed text-slate-400">
           <input
             type="checkbox"
@@ -147,6 +166,7 @@ export default function ContinueModal({
             )}
           </span>
         </label>
+        )}
 
         {needsProfile && (
           <Field label="Модель">
@@ -160,8 +180,8 @@ export default function ContinueModal({
         )}
 
         <Field
-          label="Лимит бюджета на весь прогон, $ (необязательно)"
-          hint={spent !== null && spent > 0 ? `Strix считает лимит по всему прогону, а не по продолжению. Уже потрачено ${formatCost(spent)}.` : "Strix считает лимит по всему прогону, а не по продолжению."}
+          label={restart ? "Лимит бюджета, $ (необязательно)" : "Лимит бюджета на весь прогон, $ (необязательно)"}
+          hint={restart ? undefined : spent !== null && spent > 0 ? `Strix считает лимит по всему прогону, а не по продолжению. Уже потрачено ${formatCost(spent)}.` : "Strix считает лимит по всему прогону, а не по продолжению."}
         >
           <input className="field font-mono" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="без лимита" aria-invalid={budgetError !== null} />
         </Field>
@@ -170,7 +190,7 @@ export default function ContinueModal({
         <ErrorNote message={error} />
         <div className="flex justify-end gap-2 pt-1">
           <Button type="button" onClick={onClose}>Отмена</Button>
-          <Button type="submit" variant="primary" loading={busy} disabled={!canSubmit}>Продолжить</Button>
+          <Button type="submit" variant="primary" loading={busy} disabled={!canSubmit}>{restart ? "Запустить заново" : "Продолжить"}</Button>
         </div>
       </form>
     </Modal>

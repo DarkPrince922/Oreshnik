@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { budgetProblem, canContinueInPlace, defaultBudget, instructionRequired, parseBudget } from "./continueScan";
+import { budgetProblem, canContinueInPlace, continueKind, defaultBudget, instructionRequired, parseBudget } from "./continueScan";
 
 describe("instructionRequired", () => {
   it("is needed after a scan that finished on its own, not after a stopped or failed one", () => {
@@ -49,5 +49,22 @@ describe("canContinueInPlace", () => {
   it("is false while the current user is unknown", () => {
     expect(canContinueInPlace({ user_id: 7 }, undefined)).toBe(false);
     expect(canContinueInPlace({ user_id: 7 }, null)).toBe(false);
+  });
+});
+
+describe("continueKind", () => {
+  const scan = (status: string, run_name: string | null, runner_name: string | null = "local") => ({ status, run_name, runner_name }) as Parameters<typeof continueKind>[0];
+
+  it("resumes a scan that has a Strix run", () => {
+    for (const status of ["succeeded", "vulns_found", "failed", "cancelled"]) expect(continueKind(scan(status, "run-1"))).toBe("resume");
+  });
+  it("restarts a scan that failed or was stopped before Strix created a run (e.g. the model was unreachable)", () => {
+    expect(continueKind(scan("failed", null))).toBe("restart");
+    expect(continueKind(scan("cancelled", null))).toBe("restart");
+  });
+  it("offers nothing for a scan that finished without a run, or whose runner is gone", () => {
+    expect(continueKind(scan("succeeded", null))).toBeNull();
+    expect(continueKind(scan("failed", null, null))).toBeNull();
+    expect(continueKind(scan("failed", "run-1", null))).toBeNull();
   });
 });
