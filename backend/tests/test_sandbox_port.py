@@ -1,4 +1,6 @@
 """The sandbox host-port clash: a sandbox network (no published port) and a restart when it happens anyway."""
+from types import SimpleNamespace
+
 from app.core.config import Settings, settings
 from app.engine import LocalRunner, RunResult
 from app.engine.base import strix_sandbox_env
@@ -26,7 +28,7 @@ class Scripted:
 
 def go(engine, **kw):
     out: list[str] = []
-    result = run_with_port_retry(engine, None, out.append, kw.pop("cancel", lambda: False), sleep=lambda _s: None, **kw)
+    result = run_with_port_retry(engine, SimpleNamespace(scan_id=1), out.append, kw.pop("cancel", lambda: False), sleep=lambda _s: None, **kw)
     return result, out
 
 
