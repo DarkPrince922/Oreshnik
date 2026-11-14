@@ -674,3 +674,15 @@ export const getAppSettings = async () => (await api.get<{ groups: AppSettingsGr
 /** key -> new value; `null` resets that parameter to its default. All or nothing. */
 export const updateAppSettings = async (values: Record<string, SettingValue | null>) =>
   (await api.put<{ groups: AppSettingsGroup[] }>("/api/settings", { values })).data.groups;
+
+// ── Огоньки в меню ───────────────────────────────────────────────────────
+//
+// What is new since the user last opened «Сканы» / «Агент» (see backend/app/api/attention.py).
+
+export interface Attention {
+  /** The server's clock: stored as "seen" when a section is opened. */
+  now: string;
+  scans: { finished: number; failed: number; findings: number };
+  agent: { finished: number; waiting: number };
+}
+export const getAttention = async (params: { scans_since?: string; agent_since?: string }) => (await api.get<Attention>("/api/attention", { params })).data;

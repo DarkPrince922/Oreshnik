@@ -4,7 +4,9 @@ import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import type { Role } from "../lib/api";
+import { SECTION_PATH, type Section, type Tone } from "../lib/attention";
 import { useAuth } from "../lib/auth";
+import { useAttention } from "../lib/useAttention";
 import Logo from "./Logo";
 import { Badge } from "./ui";
 
@@ -148,11 +150,14 @@ const NAV: NavItem[] = [
 ];
 
 const ROLE_TONE = { admin: "accent", operator: "ok", viewer: "muted" } as const;
+const LIGHT_TONE: Record<Tone, string> = { ok: "bg-signal-ok", warn: "bg-signal-warn", bad: "bg-signal-bad", accent: "bg-accent-soft" };
+const SECTION_BY_PATH = Object.fromEntries(Object.entries(SECTION_PATH).map(([section, path]) => [path, section as Section]));
 
 export default function Layout() {
   const { user, logout, hasRole } = useAuth();
   const location = useLocation();
   const items = NAV.filter((n) => !n.roles || hasRole(...n.roles));
+  const lit = useAttention(user?.id ?? null, location.pathname);
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
@@ -184,6 +189,16 @@ export default function Layout() {
                   )}
                   <span className="relative">{item.icon}</span>
                   <span className="relative whitespace-nowrap">{item.label}</span>
+                  {(() => {
+                    const light = lit[SECTION_BY_PATH[item.to]];
+                    if (!light) return null;
+                    return (
+                      <span className="relative ml-auto flex h-2 w-2" title={light.title} aria-label={light.title} role="status">
+                        {light.pulse && <span className={clsx("absolute inline-flex h-full w-full animate-ping rounded-full opacity-70", LIGHT_TONE[light.tone])} />}
+                        <span className={clsx("relative inline-flex h-2 w-2 rounded-full", LIGHT_TONE[light.tone])} />
+                      </span>
+                    );
+                  })()}
                 </div>
               )}
             </NavLink>

@@ -1166,3 +1166,17 @@ The feed keyed a step by (user action, item id); a goal runs many Codex turns in
 
 `test_agentd.py` +18 (context, the guessed window, web search choices, a goal to completion, to its budget, Stop, resume, a hung-up reader, no next turn, clear, an active goal left behind, refusals), `test_agent.py` +11 (the same through the panel, totals, the budget ceiling, fork),
 `agentModel.test.ts` +8. Real Codex through the final agentd: budget run to `budgetLimited`, nothing calling the model afterwards, Stop → paused, a paused goal stays quiet, resume, completion by the model, clear, goal tools absent when off.
+
+## 25. Lights in the menu: something new in «Сканы» and «Агент»
+
+A small light next to «Сканы» and «Агент» in the menu, lit when something happened since the user last opened that section and off once it is opened
+(asked for instead of browser notifications: nothing to permit, works on plain HTTP).
+
+- `GET /api/attention?scans_since=&agent_since=` counts, **for the user's own things only**: scans that reached a final state after `scans_since` (a scan the user cancelled is no news; `failed` and
+  `findings` colour the light red / amber, otherwise green), agent sessions whose turn ended after `agent_since` and that are idle now, and — regardless of time — sessions where the agent is **waiting
+  for the user's answer** (amber, pulsing; it stays lit until the question is answered, also after the page was opened and left).
+- "Last opened" lives in the browser's `localStorage`, per account and section, as the **server's** time (the reply's `now`), so a wrong clock on the computer does not matter. The first time nothing is remembered,
+  everything counts as seen: old scans do not light up. It is per browser, not per account: another device has its own lights.
+- The page polls every 8 s (every 32 s in a background tab); the section being looked at never has a light. A tooltip says what is new («2 скана завершено, с находками: 1»).
+
+Tests: `tests/test_attention.py` (8), `src/lib/attention.test.ts` (7); the off-on-open behaviour was also driven in a real browser against a stubbed API.
