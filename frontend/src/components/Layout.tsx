@@ -4,7 +4,9 @@ import type { ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import type { Role } from "../lib/api";
+import { SECTION_PATH, type Section, type Tone } from "../lib/attention";
 import { useAuth } from "../lib/auth";
+import { useAttention } from "../lib/useAttention";
 import Logo from "./Logo";
 import { Badge } from "./ui";
 
@@ -91,12 +93,35 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    to: "/agent",
+    label: "Агент",
+    roles: ["admin", "operator"],
+    icon: icon(
+      <>
+        <rect x="4" y="5" width="16" height="12" rx="2.5" />
+        <path d="M8 21h8M12 17v4M9 11h.01M15 11h.01" />
+      </>
+    ),
+  },
+  {
     to: "/ops",
     label: "Операции",
     roles: ["admin"],
     icon: icon(
       <>
         <path d="M4 17l5-5-5-5M12 19h8" />
+      </>
+    ),
+  },
+  {
+    to: "/settings",
+    label: "Настройки",
+    roles: ["admin"],
+    icon: icon(
+      <>
+        <path d="M4 7h10M18 7h2M4 17h2M10 17h10" />
+        <circle cx="16" cy="7" r="2" />
+        <circle cx="8" cy="17" r="2" />
       </>
     ),
   },
@@ -125,11 +150,14 @@ const NAV: NavItem[] = [
 ];
 
 const ROLE_TONE = { admin: "accent", operator: "ok", viewer: "muted" } as const;
+const LIGHT_TONE: Record<Tone, string> = { ok: "bg-signal-ok", warn: "bg-signal-warn", bad: "bg-signal-bad", accent: "bg-accent-soft" };
+const SECTION_BY_PATH = Object.fromEntries(Object.entries(SECTION_PATH).map(([section, path]) => [path, section as Section]));
 
 export default function Layout() {
   const { user, logout, hasRole } = useAuth();
   const location = useLocation();
   const items = NAV.filter((n) => !n.roles || hasRole(...n.roles));
+  const lit = useAttention(user?.id ?? null, location.pathname);
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
@@ -161,6 +189,16 @@ export default function Layout() {
                   )}
                   <span className="relative">{item.icon}</span>
                   <span className="relative whitespace-nowrap">{item.label}</span>
+                  {(() => {
+                    const light = lit[SECTION_BY_PATH[item.to]];
+                    if (!light) return null;
+                    return (
+                      <span className="relative ml-auto flex h-2 w-2" title={light.title} aria-label={light.title} role="status">
+                        {light.pulse && <span className={clsx("absolute inline-flex h-full w-full animate-ping rounded-full opacity-70", LIGHT_TONE[light.tone])} />}
+                        <span className={clsx("relative inline-flex h-2 w-2 rounded-full", LIGHT_TONE[light.tone])} />
+                      </span>
+                    );
+                  })()}
                 </div>
               )}
             </NavLink>

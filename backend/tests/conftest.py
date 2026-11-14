@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
+from app.core import runtime_settings  # noqa: E402  (takes the baseline now, before any test changes `settings`)
 from app.core.db import SessionLocal, engine  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 from app.models import LLMProfile, Provider, Role, Runner, RunnerKind, RunnerStatus, Scan, ScanMode, ScanStatus, Schedule, User  # noqa: E402
@@ -58,6 +59,8 @@ def _database():
 def _clean_state(monkeypatch, tmp_path):
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE users, llm_profiles, runners, scans, findings, schedules RESTART IDENTITY CASCADE"))
+
+    runtime_settings.apply({})  # nothing set in «Настройки» leaks from one test into the next
 
     # Scan artifacts go to a per-test directory; the simulated runner runs at full speed;
     # a stuck fake Strix is escalated quickly.

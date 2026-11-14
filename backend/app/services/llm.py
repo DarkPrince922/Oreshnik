@@ -49,13 +49,71 @@ def key_hint(api_key: str) -> str:
     return "…" + api_key[-4:] if len(api_key) >= 12 else "•••"
 
 
-def build_strix_env(profile: LLMProfile) -> dict[str, str]:
+def strix_api_type(profile: LLMProfile) -> str | None:
+    """Which OpenAI API route Strix should use for this profile (`STRIX_API_TYPE`), or None to leave it to Strix.
+
+    Strix's agent loop picks Responses or chat completions from its LiteLLM catalog by model name. On the Responses route it
+    sends native "custom" tools (its file tools), which a self-hosted or third-party OpenAI-compatible gateway usually
+    does not implement ("This endpoint supports function tools only", HTTP 400). A `custom` profile is by definition such
+    a gateway, so it gets chat completions, where Strix turns every tool into a plain function. The admin setting
+    `STRIX_API_TYPE` overrides this for all profiles.
+    """
+    from app.core.config import settings
+
+    if settings.strix_api_type != "auto":
+        return settings.strix_api_type
+    return "chat_completions" if profile.provider == Provider.custom else None
+
+
+MAX_SAVED_MODELS = 1000
+
+
+def profile_models(profile: LLMProfile) -> list[str]:
+    """Every model a scan may pick on this profile: its own default first, then the saved list; no repeats."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in [profile.model, *(profile.models or [])]:
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def validate_model(profile: LLMProfile, model: str | None) -> str | None:
+    """`model` as it should be stored for a use of `profile` (None = the profile's own default), or `ValueError` with a message
+    fit to show: a model must be one of the profile's (its default, or the list saved by «Загрузить модели»)."""
+    if not model:
+        return None
+    if model not in profile_models(profile):
+        raise ValueError(f"Модели «{model}» нет в профиле «{profile.name}»: загрузите список моделей в разделе «LLM-профили»")
+    return model
+
+
+def clean_model_list(names: list[str] | None) -> list[str]:
+    """A model list as it is stored: trimmed, without blanks or repeats, each id and the whole list bounded."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in names or []:
+        name = name.strip() if isinstance(name, str) else ""
+        if name and len(name) <= 200 and name not in seen:
+            seen.add(name)
+            out.append(name)
+        if len(out) >= MAX_SAVED_MODELS:
+            break
+    return out
+
+
+def build_strix_env(profile: LLMProfile, model: str | None = None) -> dict[str, str]:
+    """The environment Strix needs for `profile`; `model` (one of the profile's models) replaces the profile's default."""
     env = {
-        "STRIX_LLM": strix_model_id(profile.provider, profile.model),
+        "STRIX_LLM": strix_model_id(profile.provider, model or profile.model),
         "LLM_API_KEY": decrypt(profile.api_key_enc),
     }
     if profile.base_url:
         env["LLM_API_BASE"] = profile.base_url
+    api_type = strix_api_type(profile)
+    if api_type:
+        env["STRIX_API_TYPE"] = api_type
     return env
 
 

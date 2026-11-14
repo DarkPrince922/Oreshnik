@@ -8,7 +8,7 @@ from typing import Literal
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, status
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, or_, select, true, update
+from sqlalchemy import String, cast, func, or_, select, true, update
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -16,6 +16,7 @@ from app.api.deps import get_current_user, require_operator
 from app.core.db import SessionLocal, get_db
 from app.core.security import decode_access_token
 from app.models.llm_profile import LLMProfile
+from app.services.llm import profile_models
 from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, FINAL_STATUSES, Finding, Scan, ScanStatus
 from app.models.schedule import Schedule
@@ -35,6 +36,7 @@ from app.schemas.scan import (
 from app.services.activity import ActivityTailer
 from app.services.artifacts import SEVERITY_ORDER
 from app.services.scan_files import (
+    LogWriter,
     activity_path,
     agents_path,
     find_run_dir,
@@ -116,6 +118,7 @@ def _out(
         runner_kind=scan.runner.kind.value if scan.runner else None,
         llm_profile_id=scan.llm_profile_id,
         llm_profile_name=scan.llm_profile.name if scan.llm_profile else None,
+        llm_model=scan.llm_model or (scan.llm_profile.model if scan.llm_profile else None),
         targets=scan.targets,
         scan_mode=scan.scan_mode,
         instruction=None if viewer.role == Role.viewer else scan.instruction,
@@ -174,6 +177,7 @@ def create_scan(
             max_budget=body.max_budget,
             runner_id=body.runner_id,
             llm_profile_id=body.llm_profile_id,
+            llm_model=body.llm_model or None,
         )
     except ScanRequestError as exc:
         raise HTTPException(exc.status_code, exc.detail)
@@ -208,6 +212,10 @@ def continue_scan(
     By default the scan continues **in place**: the same scan (same id, log, agents and findings) goes back to the
     queue and Strix picks the run up where it left off; the instruction reaches the root agent. With `as_new_scan`
     a NEW scan is created on a copy of the run instead, and this one stays exactly as it is.
+
+    A scan that failed or was stopped **before Strix created a run** (the model was unreachable, Docker failed, it was
+    stopped in the queue) has nothing to resume: for it "continue" starts the same scan again from the beginning, with the
+    same targets, mode and instruction (a new instruction, if given, replaces the old one).
     """
     scan = _get_visible(db, user, scan_id)
     in_place = not body.as_new_scan
@@ -219,10 +227,12 @@ def continue_scan(
         )
     if scan.status not in FINAL_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, "Скан ещё выполняется — продолжить можно только завершённый")
-    try:
-        check_resumable(scan.id, scan.run_name)
-    except ResumeError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    restart = scan.run_name is None and scan.status in (ScanStatus.failed, ScanStatus.cancelled)
+    if not restart:
+        try:
+            check_resumable(scan.id, scan.run_name)
+        except ResumeError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
     runner = scan.runner
     if runner is None:
@@ -249,6 +259,20 @@ def continue_scan(
         else:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Выберите свой LLM-профиль")
 
+    # The model: what the scan had, unless it moves to another profile or the user picks one. Always one of the profile's own.
+    model = scan.llm_model if profile is None or profile.id == scan.llm_profile_id else None
+    if body.llm_model:
+        if profile is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Модель выбирается вместе с LLM-профилем")
+        if body.llm_model not in profile_models(profile):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Модели «{body.llm_model}» нет в профиле «{profile.name}»: загрузите список моделей в разделе «LLM-профили»",
+            )
+        model = body.llm_model
+    elif profile is None or (model is not None and model not in profile_models(profile)):
+        model = None
+
     # Strix compares the budget with the cost of the WHOLE run, so a limit at or below what was already
     # spent would stop the continuation immediately.
     if body.max_budget is not None and scan.cost is not None and body.max_budget <= scan.cost:
@@ -257,14 +281,15 @@ def continue_scan(
             f"Лимит бюджета общий для всего прогона, а уже потрачено ${scan.cost:.2f}. Укажите больше или оставьте пустым.",
         )
 
-    # Strix names the sandbox containers after the run, so one run must never be active twice.
-    busy = db.scalar(
-        select(Scan.id)
-        .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == scan.run_name, Scan.run_name == scan.run_name))
-        .limit(1)
-    )
-    if busy is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"Этот прогон уже продолжается в скане #{busy}")
+    # Strix names the sandbox containers after the run, so one run must never be active twice. (A restart has no run yet.)
+    if not restart:
+        busy = db.scalar(
+            select(Scan.id)
+            .where(Scan.status.in_(ACTIVE_STATUSES), or_(Scan.resume_run_name == scan.run_name, Scan.run_name == scan.run_name))
+            .limit(1)
+        )
+        if busy is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Этот прогон уже продолжается в скане #{busy}")
 
     # Same room rules as a new scan, on the runner this one goes back to (and it takes the runner's row lock until the
     # commit below, so a second request cannot count the same free place).
@@ -273,11 +298,30 @@ def continue_scan(
     except ScanRequestError as exc:
         raise HTTPException(exc.status_code, exc.detail)
 
+    if restart and not in_place:
+        # Somebody else's scan that never started: a plain new scan of the same thing, on your key. Nothing links them —
+        # there is no run to carry over.
+        fresh = Scan(
+            user_id=user.id,
+            runner_id=runner.id,
+            llm_profile_id=profile.id if profile else None,
+            llm_model=model,
+            targets=list(scan.targets),
+            scan_mode=scan.scan_mode,
+            instruction=body.instruction or scan.instruction,
+            max_budget=body.max_budget,
+            status=ScanStatus.queued,
+        )
+        db.add(fresh)
+        db.commit()
+        return _enqueue(db, fresh, user)
+
     if not in_place:
         child = Scan(
             user_id=user.id,
             runner_id=runner.id,
             llm_profile_id=profile.id if profile else None,
+            llm_model=model,
             targets=list(scan.targets),
             scan_mode=scan.scan_mode,
             instruction=body.instruction,
@@ -294,6 +338,37 @@ def continue_scan(
     # In place. The seconds the scan was active so far are banked, because started_at restarts with the next run.
     now = datetime.now(timezone.utc)
     ran = (scan.finished_at - scan.started_at).total_seconds() if scan.started_at and scan.finished_at else 0.0
+    if restart:
+        # The same scan from the beginning: no run to resume, so nothing about resuming changes.
+        moved = db.execute(
+            update(Scan)
+            .where(Scan.id == scan.id, Scan.status.in_(FINAL_STATUSES), Scan.run_name.is_(None))
+            .values(
+                status=ScanStatus.queued,
+                status_detail=None,
+                exit_code=None,
+                started_at=None,
+                finished_at=None,
+                heartbeat_at=None,
+                elapsed_base=scan.elapsed_base + max(ran, 0.0),
+                instruction=body.instruction or scan.instruction,
+                max_budget=body.max_budget,
+                llm_profile_id=profile.id if profile else scan.llm_profile_id,
+                llm_model=model,
+            )
+        ).rowcount
+        db.commit()
+        if moved == 0:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Скан уже продолжается")
+        try:  # the log carries on after the failed attempt: mark where the new one begins
+            marker = LogWriter(scan.id)
+            marker.write("[oreshnik] ── Повторный запуск: прошлая попытка не дошла до старта Strix ──")
+            marker.close()
+        except OSError as exc:
+            log.warning("scan %s: could not mark the restart in the log: %s", scan.id, exc)
+        response.status_code = status.HTTP_200_OK
+        return _enqueue(db, scan, user)
+
     history = list(scan.resume_history or []) + [
         {"at": now.isoformat(), "instruction": body.instruction, "max_budget": body.max_budget}
     ]
@@ -314,6 +389,7 @@ def continue_scan(
             resume_history=history,
             max_budget=body.max_budget,
             llm_profile_id=profile.id if profile else scan.llm_profile_id,
+            llm_model=model,
         )
     ).rowcount
     db.commit()
@@ -327,16 +403,31 @@ def continue_scan(
 def list_scans(
     status_filter: ScanStatus | None = Query(default=None, alias="status"),
     schedule_id: int | None = Query(default=None, description="only scans started by this schedule"),
+    active: bool | None = Query(default=None, description="true: queued/running/cancelling only; false: finished only"),
+    q: str | None = Query(default=None, max_length=200, description="a part of a target, or a scan number"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ScanList:
-    where = [_visible(user)]
+    # What the list is about: what the viewer may see, one schedule, a search. `counts` (the tiles above the list) covers all of
+    # it by status; `status` and `active` then narrow the rows themselves.
+    scope = [_visible(user)]
+    if schedule_id is not None:
+        scope.append(Scan.schedule_id == schedule_id)
+    text = (q or "").strip()
+    if text:
+        pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        match = cast(Scan.targets, String).ilike(pattern, escape="\\")
+        number = text.lstrip("#")
+        scope.append(or_(match, Scan.id == int(number)) if number.isdigit() and len(number) <= 9 else match)
+    by_status = dict(db.execute(select(Scan.status, func.count()).where(*scope).group_by(Scan.status)).all())
+
+    where = list(scope)
     if status_filter is not None:
         where.append(Scan.status == status_filter)
-    if schedule_id is not None:
-        where.append(Scan.schedule_id == schedule_id)
+    if active is not None:
+        where.append(Scan.status.in_(ACTIVE_STATUSES) if active else Scan.status.in_(FINAL_STATUSES))
     total = db.scalar(select(func.count()).select_from(Scan).where(*where))
     scans = db.scalars(select(Scan).where(*where).order_by(Scan.id.desc()).limit(limit).offset(offset)).all()
     ids = [s.id for s in scans]
@@ -345,6 +436,7 @@ def list_scans(
     return ScanList(
         items=[_out(s, user, counts[s.id], children[s.id], names.get(s.schedule_id)) for s in scans],
         total=total, limit=limit, offset=offset,
+        counts={status.value: by_status.get(status, 0) for status in ScanStatus},
     )
 
 

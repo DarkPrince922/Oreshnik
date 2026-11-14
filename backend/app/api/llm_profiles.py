@@ -16,7 +16,7 @@ from app.schemas.llm import (
     ModelListResponse,
     ProviderPreset,
 )
-from app.services.llm import PRESETS, ModelListError, fetch_provider_models, key_hint
+from app.services.llm import PRESETS, ModelListError, clean_model_list, fetch_provider_models, key_hint
 
 router = APIRouter(prefix="/api/llm-profiles", tags=["llm-profiles"])
 
@@ -76,7 +76,29 @@ def fetch_models(
         models = fetch_provider_models(body.provider, base_url, api_key)
     except ModelListError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    return ModelListResponse(models=models)
+    saved = False
+    # Loaded for a saved profile with its own key and endpoint (nothing typed over them): keep the list, so it is not lost
+    # if the form is closed without pressing «Сохранить». A list from a different, unsaved endpoint is only handed back.
+    if body.profile_id is not None and body.api_key is None and base_url == profile.base_url:
+        profile.models = clean_model_list(models)
+        db.commit()
+        saved = True
+    return ModelListResponse(models=models, saved=saved)
+
+
+@router.post("/{profile_id}/refresh-models", response_model=LLMProfileOut)
+def refresh_models(profile_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> LLMProfile:
+    """Ask the provider again what it serves, with the profile's stored key, and keep the whole list."""
+    profile = _own_or_404(db, user, profile_id)
+    _require_base_url_for_custom(profile.provider, profile.base_url)
+    try:
+        models = fetch_provider_models(profile.provider, profile.base_url, decrypt(profile.api_key_enc))
+    except ModelListError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    profile.models = clean_model_list(models)
+    db.commit()
+    db.refresh(profile)
+    return profile
 
 
 @router.get("", response_model=list[LLMProfileOut])
@@ -103,6 +125,7 @@ def create_profile(
         provider=body.provider,
         model=body.model,
         base_url=body.base_url,
+        models=body.models,
         api_key_enc=encrypt(body.api_key),
         api_key_hint=key_hint(body.api_key),
     )
@@ -134,6 +157,8 @@ def update_profile(
         profile.model = body.model
     if "base_url" in sent:  # explicit null/empty clears it
         profile.base_url = body.base_url
+    if "models" in sent and body.models is not None:
+        profile.models = body.models
     if body.api_key is not None and body.api_key.strip():
         key = body.api_key.strip()
         profile.api_key_enc = encrypt(key)

@@ -5,12 +5,13 @@ from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
+from app.engine.retry import run_with_port_retry
 from app.models.llm_profile import LLMProfile
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
@@ -168,9 +169,21 @@ class _Snapshot:
     resume_count: int = 0
 
 
-def _claim(scan_id: int) -> _Snapshot | None:
-    """Atomically move queued -> running; None if the scan is gone or was cancelled meanwhile."""
+# Serializes "count what runs, then start one" between workers, so two of them cannot both take the last place.
+_SLOT_LOCK = 7101
+_WAIT_SECONDS = 5
+
+
+def _claim(scan_id: int) -> "_Snapshot | str | None":
+    """Atomically move queued -> running; None if the scan is gone or was cancelled meanwhile, "busy" while the
+    limit of scans running at once (`scan_concurrency`, changeable in «Настройки») is reached — the scan stays queued."""
     with SessionLocal() as db:
+        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _SLOT_LOCK})  # released by the commit below
+        if db.scalar(select(Scan.status).where(Scan.id == scan_id)) != ScanStatus.queued:
+            return None
+        running = db.scalar(select(func.count()).select_from(Scan).where(Scan.status.in_((ScanStatus.running, ScanStatus.cancelling))))
+        if running >= settings.scan_concurrency:
+            return "busy"
         claimed = db.execute(
             update(Scan)
             .where(Scan.id == scan_id, Scan.status == ScanStatus.queued)
@@ -193,7 +206,7 @@ def _claim(scan_id: int) -> _Snapshot | None:
                 ssh_error = f"Не удалось подготовить SSH-подключение ({exc.__class__.__name__})"
         if scan.llm_profile is not None:
             try:
-                env = build_strix_env(scan.llm_profile)  # decrypts the key; only lives in this process
+                env = build_strix_env(scan.llm_profile, scan.llm_model)  # decrypts the key; only lives in this process
             except Exception as exc:
                 env_error = f"Не удалось подготовить LLM-профиль ({exc.__class__.__name__})"
         # The original instruction was handed to the agents when the scan first started; a resume carries only what
@@ -304,6 +317,12 @@ def _finalize(scan_id: int, status: ScanStatus, detail: str | None, result: RunR
 @celery.task(name="oreshnik.scan_run")
 def scan_run(scan_id: int) -> str:
     snap = _claim(scan_id)
+    if snap == "busy":
+        # No free place: try again shortly, the scan stays queued meanwhile (cancelling it makes the next try a no-op).
+        # Places are not handed out strictly in the order of arrival.
+        if not celery.conf.task_always_eager:
+            scan_run.apply_async((scan_id,), countdown=_WAIT_SECONDS)
+        return "waiting"
     if snap is None:
         return "skipped"
 
@@ -373,7 +392,7 @@ def scan_run(scan_id: int) -> str:
             ssh=snap.ssh,
         )
         tailer.start()
-        result = engine.run(spec, writer.write, _CancelProbe(scan_id))
+        result = run_with_port_retry(engine, spec, writer.write, _CancelProbe(scan_id))
     except _Preflight as exc:
         early_error = str(exc)
     except Exception as exc:
@@ -497,7 +516,7 @@ def ops_run(ops_run_id: int) -> str:
         return "no_profile"
 
     try:
-        script = ops.draft_script(profile, run.goal, runner_names)
+        script = ops.draft_script(profile, run.goal, runner_names, run.llm_model)
     except ops.OpsError as exc:
         _ops_finish(ops_run_id, OpsRunStatus.failed, script_error=str(exc))
         _ops_fail_all_hosts(ops_run_id, str(exc))
@@ -570,3 +589,43 @@ def _ops_fail_all_hosts(ops_run_id: int, note: str, *, status: OpsHostStatus = O
             .values(status=status, output=note, finished_at=_utcnow())
         )
         db.commit()
+
+
+# ── Агент ────────────────────────────────────────────────────────────────
+
+
+@celery.task(name="oreshnik.agent_turn")
+def agent_turn(session_id: int, prompt: str, action: str = "message", extra: dict | None = None) -> None:
+    """One action of a session (a message, compact, shell command, review, revert): stream the isolated container's events into its history."""
+    from app.services import agent as agent_service
+
+    agent_service.run_turn(SessionLocal, session_id, prompt, action, extra)
+
+
+@celery.task(name="oreshnik.reap_stale_agent_turns")
+def reap_stale_agent_turns() -> int:
+    """A turn whose worker vanished (no event for `agent_stale_seconds`) is given up on, so the chat is usable again."""
+    from app.models.agent import AgentSession, AgentSessionStatus
+    from app.services import agent as agent_service
+
+    cutoff = _utcnow() - timedelta(seconds=settings.agent_stale_seconds)
+    reaped: list[str] = []
+    with SessionLocal() as db:
+        stale = db.scalars(
+            select(AgentSession).where(
+                AgentSession.status == AgentSessionStatus.running,
+                func.coalesce(AgentSession.heartbeat_at, AgentSession.updated_at) < cutoff,
+            )
+        ).all()
+        for session in stale:
+            message = "Воркер потерян: ход прерван"
+            agent_service.append_event(db, session.id, "turn.error", {"message": message})
+            session.status = AgentSessionStatus.idle
+            session.last_error = message
+            session.cancel_requested = False
+            agent_service.live_delete(db, session.id)  # what it was in the middle of writing is not going to be finished
+            reaped.append(session.key)
+        db.commit()
+    for key in reaped:
+        agent_service.stop_turn(key)
+    return len(reaped)
