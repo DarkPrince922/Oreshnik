@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     strix_sandbox_network: str = Field(default="", pattern=r"^([A-Za-z0-9][A-Za-z0-9_.-]{0,62})?$")
     # How many times a scan is started again when the sandbox could not bind its host port (the clash above), before it fails.
     sandbox_start_retries: int = Field(default=2, ge=0, le=10)
+    # The model did not answer Strix's pre-scan request for a reason that passes by itself (502/503/504, overload, a rate limit, a
+    # timeout, a dropped connection): how many times the scan is started again, and how long it waits before each try. A wrong
+    # key, an unknown model or a spent quota is never retried. 0 attempts = off.
+    llm_retry_attempts: int = Field(default=2, ge=0, le=10)
+    llm_retry_delay_seconds: int = Field(default=90, ge=5, le=3600)
 
     # Операции: how long one host's script may run before it is given up on and marked failed.
     ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
