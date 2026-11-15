@@ -1,53 +1,168 @@
 # Oreshnik
 
-Web control-plane around the open-source [Strix](https://github.com/usestrix/strix)
-AI pentesting CLI. Launch scans from a browser, watch them live, store findings,
-read branded reports.
+Веб-панель для [Strix](https://github.com/usestrix/strix) — открытого инструмента, который ищет уязвимости с помощью ИИ.
+Запускаете скан из браузера, смотрите за ним вживую, получаете находки и отчёт.
 
-> ⚠️ For **authorized** security testing only — scan systems you own or have
-> explicit written permission to test.
+> ⚠️ Только для **разрешённого** тестирования: сканируйте системы, которые принадлежат вам или на проверку которых у вас
+> есть письменное разрешение владельца.
 
-## What it is
+## Установка одной командой
 
-Strix has no programmatic API in its open-source form: the integration path is the
-headless CLI (`strix -n ...`) plus the artifacts it writes to disk. Oreshnik is an
-orchestrator around that: it runs the CLI, streams its output, parses its artifacts,
-and presents everything in a multi-user web panel.
+Нужен компьютер или сервер с Linux и доступом в интернет. Откройте терминал и вставьте одну строку.
+
+**На своём компьютере:**
+
+```bash
+git clone https://github.com/DarkPrince922/Oreshnik.git && cd Oreshnik && ./install.sh
+```
+
+**На сервере (VPS/VDS)** — в конце укажите его IP-адрес или домен, по которому будете открывать панель:
+
+```bash
+git clone https://github.com/DarkPrince922/Oreshnik.git && cd Oreshnik && ./install.sh 203.0.113.5
+```
+
+Скрипт всё сделает сам:
+
+1. поставит Docker, если его нет (спросит пароль `sudo`);
+2. создаст файл настроек `.env` со случайными секретами и паролем администратора;
+3. соберёт и запустит панель — первый раз это занимает 5–15 минут;
+4. напечатает адрес, логин и пароль.
+
+В конце вы увидите:
 
 ```
-Browser (React/Vite) ──REST+WS──> FastAPI ──> Celery worker ──> strix -n ... (Docker)
+✓ Oreshnik запущен
+
+  Адрес:   http://localhost:5173
+  Логин:   admin@oreshnik.dev
+  Пароль:  4602263a8913cb12dc
+```
+
+Откройте адрес в браузере и войдите. **Пароль показывается один раз — сохраните его.** Сменить можно в панели, в разделе «Аккаунт».
+
+### Первые шаги в панели
+
+1. **Пробный скан без затрат.** «Новый скан» → впишите любой адрес → раннер `mock` → «Запустить скан». Это имитация:
+   модель не вызывается, деньги не тратятся. Так видно, как всё работает.
+2. **Ключ модели.** «LLM-профили» → «Новый профиль» → выберите провайдера и вставьте свой API-ключ.
+3. **Настоящий скан.** «Раннеры» → создайте раннер `local` (сканы идут на этой же машине) или `ssh` (на другом сервере).
+   Затем «Новый скан» → выберите этот раннер и модель.
+
+### Частые действия
+
+| Что нужно | Команда (в папке `Oreshnik`) |
+|---|---|
+| Обновить до свежей версии | `git pull && ./install.sh` |
+| Остановить | `docker compose stop` |
+| Запустить снова | `docker compose up -d` |
+| Посмотреть, что сломалось | `docker compose logs backend --tail 50` |
+| Удалить всё вместе с данными | `docker compose down -v` |
+
+Повторный запуск `./install.sh` безопасен: существующий `.env` и данные он не трогает.
+
+### Если что-то пошло не так
+
+- **«Панель не ответила за 3 минуты»** — выполните `docker compose logs backend --tail 50` и посмотрите последнюю ошибку.
+- **Страница открывается, но войти нельзя (сервер)** — панель ставили без адреса. Удалите `.env` и запустите
+  `./install.sh ВАШ_АДРЕС` заново, пока в панели ещё нет данных; либо поправьте в `.env` строки `VITE_API_BASE` и
+  `CORS_ORIGINS` и выполните `docker compose up -d`.
+- **Забыли пароль администратора** — он записан в `.env`, в строке `ADMIN_PASSWORD` (если вы не меняли его в панели).
+- **Arch Linux** — скрипт ставит Docker через `pacman`; после установки может понадобиться перезайти в систему, чтобы
+  работать с Docker без `sudo`.
+
+## Какой сервер нужен (VPS/VDS)
+
+Цифры ниже — ориентир, а не результат замеров: подберите с запасом и смотрите на загрузку в первые дни.
+
+### Для панели
+
+| | Минимум | Удобно |
+|---|---|---|
+| Процессор | 2 ядра | 4 ядра |
+| Память | 4 ГБ | 8 ГБ |
+| Диск | 40 ГБ SSD | 80 ГБ SSD |
+
+- «Минимум» — если сканы идут на отдельных раннерах, а на панели только сама панель.
+- «Удобно» — если на этом же сервере работают «Агент» и локальные сканы.
+- Система: Ubuntu 22.04/24.04 или Debian 12. Виртуализация — **KVM**: на OpenVZ и LXC Docker часто не работает.
+
+### Для раннера (сервер, на котором идут сканы)
+
+Один скан — это Strix и контейнер-песочница с набором инструментов. Считайте на **каждый одновременный скан**:
+
+| | На один скан | Пример: 3 скана сразу |
+|---|---|---|
+| Процессор | 2 ядра | 6 ядер |
+| Память | 4 ГБ | 12 ГБ |
+| Диск | 40 ГБ SSD на сервер | 60–80 ГБ SSD |
+
+- Образ песочницы занимает несколько гигабайт, плюс результаты сканов — поэтому диск не меньше 40 ГБ.
+- Нужен вход по SSH под `root` (или пользователем с `sudo`). Docker и Strix панель ставит сама: «Раннеры» → «Установить».
+- Сколько сканов идёт сразу, задаётся в панели: «Настройки» → «Сканов одновременно», и отдельно у каждого раннера.
+- Потолок памяти и процессора на один скан: «Настройки» → «Strix: песочница».
+
+### Что учесть при выборе хостинга
+
+- **Разрешение на сканирование.** Многие хостинги запрещают сканирование портов и поиск уязвимостей и блокируют сервер по
+  жалобе. Прочитайте правила (AUP) и выбирайте того, кто разрешает тестирование на проникновение.
+- **Канал и трафик.** Сканы шлют много запросов: тариф без жёсткого лимита трафика, стабильный исходящий канал.
+- **Расположение.** Раннер ближе к цели работает быстрее. Проверьте, что с сервера доступен ваш провайдер модели.
+- **Статический IP.** Его удобно добавить в белый список у владельца цели, чтобы защита не блокировала проверку.
+
+### Безопасность панели на сервере
+
+Панель из коробки работает по обычному HTTP и рассчитана на доверенную сеть. На сервере в интернете:
+
+- **Закройте всё лишнее файрволом.** Снаружи нужны только порты `5173` (панель) и `8000` (её API), и лучше — только для
+  вашего IP. База данных и Redis наружу не публикуются.
+- **Лучше всего — не открывать порты вовсе**, а ходить через SSH-туннель. На своём компьютере:
+  ```bash
+  ssh -L 5173:localhost:5173 -L 8000:localhost:8000 root@АДРЕС_СЕРВЕРА
+  ```
+  и открывайте `http://localhost:5173`. Тогда панель ставится командой без адреса: `./install.sh`.
+- **Для постоянной работы** поставьте перед панелью обратный прокси с HTTPS (Caddy или nginx) — без него пароль и ключи
+  идут по сети открытым текстом.
+- У воркера сканов есть доступ к Docker сервера — это фактически права администратора машины. Не ставьте панель на сервер,
+  где лежит что-то ещё важное.
+
+## Как это устроено
+
+У открытой версии Strix нет программного интерфейса: с ним работают через команду `strix -n ...` и файлы, которые он
+пишет на диск. Oreshnik запускает эту команду, передаёт её вывод в браузер, разбирает результаты и показывает их в панели
+для нескольких пользователей.
+
+```
+Браузер (React/Vite) ──REST+WS──> FastAPI ──> Celery worker ──> strix -n ... (Docker)
                                       │                              │
-                                   Postgres   <── artifacts ── strix_runs/<id>/
-                                   Redis (queue + live-log pub/sub)
+                                   Postgres   <── результаты ── strix_runs/<id>/
+                                   Redis (очередь и живой лог)
 ```
 
-## Stack
+Что умеет панель:
 
-FastAPI · Postgres · Celery + Redis (queue + beat scheduler) · React/Vite/TS/Tailwind.
+- **Сканы** — запуск, живой лог и лента действий агентов, находки, отчёт, выгрузка в JSON, SARIF и Markdown, продолжение
+  скана с новой инструкцией, расписания по cron, учёт стоимости.
+- **Раннеры** — имитация (`mock`), эта машина (`local`) или удалённые серверы по SSH с установкой Docker и Strix одной кнопкой.
+- **Агент** — чат с Codex CLI в изолированном контейнере: команды, правки файлов и ответ появляются по мере работы.
+- **Сам справляется со сбоями** — если модель временно недоступна (502, 503, таймаут и другие), скан сам ждёт и
+  запускается заново или продолжается с того же места.
+- **Настройки в панели** — лимиты, таймауты, параметры Strix и песочницы меняются в разделе «Настройки» без перезапуска;
+  в `.env` лежат значения по умолчанию и секреты.
 
-## Status
+Технологии: FastAPI · Postgres · Celery + Redis · React/Vite/TypeScript/Tailwind.
+Подробное описание — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (на английском).
 
-Early development — phases 0–5 done (skeleton, auth/roles, per-user LLM profiles, runners, scan engine, scan UI, live agent activity, continuing a scan with new instructions in the same scan, cron schedules, live scan cost and cost accounting, SSH runners (key or password login) with a pinned host key and one-click installation of Docker and Strix). Operating parameters (limits, timeouts, Strix/SSH/agent tuning) are edited in the panel under «Настройки» — no restart; `.env` holds the defaults. Also: «Агент» — a chat with the open-source Codex CLI in an isolated container, with a live feed of its steps (set `AGENT_TOKEN` to enable it). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
-design and the phased build plan.
+## Для разработки
 
-## Quick start (dev)
+Ручной запуск без скрипта:
 
 ```bash
-cp .env.example .env         # then edit secrets
+cp .env.example .env         # впишите свои секреты вместо CHANGE_ME
 docker compose up --build
-# frontend: http://localhost:5173
-# api:      http://localhost:8000/api/health  (docs: /docs)
+# панель: http://localhost:5173
+# API:    http://localhost:8000/api/health  (документация: /docs)
 ```
 
-**First login.** An admin is created on first start (`ADMIN_EMAIL`, default `admin@oreshnik.dev`). If `ADMIN_PASSWORD`
-is empty a random password is printed once:
-
-```bash
-docker compose logs backend | grep "initial admin"
-```
-
-Before using it for real, replace the `CHANGE_ME` secrets in `.env` (outside `ORESHNIK_ENV=dev` the API refuses to start with them).
-
-The default runner is `mock` — it simulates Strix runs without calling any LLM, so you
-can build and test the whole pipeline without burning tokens. Switch a runner to
-`local` to execute real scans.
+Если `ADMIN_PASSWORD` в `.env` пуст, случайный пароль администратора печатается один раз в лог:
+`docker compose logs backend | grep "initial admin"`.
