@@ -9,7 +9,11 @@ Two such reasons:
   is overloaded or does not answer in time makes Strix print "LLM CONNECTION FAILED" and exit. A minute or two later it
   usually answers again.
 
-In both cases Strix exits before the scan itself begins, so starting it again is safe. Anything that will not pass by waiting — a
+In both cases Strix exits before the scan itself begins, so starting it again is safe.
+
+A third case is a scan that was already running when the model went away: Strix retries a request five times by itself (about
+a minute) and then gives up with "Error during penetration test". Such a scan is not started again — it is CONTINUED
+(`strix --resume` on its own run, as «Продолжить» does), so nothing it has done is lost. Anything that will not pass by waiting — a
 wrong key (401/403), an unknown model (404), a spent quota — is NOT retried: it is reported at once.
 """
 
@@ -17,6 +21,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from dataclasses import replace
 
 from app.core.config import settings
 from app.engine.base import RunResult, Runner, ScanSpec
@@ -44,6 +49,9 @@ LLM_PERMANENT_RE = re.compile(
     r"|incorrect api key|authentication|unauthori[sz]ed|permission|model[ _]not[ _]found|does not exist|not available on",
     re.IGNORECASE,
 )
+# Strix's line for a scan that died while running; the reason is on it and on the lines right after (the box wraps).
+MIDRUN_FAILED_RE = re.compile(r"Error during penetration test", re.IGNORECASE)
+_MIDRUN_REASON_LINES = 8
 _LLM_REASON_LINES = 14  # how much of Strix's box after the heading is read for the reason
 
 
@@ -60,6 +68,21 @@ def llm_failure_is_transient(reason: str) -> bool:
     if codes:  # the gateway named a code: the list decides, whatever else the message says
         return bool(codes & retry_codes())
     return bool(LLM_TRANSIENT_RE.search(reason))
+
+
+def resumable_run(spec: ScanSpec) -> str | None:
+    """The name of the scan's own Strix run if it can be picked up again (all of its state is on the panel's side), else None."""
+    from app.services.resume import ResumeError, check_resumable
+    from app.services.scan_files import find_run_dir
+
+    run = find_run_dir(spec.work_dir)
+    if run is None:
+        return None
+    try:
+        check_resumable(spec.scan_id, run.name)
+    except ResumeError:
+        return None
+    return run.name
 
 
 def _wait(seconds: float, should_cancel: Callable[[], bool], sleep: Callable[[float], None]) -> bool:
@@ -94,9 +117,14 @@ def run_with_retries(
     while True:
         clash = False
         llm_lines: list[str] | None = None  # None until Strix's heading is seen, then the lines under it
+        mid_lines: list[str] | None = None  # the same for a scan that died while running
 
         def watch(line: str) -> None:
-            nonlocal clash, llm_lines
+            nonlocal clash, llm_lines, mid_lines
+            if mid_lines is not None and len(mid_lines) < _MIDRUN_REASON_LINES:
+                mid_lines.append(line)
+            elif mid_lines is None and MIDRUN_FAILED_RE.search(line):
+                mid_lines = [line]
             if PORT_CLASH_RE.search(line):
                 clash = True
             if llm_lines is not None and len(llm_lines) < _LLM_REASON_LINES:
@@ -130,6 +158,20 @@ def run_with_retries(
                 result.cancelled = True
                 return result
             continue
+
+        # The scan was running when the model went away: pick its own run up where it stopped, with no new instruction.
+        if mid_lines is not None and llm_left > 0 and llm_failure_is_transient(" ".join(mid_lines)):
+            run_name = resumable_run(spec)
+            if run_name is not None:
+                llm_left -= 1
+                attempt += 1
+                on_line(f"[oreshnik] Модель стала недоступна во время скана — продолжение с того же места через {llm_wait:g} с, попытка {attempt}")
+                log.warning("scan %s: the model went away mid-scan, resuming run %s in %gs (attempt %d)", spec.scan_id, run_name, llm_wait, attempt)
+                if not _wait(llm_wait, should_cancel, sleep):
+                    result.cancelled = True
+                    return result
+                spec = replace(spec, resume_run=run_name, instruction=None)
+                continue
 
         return result
 

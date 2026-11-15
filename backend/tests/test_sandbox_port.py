@@ -190,3 +190,65 @@ def test_the_codes_are_a_setting_and_499_is_among_them_by_default(monkeypatch):
     assert not llm_failure_is_transient("Error code: 502") and llm_failure_is_transient("Connection error.")
     with pytest.raises(Exception):
         Settings(_env_file=None, llm_retry_codes="502; drop")
+
+
+# ── the model went away while the scan was running ──────────────────────
+
+from app.engine import ScanSpec  # noqa: E402
+from app.services.scan_files import scan_dir  # noqa: E402
+from tests.test_continue import _fake_run_dir  # noqa: E402
+
+MID_502 = ["scanning...", "Error during penetration test: Error code: 502 - {'error': {'message': 'openai_error', 'type':", "'bad_response_status_code'}}", "Traceback (most recent call last):"]
+
+
+class Recording(Scripted):
+    def run(self, spec, on_line, should_cancel):
+        self.specs = getattr(self, "specs", []) + [spec]
+        return super().run(spec, on_line, should_cancel)
+
+
+def running_spec(scan_id=7, **kw):
+    return ScanSpec(scan_id=scan_id, targets=["https://example.com"], scan_mode="quick", instruction="original task", max_budget=None, work_dir=scan_dir(scan_id), run_label="l", **kw)
+
+
+def go_mid(engine, spec, **kw):
+    out: list[str] = []
+    result = run_with_retries(engine, spec, out.append, lambda: False, sleep=lambda _s: None, llm_delay=5, **kw)
+    return result, out
+
+
+def test_a_scan_that_lost_the_model_midway_is_continued_not_started_over():
+    _fake_run_dir(7, "run-abc")
+    engine = Recording((MID_502, RunResult(exit_code=1)), (["Resumed run-abc"], RunResult(exit_code=0)))
+    result, out = go_mid(engine, running_spec(), llm_retries=2)
+    assert result.exit_code == 0 and engine.calls == 2
+    first, second = engine.specs
+    assert first.resume_run is None and first.instruction == "original task"
+    assert second.resume_run == "run-abc" and second.instruction is None  # its own run, and the task is not said twice
+    assert any("продолжение с того же места" in l for l in out)
+
+
+def test_without_resumable_state_or_with_a_permanent_reason_it_just_fails():
+    engine = Recording((MID_502, RunResult(exit_code=1)))  # no run directory: nothing to pick up
+    go_mid(engine, running_spec(scan_id=8), llm_retries=2)
+    assert engine.calls == 1
+    _fake_run_dir(9, "run-x")
+    for lines in (["Error during penetration test: Error code: 401 - Incorrect API key provided"], ["Error during penetration test: list index out of range"]):
+        engine = Recording((lines, RunResult(exit_code=1)))
+        go_mid(engine, running_spec(scan_id=9), llm_retries=2)
+        assert engine.calls == 1
+
+
+def test_midway_continuations_share_the_same_limit():
+    _fake_run_dir(10, "run-y")
+    engine = Recording(*[(MID_502, RunResult(exit_code=1))] * 3)
+    result, _ = go_mid(engine, running_spec(scan_id=10), llm_retries=2)
+    assert result.exit_code == 1 and engine.calls == 3 and engine.specs[2].resume_run == "run-y"
+
+
+def test_the_scan_time_limits_reach_strix_and_default_to_its_own(monkeypatch):
+    from app.engine.base import strix_llm_timeout_env
+    assert strix_llm_timeout_env()["LLM_TIMEOUT"] == "300" and strix_llm_timeout_env()["LLM_STREAM_IDLE_TIMEOUT"] == "300"
+    monkeypatch.setattr(settings, "llm_timeout", 900)
+    monkeypatch.setattr(settings, "llm_stream_idle_timeout", 0)
+    assert strix_llm_timeout_env()["LLM_TIMEOUT"] == "900" and strix_llm_timeout_env()["LLM_STREAM_IDLE_TIMEOUT"] == "0"

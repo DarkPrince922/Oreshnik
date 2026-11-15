@@ -36,7 +36,12 @@ def strix_llm_timeout_env() -> dict[str, str]:
     """How long Strix waits for its pre-scan test request to the model (`LLM_PREFLIGHT_TIMEOUT`), for every runner alike."""
     from app.core.config import settings
 
-    return {"LLM_PREFLIGHT_TIMEOUT": str(settings.llm_preflight_timeout)}
+    return {
+        "LLM_PREFLIGHT_TIMEOUT": str(settings.llm_preflight_timeout),
+        # the same for the scan itself: one answer of the model, and silence inside a streamed one
+        "LLM_TIMEOUT": str(settings.llm_timeout),
+        "LLM_STREAM_IDLE_TIMEOUT": str(settings.llm_stream_idle_timeout),
+    }
 
 
 def strix_sandbox_env() -> dict[str, str]:
