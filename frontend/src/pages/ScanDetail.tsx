@@ -215,7 +215,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-xl font-semibold tracking-tight text-white">Скан #{scan.id}</h1>
+              <h1 className="bg-gradient-to-r from-white to-accent-soft bg-clip-text text-xl font-semibold tracking-tight text-transparent">Скан #{scan.id}</h1>
               <StatusBadge status={scan.status} />
             </div>
             {scan.schedule_id !== null && (
