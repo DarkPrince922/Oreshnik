@@ -31,6 +31,11 @@ describe("parseField", () => {
     expect(parseField(choice, "mid")).toEqual({ error: "допустимо: low, high" });
     expect(parseField(item({ kind: "text" }), " 1.8.0 ")).toEqual({ value: "1.8.0" });
     expect(parseField(item({ kind: "text" }), " ")).toEqual({ error: "не может быть пустым" });
+    // a setting whose default is "not set" may be cleared back to it
+    const optional = item({ kind: "text", default: "", value: "4g" });
+    expect(parseField(optional, " ")).toEqual({ value: "" });
+    expect(parseField(optional, "8g")).toEqual({ value: "8g" });
+    expect(describeDefault(optional)).toBe("не задано");
   });
 });
 

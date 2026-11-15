@@ -98,6 +98,35 @@ class Settings(BaseSettings):
     # the defaults here change nothing. Raise them for a slow gateway that cuts requests short (499, timeouts mid-scan).
     llm_timeout: int = Field(default=300, ge=10, le=3600)
     llm_stream_idle_timeout: int = Field(default=300, ge=0, le=3600)
+
+    # ── More of Strix's own tuning, passed to it as environment (app/engine/base.py: STRIX_TUNING). Every default here is Strix's
+    # own default or "not set", so nothing changes until one is touched. All of them are editable in the panel.
+    # Sandbox container limits (Docker): memory ("4g"), CPUs ("2", "1.5"), processes (0 = no limit), /dev/shm ("1g"), its log files.
+    strix_sandbox_mem_limit: str = Field(default="", pattern=r"^(\d{1,6}[bkmgBKMG]?)?$")
+    strix_sandbox_cpus: str = Field(default="", pattern=r"^(\d{1,3}(\.\d{1,2})?)?$")
+    strix_sandbox_pids_limit: int = Field(default=0, ge=0, le=1_000_000)
+    strix_sandbox_shm_size: str = Field(default="", pattern=r"^(\d{1,6}[bkmgBKMG]?)?$")
+    strix_sandbox_log_max_size: str = Field(default="50m", pattern=r"^(\d{1,6}[bkmgBKMG]?|off)$")
+    strix_sandbox_log_max_file: int = Field(default=3, ge=1, le=100)
+    # The model: prompt caching, streaming, forcing a tool call, actions per turn, extra HTTP headers (a JSON object of strings).
+    strix_prompt_cache: bool = True
+    llm_disable_streaming: bool = False
+    strix_force_required_tool_choice: bool = False
+    llm_max_tool_calls_per_turn: int = Field(default=32, ge=0, le=1000)
+    llm_extra_headers: str = Field(default="", max_length=4000)
+    # The agents' context: compaction, the window assumed for a model Strix does not know, how much tool output and how many
+    # screenshots are kept.
+    strix_context_auto_compact: bool = True
+    strix_context_fallback_tokens: int = Field(default=200_000, ge=1_000, le=10_000_000)
+    strix_tool_output_max_tokens: int = Field(default=8_000, ge=100, le=1_000_000)
+    strix_max_context_images: int = Field(default=3, ge=0, le=100)
+    # A cheaper model for merging duplicate findings (empty = the scan's own), web search for the agents, Strix's verbose log.
+    strix_dedupe_model: str = Field(default="", pattern=r"^[A-Za-z0-9_./:@-]{0,200}$")
+    strix_web_search_provider: str = Field(default="auto", pattern=r"^(auto|perplexity|exa)$")
+    strix_debug: bool = False
+    # Keys for that web search: secrets, so .env only — never shown or edited in the panel.
+    perplexity_api_key: str = ""
+    exa_api_key: str = ""
     # Docker network for Strix's sandbox containers (Strix's own STRIX_DOCKER_SANDBOX_NETWORK). Empty = Strix's default: it
     # publishes the sandbox's Caido port on a random host port chosen by dockerd, which can collide ("failed to bind host
     # port ... address already in use") when scans start together. With a network name nothing is published on the host at all

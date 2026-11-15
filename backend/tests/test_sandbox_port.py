@@ -252,3 +252,39 @@ def test_the_scan_time_limits_reach_strix_and_default_to_its_own(monkeypatch):
     monkeypatch.setattr(settings, "llm_timeout", 900)
     monkeypatch.setattr(settings, "llm_stream_idle_timeout", 0)
     assert strix_llm_timeout_env()["LLM_TIMEOUT"] == "900" and strix_llm_timeout_env()["LLM_STREAM_IDLE_TIMEOUT"] == "0"
+
+
+# ── the rest of Strix's tuning ──────────────────────────────────────────
+
+def test_untouched_tuning_passes_only_strixs_own_defaults(tmp_path):
+    from app.engine.base import strix_tuning_env
+    env = strix_tuning_env()
+    assert env == {
+        "STRIX_SANDBOX_LOG_MAX_SIZE": "50m", "STRIX_SANDBOX_LOG_MAX_FILE": "3", "STRIX_PROMPT_CACHE": "true", "LLM_DISABLE_STREAMING": "false",
+        "STRIX_FORCE_REQUIRED_TOOL_CHOICE": "false", "LLM_MAX_TOOL_CALLS_PER_TURN": "32", "STRIX_CONTEXT_AUTO_COMPACT": "true",
+        "STRIX_CONTEXT_FALLBACK_TOKENS": "200000", "STRIX_TOOL_OUTPUT_MAX_TOKENS": "8000", "STRIX_MAX_CONTEXT_IMAGES": "3",
+        "STRIX_WEB_SEARCH_PROVIDER": "auto", "STRIX_DEBUG": "false",
+    }  # no limits, no headers, no keys: nothing that is not set is sent
+
+
+def test_set_tuning_reaches_both_runners_and_a_scan_cannot_override_it(tmp_path, monkeypatch):
+    for key, value in {"strix_sandbox_mem_limit": "4g", "strix_sandbox_cpus": "1.5", "strix_sandbox_pids_limit": 512, "llm_disable_streaming": True,
+                       "llm_extra_headers": '{"X-Team": "red"}', "strix_debug": True, "exa_api_key": "exa-secret-1"}.items():
+        monkeypatch.setattr(settings, key, value)
+    env = LocalRunner(strix_bin="strix").build_env(spec(tmp_path, env={"STRIX_SANDBOX_MEM_LIMIT": "64g", "LLM_DISABLE_STREAMING": "false"}))
+    assert env["STRIX_SANDBOX_MEM_LIMIT"] == "4g" and env["STRIX_SANDBOX_CPUS"] == "1.5" and env["STRIX_SANDBOX_PIDS_LIMIT"] == "512"
+    assert env["LLM_DISABLE_STREAMING"] == "true" and env["STRIX_DEBUG"] == "true" and env["EXA_API_KEY"] == "exa-secret-1"
+    assert env["LLM_EXTRA_HEADERS"] == '{"X-Team": "red"}'
+    script = build_script(spec(tmp_path), ["strix"], "oreshnik/scan-1")
+    assert "export STRIX_SANDBOX_MEM_LIMIT=4g" in script and "export LLM_DISABLE_STREAMING=true" in script
+
+
+def test_tuning_values_are_validated(monkeypatch):
+    from app.core import runtime_settings as rs
+    assert rs.parse(rs.BY_KEY["strix_sandbox_mem_limit"], "4g") == "4g" and rs.parse(rs.BY_KEY["strix_sandbox_mem_limit"], "") == ""
+    for key, bad in (("strix_sandbox_mem_limit", "4g; id"), ("strix_sandbox_cpus", "two"), ("strix_sandbox_log_max_size", ""), ("strix_dedupe_model", "a b"),
+                     ("llm_extra_headers", "not json"), ("llm_extra_headers", '["a"]'), ("llm_extra_headers", '{"a": 1}'), ("strix_web_search_provider", "google")):
+        with pytest.raises(ValueError):
+            rs.parse(rs.BY_KEY[key], bad)
+    assert rs.parse(rs.BY_KEY["llm_extra_headers"], '{"X-Team": "red"}') == '{"X-Team": "red"}'
+    assert "perplexity_api_key" not in rs.BY_KEY and "exa_api_key" not in rs.BY_KEY  # secrets stay in .env

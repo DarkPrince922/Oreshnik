@@ -20,7 +20,8 @@ export function parseField(item: AppSettingItem, raw: string | boolean | undefin
   if (item.kind === "choice") {
     return item.choices.includes(text.toLowerCase()) ? { value: text.toLowerCase() } : { error: `допустимо: ${item.choices.join(", ")}` };
   }
-  if (item.kind === "text") return text ? { value: text } : { error: "не может быть пустым" };
+  // A text setting whose default is "not set" (a memory limit, extra headers ...) may be cleared back to that; the others may not.
+  if (item.kind === "text") return text || item.default === "" ? { value: text } : { error: "не может быть пустым" };
   if (!/^-?\d+(\.\d+)?$/.test(text)) return { error: "нужно число" };
   const n = Number(text);
   if (item.kind === "int" && !Number.isInteger(n)) return { error: "нужно целое число" };
@@ -56,6 +57,7 @@ export function planSave(groups: AppSettingsGroup[], draft: Draft, resets: Set<s
 
 /** How a default is shown next to a field. */
 export function describeDefault(item: AppSettingItem): string {
+  if (item.kind !== "bool" && item.default === "") return "не задано";
   const v = item.kind === "bool" ? (item.default ? "включено" : "выключено") : String(item.default);
   return `${v}${item.unit && item.kind !== "bool" ? " " + item.unit : ""}`;
 }

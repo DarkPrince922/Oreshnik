@@ -55,6 +55,19 @@ def _scan_concurrency_ceiling(value: Any) -> None:
         )
 
 
+def _headers_json(value: Any) -> None:
+    if not value:
+        return
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        raise ValueError('нужен JSON-объект, например {"X-Team": "red"}')
+    if not isinstance(parsed, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()):
+        raise ValueError('нужен JSON-объект из строк, например {"X-Team": "red"}')
+
+
+_SIZE = r"(\d{1,6}[bkmgBKMG]?)?"
+
 SPECS: tuple[Spec, ...] = (
     # ── Сканы ──
     Spec("scan_concurrency", "Сканы", "Сканов одновременно", "Сколько сканов выполняется сразу; остальные ждут в очереди и стартуют, как только место освободится. "
@@ -83,6 +96,27 @@ SPECS: tuple[Spec, ...] = (
     Spec("strix_update_check", "Strix", "Проверка обновлений Strix", "Раз в сутки Strix спрашивает PyPI о новой версии. Панель закрепляет версию, так что обычно не нужна.", "bool"),
     Spec("strix_version", "Strix", "Версия Strix для установки", "Что ставится на SSH-раннеры кнопкой «Установить». Панель проверена с 1.7.0.", "text", pattern=r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}"),
     Spec("strix_sandbox_image", "Strix", "Образ песочницы", "Docker-образ, который ставится на SSH-раннеры.", "text", pattern=r"[A-Za-z0-9][A-Za-z0-9_./:@-]{0,199}"),
+    # ── Strix: песочница ──
+    Spec("strix_sandbox_mem_limit", "Strix: песочница", "Память контейнера", "Потолок памяти песочницы одного скана, например 4g. Пусто — без ограничения.", "text", pattern=_SIZE),
+    Spec("strix_sandbox_cpus", "Strix: песочница", "Процессор", "Сколько ядер может занять песочница одного скана, например 2 или 1.5. Пусто — без ограничения.", "text", pattern=r"(\d{1,3}(\.\d{1,2})?)?"),
+    Spec("strix_sandbox_pids_limit", "Strix: песочница", "Процессов в контейнере", "0 — без ограничения.", "int", 0, 1_000_000),
+    Spec("strix_sandbox_shm_size", "Strix: песочница", "Общая память (/dev/shm)", "Нужна браузеру внутри песочницы на тяжёлых страницах, например 1g. Пусто — как у Docker.", "text", pattern=_SIZE),
+    Spec("strix_sandbox_log_max_size", "Strix: песочница", "Размер файла лога контейнера", "Например 50m; off — без ограничения.", "text", pattern=r"\d{1,6}[bkmgBKMG]?|off"),
+    Spec("strix_sandbox_log_max_file", "Strix: песочница", "Файлов лога контейнера", "", "int", 1, 100),
+    # ── Strix: модель ──
+    Spec("llm_disable_streaming", "Strix: модель", "Отключить потоковые ответы", "Включите, если шлюз рвёт потоковые соединения (обрывы, 499/502 посреди ответа).", "bool"),
+    Spec("strix_prompt_cache", "Strix: модель", "Кэширование запросов", "Повторяющаяся часть запроса к модели стоит дешевле. Выключайте только если шлюз его не понимает.", "bool"),
+    Spec("strix_force_required_tool_choice", "Strix: модель", "Всегда требовать действие", "Для моделей, которые вместо действий отвечают текстом.", "bool"),
+    Spec("llm_max_tool_calls_per_turn", "Strix: модель", "Действий за один ход", "Сколько инструментов агент может вызвать за один ответ модели. 0 — без ограничения.", "int", 0, 1000),
+    Spec("llm_extra_headers", "Strix: модель", "Дополнительные HTTP-заголовки", 'JSON-объект, если шлюз требует свои заголовки: {"X-Team": "red"}. Пусто — не нужны. Видны всем администраторам.', "text", pattern=r"[\s\S]{0,4000}", check=_headers_json),
+    Spec("strix_dedupe_model", "Strix: модель", "Модель для склейки дублей", "Отдельная, более дешёвая модель для объединения повторяющихся находок. Пусто — та же, что у скана.", "text", pattern=r"[A-Za-z0-9_./:@-]{0,200}"),
+    Spec("strix_web_search_provider", "Strix: модель", "Веб-поиск для агентов скана", "Работает, только если в .env задан ключ PERPLEXITY_API_KEY или EXA_API_KEY.", "choice", choices=("auto", "perplexity", "exa")),
+    Spec("strix_debug", "Strix: модель", "Подробный лог Strix", "Для разбора сбоев: лог скана становится намного длиннее.", "bool"),
+    # ── Strix: контекст ──
+    Spec("strix_context_auto_compact", "Strix: контекст", "Автосжатие истории", "Агент сам сжимает историю, когда контекст модели заполняется.", "bool"),
+    Spec("strix_context_fallback_tokens", "Strix: контекст", "Окно контекста неизвестной модели", "Какой размер контекста считать у модели, которую Strix не знает (модели через свой шлюз).", "int", 1_000, 10_000_000, unit="токенов"),
+    Spec("strix_tool_output_max_tokens", "Strix: контекст", "Вывод одной команды в контексте", "Меньше — экономия токенов, больше — агент видит больше.", "int", 100, 1_000_000, unit="токенов"),
+    Spec("strix_max_context_images", "Strix: контекст", "Скриншотов в контексте", "", "int", 0, 100),
     # ── SSH ──
     Spec("ssh_connect_timeout_seconds", "SSH-раннеры", "Ожидание подключения", "", "int", 1, 300, unit="с"),
     Spec("ssh_check_interval_seconds", "SSH-раннеры", "Как часто проверять раннеры", "0 — не проверять.", "int", 0, 86400, unit="с", restart="beat"),

@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 
 from app.core.config import settings
-from app.engine.base import RunResult, ScanSpec, strix_llm_timeout_env, strix_privacy_env, strix_reasoning_env, strix_sandbox_env
+from app.engine.base import RunResult, ScanSpec, strix_llm_timeout_env, strix_privacy_env, strix_reasoning_env, strix_sandbox_env, strix_tuning_env
 from app.engine.docker_cleanup import cleanup_containers, ensure_network
 from app.services.scan_files import INSTRUCTION_NAME
 
@@ -88,6 +88,7 @@ class LocalRunner:
         env.update(strix_privacy_env())
         env.update(strix_reasoning_env())
         env.update(strix_llm_timeout_env())
+        env.update(strix_tuning_env())
         env.update(strix_sandbox_env())
         return env
 
