@@ -176,12 +176,16 @@ def check_runner_now(
         timeout = SSH_CHECK_TIMEOUT_SECONDS if runner.kind == RunnerKind.ssh else CHECK_TIMEOUT_SECONDS
         runner_check.delay(runner.id).get(timeout=timeout)
     except Exception as exc:  # worker down, broker down, or timeout
-        log.warning("runner check for %s did not complete: %s", runner.id, exc)
-        db.refresh(runner)
+        log.warning("runner check for %s did not complete: %s", runner_id, exc)
+        # The wait may have left this session in a state it cannot refresh the row from: start it clean and read the row again.
+        db.rollback()
+        runner = _get_or_404(db, runner_id)
         runner.status = RunnerStatus.offline
-        runner.status_detail = "Воркер не отвечает — проверьте, что он запущен"
+        runner.status_detail = "Воркер не ответил за отведённое время — проверьте, что он запущен: docker compose ps worker"
         db.commit()
-    db.refresh(runner)
+    else:
+        db.expire_all()
+        runner = _get_or_404(db, runner_id)
     return _out(runner, admin)
 
 

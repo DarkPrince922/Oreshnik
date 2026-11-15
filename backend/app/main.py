@@ -17,6 +17,10 @@ log = logging.getLogger("oreshnik")
 
 
 def check_config() -> None:
+    key_problem = settings.encryption_key_problem()
+    if key_problem:  # in any environment: with a broken key the panel starts and then fails on the first profile saved
+        log.error(key_problem)
+        raise RuntimeError(key_problem)
     problems = settings.insecure_secrets()
     if not problems:
         return

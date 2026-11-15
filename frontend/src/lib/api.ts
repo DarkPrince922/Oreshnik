@@ -1,5 +1,7 @@
 import axios, { AxiosError } from "axios";
 
+// Where the API is. Empty = the same address the panel itself was opened at (the production build: nginx hands /api on to the
+// backend, so there is nothing to configure and no CORS). Not set at all = the development default.
 const baseURL = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 export const TOKEN_KEY = "oreshnik_token";
@@ -31,6 +33,7 @@ export function notifyUnauthorized(): void {
   onUnauthorized?.();
 }
 export function apiWsUrl(path: string): string {
+  if (baseURL === "") return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}${path}`;
   return baseURL.replace(/^http/, "ws") + path;
 }
 

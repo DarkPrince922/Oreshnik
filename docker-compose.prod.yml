@@ -1,0 +1,21 @@
+# The panel as it runs on a server. Used together with docker-compose.yml:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml      (install.sh writes this line into .env,
+#                                                                 so plain `docker compose ...` picks both up)
+#
+# What changes compared to the development setup:
+#   * the frontend is built into static files and served by nginx, which also hands /api on to the backend — the panel and
+#     its API live at ONE address (port 5173), so VITE_API_BASE and CORS_ORIGINS need no setting up;
+#   * the backend runs without --reload (no file watcher, no restart of the process under a running request).
+services:
+  backend:
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    command: ["nginx", "-g", "daemon off;"]
+    restart: unless-stopped

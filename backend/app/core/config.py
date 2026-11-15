@@ -220,7 +220,36 @@ class Settings(BaseSettings):
     agent_listener_idle_seconds: int = Field(default=1800, ge=30)
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    # Written as a plain list — CORS_ORIGINS=http://203.0.113.5:5173,http://localhost:5173 — or as JSON. Docker Compose strips
+    # the quotes of an unquoted JSON value in .env, so whatever is left of one (["http://a","http://b"] -> [http://a,http://b])
+    # is read too. The union type is what lets a non-JSON value reach the validator at all.
+    cors_origins: str | list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _read_cors_origins(cls, value: object) -> object:
+        if isinstance(value, str):
+            import json
+
+            text = value.strip()
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":  # quotes around the whole value, kept by some loaders
+                text = text[1:-1].strip()
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            except ValueError:
+                pass
+            return [part.strip().strip("\"'") for part in text.strip("[]").split(",") if part.strip().strip("\"'")]
+        return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _check_cors_origins(cls, value: object) -> object:
+        for origin in value if isinstance(value, list) else []:
+            if not origin.startswith(("http://", "https://")):
+                raise ValueError(f"CORS_ORIGINS: «{origin}» is not an address. Example: CORS_ORIGINS=http://203.0.113.5:5173,http://localhost:5173")
+        return value
 
     @property
     def database_url(self) -> str:
@@ -232,6 +261,21 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.oreshnik_env == "dev"
+
+    def encryption_key_problem(self) -> str | None:
+        """Why SECRET_ENCRYPTION_KEY cannot be used, or None. Checked at startup, not at the first secret that is saved."""
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(self.secret_encryption_key.encode())
+        except Exception:
+            return (
+                "SECRET_ENCRYPTION_KEY в .env — не ключ Fernet (нужны 32 байта в url-safe base64, 44 символа, в конце «=»). "
+                "Без него нельзя сохранить ни один LLM-профиль или SSH-ключ. Создайте ключ: "
+                "python3 -c \"import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())\" "
+                "— впишите его в .env и выполните: docker compose up -d --force-recreate. Или запустите ./install.sh: он починит .env сам."
+            )
+        return None
 
     def insecure_secrets(self) -> list[str]:
         """Names of secrets that still hold placeholder / too-weak values."""
