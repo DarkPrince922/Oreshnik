@@ -528,7 +528,7 @@ export default function Runners() {
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Сканов на аккаунт" hint="Сколько сканов одного пользователя может быть активно (в очереди или идёт) на этом раннере. Пусто — по умолчанию панели (обычно 3).">
-              <input className="field font-mono" inputMode="numeric" value={form.max_scans_per_user} onChange={(e) => setForm({ ...form, max_scans_per_user: e.target.value })} placeholder="3" aria-label="Сканов на аккаунт" />
+              <input className="field font-mono" inputMode="numeric" value={form.max_scans_per_user} onChange={(e) => setForm({ ...form, max_scans_per_user: e.target.value })} placeholder="как в настройках" aria-label="Сканов на аккаунт" />
             </Field>
             <Field label="Целей одновременно" hint="Сколько разных доменов и хостов сканируется на раннере сразу, все пользователи вместе. Пусто — без лимита.">
               <input className="field font-mono" inputMode="numeric" value={form.max_targets} onChange={(e) => setForm({ ...form, max_targets: e.target.value, targets_touched: true })} placeholder="без лимита" aria-label="Целей одновременно" />

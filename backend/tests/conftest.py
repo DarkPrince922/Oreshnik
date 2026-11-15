@@ -14,6 +14,9 @@ from cryptography.fernet import Fernet
 # Must be set before anything from `app` is imported (settings are read once).
 os.environ["POSTGRES_DB"] = "oreshnik_test"
 os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+# The tests about the queue and the settings page were written against these two baselines; the shipped defaults are higher.
+os.environ["SCAN_CONCURRENCY"] = "2"
+os.environ["MAX_ACTIVE_SCANS_PER_USER"] = "3"
 os.environ["JWT_SECRET"] = "t" * 48
 os.environ["ADMIN_EMAIL"] = "root@example.com"
 os.environ["ADMIN_PASSWORD"] = "bootstrap-pass"

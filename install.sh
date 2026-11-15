@@ -86,8 +86,6 @@ if [ ! -f .env ]; then
   if ! $DOCKER volume ls -q 2>/dev/null | grep -q '_pgdata$'; then
     set_env POSTGRES_PASSWORD "$(rand_hex 16)"
   fi
-  set_env SCAN_CONCURRENCY "$SAFE_SCANS"
-  note "Сканов одновременно: $SAFE_SCANS (памяти ${MEM_MB} МБ, на скан нужно около 2,5 ГБ). Меняется в панели: «Настройки»."
 else
   say "Файл .env уже есть — проверяю его"
 fi

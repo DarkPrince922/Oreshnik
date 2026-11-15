@@ -187,7 +187,7 @@ def _claim(scan_id: int) -> "_Snapshot | str | None":
         claimed = db.execute(
             update(Scan)
             .where(Scan.id == scan_id, Scan.status == ScanStatus.queued)
-            .values(status=ScanStatus.running, started_at=_utcnow(), heartbeat_at=_utcnow())
+            .values(status=ScanStatus.running, started_at=_utcnow(), heartbeat_at=_utcnow(), status_detail=None)  # the "waits for a place" note is over
         )
         db.commit()
         if claimed.rowcount == 0:
@@ -314,12 +314,27 @@ def _finalize(scan_id: int, status: ScanStatus, detail: str | None, result: RunR
         db.commit()
 
 
+def _note_waiting(scan_id: int) -> None:
+    """Say on a queued scan why it has not started: every place for a running scan is taken. Shown on the scan's page."""
+    detail = (
+        f"Ждёт свободного места: сейчас выполняется столько сканов, сколько разрешено ({settings.scan_concurrency}). "
+        "Стартует сам, когда один из них завершится. Число меняется в «Настройках»: «Сканов одновременно»."
+    )
+    try:
+        with SessionLocal() as db:
+            db.execute(update(Scan).where(Scan.id == scan_id, Scan.status == ScanStatus.queued).values(status_detail=detail))
+            db.commit()
+    except Exception as exc:  # a note only: never worth failing the task over
+        log.warning("scan %s: could not note why it waits: %s", scan_id, exc)
+
+
 @celery.task(name="oreshnik.scan_run")
 def scan_run(scan_id: int) -> str:
     snap = _claim(scan_id)
     if snap == "busy":
         # No free place: try again shortly, the scan stays queued meanwhile (cancelling it makes the next try a no-op).
         # Places are not handed out strictly in the order of arrival.
+        _note_waiting(scan_id)
         if not celery.conf.task_always_eager:
             scan_run.apply_async((scan_id,), countdown=_WAIT_SECONDS)
         return "waiting"
