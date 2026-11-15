@@ -177,3 +177,16 @@ def test_the_defaults_and_the_settings():
     assert fresh.llm_retry_attempts == 2 and fresh.llm_retry_delay_seconds == 90
     with pytest.raises(Exception):
         Settings(_env_file=None, llm_retry_delay_seconds=1)
+
+
+def test_the_codes_are_a_setting_and_499_is_among_them_by_default(monkeypatch):
+    assert llm_failure_is_transient("Error code: 499 - client closed request")
+    monkeypatch.setattr(settings, "llm_retry_codes", "502,503")
+    assert not llm_failure_is_transient("Error code: 499") and not llm_failure_is_transient("Error code: 504 - Gateway Timeout")
+    assert llm_failure_is_transient("Error code: 503") and llm_failure_is_transient("Request timed out.")  # no code named: the words decide
+    monkeypatch.setattr(settings, "llm_retry_codes", "401, 404, 418")
+    assert llm_failure_is_transient("Error code: 418") and not llm_failure_is_transient("Error code: 401") and not llm_failure_is_transient("Error code: 404")
+    monkeypatch.setattr(settings, "llm_retry_codes", "")
+    assert not llm_failure_is_transient("Error code: 502") and llm_failure_is_transient("Connection error.")
+    with pytest.raises(Exception):
+        Settings(_env_file=None, llm_retry_codes="502; drop")

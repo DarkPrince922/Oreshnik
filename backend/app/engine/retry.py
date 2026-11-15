@@ -29,9 +29,10 @@ PORT_RETRY_DELAY_SECONDS = 3.0
 # Strix's own heading for a failed pre-scan request to the model; the reason follows on the next lines of its box.
 LLM_FAILED_RE = re.compile(r"LLM CONNECTION FAILED", re.IGNORECASE)
 # Reasons that pass by waiting: gateway and server errors, overload, rate limits, timeouts, a dropped connection.
+# The HTTP codes among them are a setting (`llm_retry_codes`, editable in the panel); the words below are fixed.
+LLM_CODE_RE = re.compile(r"error code:\s*(\d{3})\b", re.IGNORECASE)
 LLM_TRANSIENT_RE = re.compile(
-    r"error code:\s*(408|409|425|429|500|502|503|504|520|521|522|523|524|529)\b"
-    r"|bad[ _]gateway|gateway[ _]time-?out|service[ _]unavailable|internal[ _]server[ _]error|bad_response_status_code"
+    r"bad[ _]gateway|gateway[ _]time-?out|service[ _]unavailable|internal[ _]server[ _]error|bad_response_status_code"
     r"|overloaded|rate[ _-]?limit|too many requests|temporarily|try again"
     r"|timed? ?out|timeout|connection (error|reset|refused|aborted|closed)|connecterror|readerror|remoteprotocolerror"
     r"|server disconnected|name or service not known|temporary failure in name resolution",
@@ -46,9 +47,19 @@ LLM_PERMANENT_RE = re.compile(
 _LLM_REASON_LINES = 14  # how much of Strix's box after the heading is read for the reason
 
 
+def retry_codes() -> set[str]:
+    """The HTTP codes worth another try, as the admin listed them (`llm_retry_codes`: "502, 503, 499 ...")."""
+    return set(re.findall(r"\d{3}", settings.llm_retry_codes or ""))
+
+
 def llm_failure_is_transient(reason: str) -> bool:
     """True when the text Strix printed under "LLM CONNECTION FAILED" names a reason that passes on its own."""
-    return bool(LLM_TRANSIENT_RE.search(reason)) and not LLM_PERMANENT_RE.search(reason)
+    if LLM_PERMANENT_RE.search(reason):
+        return False
+    codes = set(LLM_CODE_RE.findall(reason))
+    if codes:  # the gateway named a code: the list decides, whatever else the message says
+        return bool(codes & retry_codes())
+    return bool(LLM_TRANSIENT_RE.search(reason))
 
 
 def _wait(seconds: float, should_cancel: Callable[[], bool], sleep: Callable[[float], None]) -> bool:

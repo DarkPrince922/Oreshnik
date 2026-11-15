@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # key, an unknown model or a spent quota is never retried. 0 attempts = off.
     llm_retry_attempts: int = Field(default=2, ge=0, le=10)
     llm_retry_delay_seconds: int = Field(default=90, ge=5, le=3600)
+    # Which HTTP codes from the model's gateway count as "passes by itself" (comma-separated). 499 = the gateway gave up waiting
+    # for the model (nginx's "client closed request"). 400/401/402/403/404/422 are never retried, listed or not.
+    llm_retry_codes: str = Field(default="408, 409, 425, 429, 499, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529", pattern=r"^\s*(\d{3}\s*(,\s*\d{3}\s*)*)?$", max_length=400)
 
     # Операции: how long one host's script may run before it is given up on and marked failed.
     ops_host_timeout_seconds: int = Field(default=600, ge=1, le=7200)
