@@ -405,6 +405,7 @@ def list_scans(
     schedule_id: int | None = Query(default=None, description="only scans started by this schedule"),
     active: bool | None = Query(default=None, description="true: queued/running/cancelling only; false: finished only"),
     q: str | None = Query(default=None, max_length=200, description="a part of a target, or a scan number"),
+    owner: str | None = Query(default=None, pattern="^(mine|others)$", description="mine: the caller's own scans; others: everybody else's (of those the caller may see)"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
@@ -413,6 +414,10 @@ def list_scans(
     # What the list is about: what the viewer may see, one schedule, a search. `counts` (the tiles above the list) covers all of
     # it by status; `status` and `active` then narrow the rows themselves.
     scope = [_visible(user)]
+    if owner == "mine":
+        scope.append(Scan.user_id == user.id)
+    elif owner == "others":
+        scope.append(Scan.user_id != user.id)
     if schedule_id is not None:
         scope.append(Scan.schedule_id == schedule_id)
     text = (q or "").strip()

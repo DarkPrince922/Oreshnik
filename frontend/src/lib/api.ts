@@ -305,7 +305,7 @@ export interface ScanCreateInput {
   llm_model?: string | null;
 }
 export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
-export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; active?: boolean; q?: string; limit?: number; offset?: number } = {}) =>
+export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; active?: boolean; q?: string; owner?: "mine" | "others"; limit?: number; offset?: number } = {}) =>
   (await api.get<ScanList>("/api/scans", { params })).data;
 export const getScan = async (id: number) => (await api.get<Scan>(`/api/scans/${id}`)).data;
 export const cancelScan = async (id: number) => (await api.post<Scan>(`/api/scans/${id}/cancel`)).data;

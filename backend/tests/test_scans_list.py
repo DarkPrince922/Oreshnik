@@ -66,3 +66,16 @@ def test_an_operator_still_sees_and_counts_only_their_own(client, admin, operato
     make_scan(me(client, admin), mock_runner.id, status=ScanStatus.failed, targets=["https://shop.example.com"])
     assert ls(client, operator)["counts"]["failed"] == 1 and ls(client, admin)["counts"]["failed"] == 2
     assert ls(client, operator, q="shop")["total"] == 2 and ls(client, admin, q="shop")["total"] == 3
+
+
+def test_an_admin_can_split_the_list_into_own_and_everybody_elses(client, admin, operator, mock_runner):
+    seed(client, operator, mock_runner)  # six scans of the operator
+    own = make_scan(me(client, admin), mock_runner.id, status=ScanStatus.failed, targets=["https://admin.example.com"])
+    mine = ls(client, admin, owner="mine")
+    assert ids(mine) == [own.id] and mine["counts"]["failed"] == 1 and mine["counts"]["running"] == 0
+    others = ls(client, admin, owner="others")
+    assert others["total"] == 6 and own.id not in ids(others) and others["counts"]["failed"] == 1
+    assert ls(client, admin)["total"] == 7  # no filter: everything, as before
+    # an operator never sees anybody else's, whatever is asked for
+    assert ls(client, operator, owner="others")["total"] == 0 and ls(client, operator, owner="mine")["total"] == 6
+    assert client.get("/api/scans", headers=admin, params={"owner": "everyone"}).status_code == 422

@@ -213,6 +213,9 @@ export default function Scans() {
   const [filter, setFilter] = useState<ScanFilter>("all");
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
+  // An administrator sees everybody's scans: their own and the others' are two tabs, so one's own work is not buried.
+  const splitByOwner = hasRole("admin");
+  const [owner, setOwner] = useState<"mine" | "others">("mine");
   const query = useDebounced(search.trim(), 300);
   const [live, setLive] = useState<Scan[] | null>(null);
   const [history, setHistory] = useState<ScanList | null>(null);
@@ -223,7 +226,7 @@ export default function Scans() {
 
   const load = useCallback(async () => {
     const mine = ++requestId.current;
-    const common = { schedule_id: scheduleId ?? undefined, q: query || undefined };
+    const common = { schedule_id: scheduleId ?? undefined, q: query || undefined, owner: splitByOwner ? owner : undefined };
     const status = filter === "all" ? undefined : filter;
     try {
       const [liveList, historyList] = await Promise.all([
@@ -238,7 +241,7 @@ export default function Scans() {
     } catch (e) {
       if (mine === requestId.current) setError(errorMessage(e));
     }
-  }, [filter, page, scheduleId, query, show.live, show.history]);
+  }, [filter, page, scheduleId, query, show.live, show.history, splitByOwner, owner]);
 
   useEffect(() => {
     setLive(null);
@@ -255,7 +258,7 @@ export default function Scans() {
   }, [anyActive, load]);
 
   const canCreate = hasRole("admin", "operator");
-  const showOwner = !hasRole("operator");
+  const showOwner = splitByOwner ? owner === "others" : !hasRole("operator");
   const canModify = (scan: Scan) => hasRole("admin") || (hasRole("operator") && scan.user_id === user?.id);
   const stop = async (scan: Scan) => {
     if (!window.confirm(scan.status === "queued" ? `Отменить скан #${scan.id}?` : `Остановить скан #${scan.id}? Уже найденное сохранится.`)) return;
@@ -329,6 +332,23 @@ export default function Scans() {
         </div>
       )}
 
+      {splitByOwner && (
+        <div role="tablist" aria-label="Чьи сканы" className="mb-4 inline-flex rounded-xl border border-white/10 bg-ink-900/60 p-1">
+          {([["mine", "Мои сканы"], ["others", "Сканы других"]] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={owner === value}
+              onClick={() => { setOwner(value); setPage(0); }}
+              className={clsx("rounded-lg px-4 py-1.5 text-[13px] font-medium transition-colors", owner === value ? "bg-accent/25 text-white" : "text-slate-400 hover:text-slate-200")}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="mb-6 flex flex-wrap gap-2.5">
         {TILES.map((t) => (
           <button
@@ -361,8 +381,8 @@ export default function Scans() {
       {nothing && !error && (
         <EmptyState
           title={query ? "Ничего не найдено" : everything === 0 ? "Сканов пока нет" : `Нет сканов: «${TILES.find((t) => t.value === filter)?.label}»`}
-          text={query ? "Проверьте запрос: ищем по части адреса цели или по номеру скана." : everything === 0 ? "Запустите первый скан — для отладки панели выберите раннер mock: он ничего не тратит." : "Выберите другую плитку, чтобы увидеть остальные."}
-          action={everything === 0 && !query && canCreate ? <Link to="/scans/new"><Button variant="primary">Новый скан</Button></Link> : undefined}
+          text={query ? "Проверьте запрос: ищем по части адреса цели или по номеру скана." : everything === 0 ? (splitByOwner && owner === "others" ? "Другие пользователи пока ничего не запускали." : "Запустите первый скан — для отладки панели выберите раннер mock: он ничего не тратит.") : "Выберите другую плитку, чтобы увидеть остальные."}
+          action={everything === 0 && !query && canCreate && !(splitByOwner && owner === "others") ? <Link to="/scans/new"><Button variant="primary">Новый скан</Button></Link> : undefined}
         />
       )}
 
