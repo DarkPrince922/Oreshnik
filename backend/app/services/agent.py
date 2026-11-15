@@ -241,6 +241,41 @@ def stream_turn(
         raise AgentError(f"Нет связи с контейнером агента ({exc.__class__.__name__})") from exc
 
 
+def listener_note() -> str:
+    """What the agent is told about reaching it from outside: which ports the panel forwards into its container, or that none are.
+
+    Without it the agent serves on any port it likes (8000, 3000, ...) and tells the user to open `localhost:<port>` — which is the
+    user's own machine, not the container, so nothing opens.
+    """
+    from app.services.agent_listener import port_range
+
+    rng = port_range()
+    if rng is None:
+        return (
+            "[Панель: доступ к этому контейнеру снаружи]\n"
+            "У контейнера нет опубликованных портов, и проброс портов выключен: то, что ты запускаешь здесь (веб-сервер, листенер), "
+            "пользователь открыть в браузере НЕ может — `localhost` у него это его собственный компьютер. Не предлагай открыть "
+            "http://localhost:<порт>. Результат показывай текстом или файлами: пользователь скачивает их кнопкой «Файлы»."
+        )
+    lo, hi = rng
+    ports = str(lo) if lo == hi else f"{lo}–{hi}"
+    return (
+        "[Панель: доступ к этому контейнеру снаружи]\n"
+        f"У контейнера нет опубликованных портов. Панель умеет пробрасывать ОДИН TCP-порт из диапазона {ports} со своего хоста на такой же "
+        "порт внутри этого контейнера. Поэтому всё, что пользователь должен открыть сам (веб-страница, приёмник обратного соединения, "
+        f"вебхук), запускай ТОЛЬКО на порту из {ports} и на адресе 0.0.0.0 — любой другой порт (8000, 3000, 8080 ...) снаружи недоступен. "
+        "Сервер запускай так, чтобы он пережил завершение команды (например `nohup ... &` или `setsid`), и проверь, что он слушает. "
+        "Пользователю скажи два шага: 1) в настройках сессии открыть листенер на этом порту; 2) открыть "
+        "http://<адрес панели>:<порт>/ (если панель на его же компьютере — http://localhost:<порт>/). "
+        "Порт открывает панель по действию пользователя, сам ты его открыть не можешь."
+    )
+
+
+def effective_instructions(own: str | None) -> str:
+    """The instructions a session's conversation gets: the user's own, then the panel's note about ports."""
+    return "\n\n".join(part for part in ((own or "").strip(), listener_note()) if part)
+
+
 def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, action: str = "message", extra: dict | None = None) -> None:
     """Run one action of a session to its end, storing what is worth keeping as it arrives. Always leaves the session idle."""
     extra = extra or {}
@@ -249,7 +284,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         if session is None:
             return
         key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
-        instructions, effort, approval_mode = session.instructions, session.reasoning_effort, session.approval_mode or "auto"
+        instructions, effort, approval_mode = effective_instructions(session.instructions), session.reasoning_effort, session.approval_mode or "auto"
         applied_instructions = session.thread_instructions
         web_search = session.web_search or "auto"
         # The goal feature of Codex is on only for a session that uses it: otherwise the model could set itself a goal and work unasked.

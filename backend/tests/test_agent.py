@@ -22,7 +22,12 @@ def wired(agentd, monkeypatch):
     """The panel talking to the real agentd that runs the stand-in Codex."""
     monkeypatch.setattr(settings, "agent_token", TOKEN)
     monkeypatch.setattr(settings, "agent_url", agentd.url)
+    # The panel's own note about ports is off here, so these tests see the user's instructions alone; it has tests of its own below.
+    monkeypatch.setattr(agent_service, "listener_note", lambda: "")
     return agentd
+
+
+REAL_LISTENER_NOTE = agent_service.listener_note
 
 
 def openai_profile(user_id: int, name: str = "oa", models=()) -> LLMProfile:
@@ -965,3 +970,42 @@ def test_a_fork_keeps_the_goal_the_web_search_choice_and_the_context(client, wir
     wait_idle(s["id"])
     c = client.post(f"/api/agent/sessions/{s['id']}/fork", headers=h).json()
     assert c["web_search"] == "off" and c["goal"]["status"] == "complete" and c["context_used"] == 62
+
+
+# ── the agent is told which ports the panel forwards ────────────────────────
+
+def test_the_note_names_the_forwarded_range_or_says_there_is_none(monkeypatch):
+    monkeypatch.setattr(settings, "agent_listener_ports", "4444-4450")
+    note = REAL_LISTENER_NOTE()
+    assert "4444–4450" in note and "0.0.0.0" in note and "настройках сессии" in note
+    monkeypatch.setattr(settings, "agent_listener_ports", "4444-4444")
+    assert "диапазона 4444 " in REAL_LISTENER_NOTE()  # one port is not written as a range
+    monkeypatch.setattr(settings, "agent_listener_ports", "")
+    off = REAL_LISTENER_NOTE()
+    assert "проброс портов выключен" in off and "4444" not in off and "Не предлагай открыть" in off
+
+
+def test_the_note_follows_the_users_own_instructions(monkeypatch):
+    monkeypatch.setattr(agent_service, "listener_note", lambda: "NOTE")
+    assert agent_service.effective_instructions(" Кратко. ") == "Кратко.\n\nNOTE"
+    assert agent_service.effective_instructions(None) == "NOTE" and agent_service.effective_instructions("") == "NOTE"
+    monkeypatch.setattr(agent_service, "listener_note", lambda: "")
+    assert agent_service.effective_instructions("Кратко.") == "Кратко." and agent_service.effective_instructions(None) == ""
+
+
+def test_a_new_conversation_starts_with_the_note_and_an_old_one_is_told_once(client, wired, monkeypatch):
+    monkeypatch.setattr(settings, "agent_listener_ports", "4444-4450")
+    user, h = op_user(client)
+    profile = openai_profile(user.id)
+    old = new_session(client, h, profile, instructions="Кратко.")
+    assert report(client, h, old["id"])["seen"]["developerInstructions"] == "Кратко."  # began before the panel had the note
+
+    monkeypatch.setattr(agent_service, "listener_note", REAL_LISTENER_NOTE)
+    told = report(client, h, old["id"])["seen"]["lastPrompt"]
+    assert "4444–4450" in told and "Кратко." in told and told.endswith("report")  # handed over inside its next message
+    assert report(client, h, old["id"])["seen"]["lastPrompt"] == "report"  # and only once
+    assert client.get(f"/api/agent/sessions/{old['id']}", headers=h).json()["instructions"] == "Кратко."  # the user's own are not rewritten
+
+    fresh = new_session(client, h, profile)
+    seen = report(client, h, fresh["id"])["seen"]
+    assert "4444–4450" in seen["developerInstructions"] and seen["lastPrompt"] == "report"

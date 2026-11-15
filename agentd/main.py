@@ -100,10 +100,10 @@ class Turn(BaseModel):
     # Route Codex's requests through the compat proxy below, which completes the `usage` of the final stream event. Some gateways leave
     # `cached_tokens` out and Codex then treats the finished answer as a dropped stream: it asks again up to 5 times and fails.
     normalize_responses: bool = False
-    instructions: str | None = Field(default=None, max_length=20_000)   # the session's own system prompt (Codex "developer instructions")
+    instructions: str | None = Field(default=None, max_length=24_000)   # the session's own system prompt (Codex "developer instructions") plus the panel's own note (the user's part is capped at 20 000 by the panel)
     # What the conversation already has as instructions (the panel remembers it). Codex ignores new developer instructions on a thread that
     # exists, so a change is handed over inside the next message instead (see `instructions_notice`).
-    applied_instructions: str | None = Field(default=None, max_length=20_000)
+    applied_instructions: str | None = Field(default=None, max_length=24_000)
     effort: str | None = None                                           # reasoning effort of the model
     approval_mode: Literal["auto", "ask"] = "auto"                      # ask: Codex asks before commands and file changes
     review_target: dict | None = None
