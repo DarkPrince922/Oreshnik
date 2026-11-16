@@ -7,11 +7,35 @@
 #   * the frontend is built into static files and served by nginx, which also hands /api on to the backend — the panel and
 #     its API live at ONE address (port 5173), so VITE_API_BASE and CORS_ORIGINS need no setting up;
 #   * the backend runs without --reload (no file watcher, no restart of the process under a running request).
+#   * every service comes back by itself when it stops — after the kernel's out-of-memory killer, a crash or a reboot of the
+#     server. Without this one killed process (the API, the scan worker) left the panel answering 502 until someone noticed;
+#   * the API's own port 8000 is reachable from this machine only: the browser talks to it through nginx on 5173, so there is
+#     nothing to expose — and the internet's scanners stop knocking on it ("Invalid HTTP request received" in the log).
+#     The agent's listener range stays published: it is meant to be reached from outside.
 services:
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
   backend:
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+    ports: !override
+      - "127.0.0.1:8000:8000"
+      - "4444-4450:4444-4450"
+
+  worker:
+    restart: unless-stopped
+
+  agent-worker:
+    restart: unless-stopped
+
+  beat:
+    restart: unless-stopped
 
   frontend:
     build:
