@@ -109,6 +109,16 @@ if [ -z "$(get_env COMPOSE_FILE)" ]; then
   set_env COMPOSE_FILE "docker-compose.yml:docker-compose.prod.yml"
   note "COMPOSE_FILE: панель и её API теперь на одном адресе (порт 5173) — VITE_API_BASE и CORS_ORIGINS настраивать не нужно"
 fi
+# Docker Compose reads docker-compose.override.yml by itself only while COMPOSE_FILE is not set. With COMPOSE_FILE set (above) your own
+# additions there — Tor, extra ports — would be silently dropped, so the file is named in COMPOSE_FILE explicitly, last (it wins).
+if [ -f docker-compose.override.yml ]; then
+  files="$(get_env COMPOSE_FILE)"
+  case ":$files:" in
+    *:docker-compose.override.yml:*) ;;
+    *) set_env COMPOSE_FILE "${files:-docker-compose.yml}:docker-compose.override.yml"
+       note "COMPOSE_FILE: ваш docker-compose.override.yml подключён (без этого его настройки, например Tor, перестали бы действовать)" ;;
+  esac
+fi
 
 current="$(get_env SCAN_CONCURRENCY)"
 if [ -n "$current" ] && [ "$current" -gt "$SAFE_SCANS" ] 2>/dev/null; then

@@ -59,6 +59,7 @@ git clone https://github.com/DarkPrince922/Oreshnik.git && cd Oreshnik && ./inst
 |---|---|
 | Обновить до свежей версии | `git pull && ./install.sh` |
 | Применить правку в `.env` | `docker compose up -d --force-recreate` |
+| Свои добавки к compose (Tor, порты) | файл `docker-compose.override.yml` — `./install.sh` подключает его сам, в git он не попадает |
 | Остановить | `docker compose stop` |
 | Запустить снова | `docker compose up -d` |
 | Посмотреть, что сломалось | `docker compose logs backend --tail 50` |
