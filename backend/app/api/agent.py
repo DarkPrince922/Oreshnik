@@ -23,12 +23,14 @@ from app.core.db import SessionLocal, get_db
 from app.core.security import decode_access_token
 from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus, new_session_key
 from app.models.llm_profile import LLMProfile
+from app.models.persona import Persona
 from app.models.scan import Finding, Scan
 from app.models.user import Role, User
 from app.schemas.agent import (
     AgentAction, AgentApproval, AgentClone, AgentEventOut, AgentFromScan, AgentFromScanOut, AgentListenerOpen, AgentListenerOut,
     AgentListenerRange, AgentMessage, AgentSessionCreate, AgentSessionOut, AgentSessionUpdate,
 )
+from app.api.personas import pick_for_session
 from app.services import agent as agent_service
 from app.services import agent_listener
 from app.services.agent import AgentError
@@ -47,11 +49,13 @@ PROXIED_STATUSES = {400, 404, 409, 413, 422, 502, 503, 504}
 def _out(db: Session, session: AgentSession) -> AgentSessionOut:
     profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
     listener = agent_listener.status_for(session.key)
+    persona = db.get(Persona, session.persona_id) if session.persona_id else None
     return AgentSessionOut(
         id=session.id, title=session.title, llm_profile_id=session.llm_profile_id,
         llm_profile_name=profile.name if profile else None,
         llm_model=session.llm_model or (profile.model if profile else None),
-        instructions=session.instructions, reasoning_effort=session.reasoning_effort, approval_mode=session.approval_mode or "auto",
+        instructions=session.instructions, persona_id=session.persona_id, persona_name=persona.name if persona else None,
+        reasoning_effort=session.reasoning_effort, approval_mode=session.approval_mode or "auto",
         web_search=session.web_search or "auto", goal=session.goal, context_used=session.context_used, context_window=session.context_window,
         context_window_known=session.context_window_known is not False, tokens_in=session.tokens_in or 0, tokens_out=session.tokens_out or 0,
         status=session.status, turn_count=session.turn_count,
@@ -126,6 +130,7 @@ def _new_session(db: Session, user: User, profile: LLMProfile, body: AgentSessio
     session = AgentSession(
         user_id=user.id, title=title or body.title.strip() or NEW_TITLE, llm_profile_id=profile.id, llm_model=validate_model(profile, body.llm_model),
         instructions=(body.instructions or "").strip() or None, reasoning_effort=body.reasoning_effort, approval_mode=body.approval_mode,
+        persona_id=(lambda p: p.id if p else None)(pick_for_session(db, user, body.persona_id, "code")),
         web_search=body.web_search,
     )
     db.add(session)
@@ -155,6 +160,8 @@ def update_session(session_id: int, body: AgentSessionUpdate, user: User = Depen
         session.title = body.title.strip() or session.title
     if "instructions" in sent:
         session.instructions = (body.instructions or "").strip() or None
+    if "persona_id" in sent:
+        session.persona_id = pick_for_session(db, user, body.persona_id, "code").id if body.persona_id is not None else None
     if "reasoning_effort" in sent:
         session.reasoning_effort = body.reasoning_effort
     if body.approval_mode is not None:
@@ -318,7 +325,7 @@ def fork_session(session_id: int, user: User = Depends(require_operator), db: Se
         raise HTTPException(status.HTTP_409_CONFLICT, f"Не больше {settings.max_agent_sessions_per_user} сессий: удалите ненужные")
     copy = AgentSession(
         key=new_session_key(), user_id=user.id, title=f"{source.title} (копия)"[:200], llm_profile_id=source.llm_profile_id, llm_model=source.llm_model,
-        thread_id=source.thread_id, instructions=source.instructions, thread_instructions=source.thread_instructions, reasoning_effort=source.reasoning_effort, approval_mode=source.approval_mode,
+        thread_id=source.thread_id, instructions=source.instructions, persona_id=source.persona_id, thread_instructions=source.thread_instructions, reasoning_effort=source.reasoning_effort, approval_mode=source.approval_mode,
         turn_count=source.turn_count, next_seq=source.next_seq, web_search=source.web_search, goal=source.goal,
         context_used=source.context_used, context_window=source.context_window, context_window_known=source.context_window_known,
     )

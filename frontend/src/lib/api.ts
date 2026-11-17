@@ -528,6 +528,8 @@ export interface AgentSession {
   /** The model the session talks to: the one chosen, else the profile's default. */
   llm_model: string | null;
   instructions: string | null;
+  persona_id: number | null;
+  persona_name: string | null;
   reasoning_effort: string | null;
   approval_mode: ApprovalMode;
   web_search: WebSearchMode;
@@ -574,12 +576,14 @@ export interface AgentSessionInput {
   llm_profile_id: number;
   llm_model?: string | null;
   instructions?: string | null;
+  persona_id?: number | null;
   reasoning_effort?: string | null;
   approval_mode?: ApprovalMode;
 }
 export interface AgentSettingsInput {
   title?: string;
   instructions?: string | null;
+  persona_id?: number | null;
   reasoning_effort?: string | null;
   approval_mode?: ApprovalMode;
   web_search?: WebSearchMode;
@@ -710,3 +714,37 @@ export interface Attention {
   agent: { finished: number; waiting: number };
 }
 export const getAttention = async (params: { scans_since?: string; agent_since?: string }) => (await api.get<Attention>("/api/attention", { params })).data;
+
+// ── Личности ─────────────────────────────────────────────────────────────
+
+export type PersonaScope = "both" | "code" | "agent";
+/** Who an AI agent is: its role, tone and rules, given to it as its instructions. */
+export interface Persona {
+  id: number;
+  name: string;
+  description: string;
+  instructions: string;
+  scope: PersonaScope;
+  /** Made by an administrator for everybody: anyone picks it, only an administrator changes it. */
+  shared: boolean;
+  /** The user's own default for new sessions. */
+  is_default: boolean;
+  mine: boolean;
+  editable: boolean;
+  /** Sessions of the current user that run with it. */
+  sessions: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface PersonaInput {
+  name: string;
+  description: string;
+  instructions: string;
+  scope: PersonaScope;
+  shared?: boolean;
+  is_default: boolean;
+}
+export const listPersonas = async () => (await api.get<Persona[]>("/api/personas")).data;
+export const createPersona = async (body: PersonaInput) => (await api.post<Persona>("/api/personas", body)).data;
+export const updatePersona = async (id: number, body: Partial<PersonaInput>) => (await api.patch<Persona>(`/api/personas/${id}`, body)).data;
+export const deletePersona = (id: number) => api.delete(`/api/personas/${id}`);

@@ -47,6 +47,7 @@ class AgentSession(Base):
     thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # Codex's own id; set by the first turn
     # Settings of the session itself, editable between messages and applied to the next one:
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)           # its own system prompt (Codex «developer instructions»)
+    persona_id: Mapped[int | None] = mapped_column(ForeignKey("personas.id", ondelete="SET NULL"), nullable=True)  # who the agent is (app/models/persona.py)
     # What the conversation's thread actually has as instructions (Codex ignores new ones on an existing thread; a change is sent inside
     # the next message and recorded here). None = none.
     thread_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)

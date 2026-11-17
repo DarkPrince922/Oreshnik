@@ -13,6 +13,7 @@ import NewScan from "./pages/NewScan";
 import Agent from "./pages/Agent";
 import Settings from "./pages/Settings";
 import Ops from "./pages/Ops";
+import Personas from "./pages/Personas";
 import Runners from "./pages/Runners";
 import Schedules from "./pages/Schedules";
 import ScanDetail from "./pages/ScanDetail";
@@ -74,6 +75,14 @@ export default function App() {
               element={
                 <ProtectedRoute roles={["admin", "operator"]}>
                   <Agent />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="personas"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Personas />
                 </ProtectedRoute>
               }
             />

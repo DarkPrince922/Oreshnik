@@ -26,11 +26,15 @@ import {
   sendAgentMessage,
   steerAgentTurn,
   stopAgentTurn,
+  listPersonas,
   type AgentSession,
   type LLMProfile,
+  type Persona,
 } from "../lib/api";
 import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
+import PersonaField from "../components/agent/PersonaField";
+import { defaultPersona } from "../lib/personas";
 
 const chip = "rounded-md border border-white/10 px-2 py-0.5 text-slate-400";
 const WEB_SEARCH: Record<string, string> = { auto: "авто", on: "включён", off: "выключен" };
@@ -207,6 +211,7 @@ function Chat({
               {current.llm_profile_name ?? "профиль удалён"}
               {current.llm_model ? ` · ${current.llm_model}` : ""}
             </span>
+            {current.persona_name && <span className={clsx(chip, "border-accent/35 bg-accent/10 text-accent-soft")}>личность: {current.persona_name}</span>}
             <span className={chip}>подтверждения: {current.approval_mode === "ask" ? "спрашивает" : "без вопросов"}</span>
             <span className={chip}>веб-поиск: {WEB_SEARCH[current.web_search] ?? current.web_search}</span>
             {current.instructions && <span className={chip}>свои инструкции</span>}
@@ -368,6 +373,8 @@ export default function Agent() {
   const [creating, setCreating] = useState(false);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [saving, setSaving] = useState(false);
+  const [personas, setPersonas] = useState<Persona[]>([]);
+  const [personaId, setPersonaId] = useState<number | null>(null);
   // From «Разобрать в агенте» on a scan page: which session to open and the task proposed for it.
   const incoming = (location.state ?? null) as { sessionId?: number; draft?: string } | null;
   const [draft] = useState<{ sessionId: number; text: string } | null>(incoming?.sessionId && incoming.draft ? { sessionId: incoming.sessionId, text: incoming.draft } : null);
@@ -385,6 +392,7 @@ export default function Agent() {
   useEffect(() => {
     void refresh();
     listProfiles().then(setProfiles).catch((e) => setError(errorMessage(e)));
+    listPersonas().then(setPersonas).catch(() => setPersonas([]));
     getAgentHealth().then(setHealth).catch(() => setHealth({ ok: false, detail: "Не удалось проверить «Код»" }));
   }, [refresh]);
 
@@ -405,7 +413,7 @@ export default function Agent() {
     setSaving(true);
     setError(null);
     try {
-      const s = await createAgentSession({ title: "", llm_profile_id: choice.profileId, llm_model: modelToSend(usable, choice) });
+      const s = await createAgentSession({ title: "", llm_profile_id: choice.profileId, llm_model: modelToSend(usable, choice), persona_id: personaId });
       setCreating(false);
       await refresh();
       setSelected(s.id);
@@ -451,6 +459,7 @@ export default function Agent() {
           disabled={health?.ok === false}
           onClick={() => {
             setChoice(defaultChoice(usable));
+            setPersonaId(defaultPersona(personas, "code")?.id ?? null);
             setCreating(true);
           }}
         >
@@ -505,6 +514,7 @@ export default function Agent() {
               <ModelSelect profiles={usable} value={choice} onChange={setChoice} required label="Модель" />
             </Field>
           )}
+          <PersonaField personas={personas} value={personaId} onChange={setPersonaId} />
           <p className="text-[11px] leading-relaxed text-slate-500">
             По умолчанию агент выполняет команды без вопросов — внутри своего контейнера, без доступа к базе, Docker и секретам панели. Режим «спрашивать», свои инструкции и глубину
             размышлений можно включить в настройках сессии.

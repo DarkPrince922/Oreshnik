@@ -2,10 +2,11 @@ import clsx from "clsx";
 import { useEffect, useState, type FormEvent } from "react";
 
 import {
-  REASONING_EFFORTS, closeAgentListener, errorMessage, getAgentListenerRange, openAgentListener, updateAgentSession,
-  type AgentListenerRange, type AgentSession, type ApprovalMode, type WebSearchMode,
+  REASONING_EFFORTS, closeAgentListener, errorMessage, getAgentListenerRange, listPersonas, openAgentListener, updateAgentSession,
+  type AgentListenerRange, type AgentSession, type ApprovalMode, type Persona, type WebSearchMode,
 } from "../../lib/api";
 import { Button, ErrorNote, Field, Modal } from "../ui";
+import PersonaField from "./PersonaField";
 
 const EFFORT_LABEL: Record<string, string> = { minimal: "минимальная", low: "низкая", medium: "средняя", high: "высокая", xhigh: "максимальная" };
 
@@ -13,6 +14,8 @@ const EFFORT_LABEL: Record<string, string> = { minimal: "минимальная"
 export default function SettingsModal({ open, session, onClose, onSaved }: { open: boolean; session: AgentSession; onClose: () => void; onSaved: (s: AgentSession) => void }) {
   const [title, setTitle] = useState(session.title);
   const [instructions, setInstructions] = useState(session.instructions ?? "");
+  const [personaId, setPersonaId] = useState<number | null>(session.persona_id);
+  const [personas, setPersonas] = useState<Persona[]>([]);
   const [effort, setEffort] = useState(session.reasoning_effort ?? "");
   const [mode, setMode] = useState<ApprovalMode>(session.approval_mode);
   const [web, setWeb] = useState<WebSearchMode>(session.web_search);
@@ -28,6 +31,8 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
     if (!open) return;
     setTitle(session.title);
     setInstructions(session.instructions ?? "");
+    setPersonaId(session.persona_id);
+    listPersonas().then(setPersonas, () => setPersonas([]));
     setEffort(session.reasoning_effort ?? "");
     setMode(session.approval_mode);
     setWeb(session.web_search);
@@ -72,7 +77,7 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
     setBusy(true);
     setError(null);
     try {
-      const saved = await updateAgentSession(session.id, { title: title.trim() || session.title, instructions: instructions.trim(), reasoning_effort: effort, approval_mode: mode, web_search: web });
+      const saved = await updateAgentSession(session.id, { title: title.trim() || session.title, instructions: instructions.trim(), persona_id: personaId, reasoning_effort: effort, approval_mode: mode, web_search: web });
       onSaved(saved);
       onClose();
     } catch (err) {
@@ -88,6 +93,8 @@ export default function SettingsModal({ open, session, onClose, onSaved }: { ope
         <Field label="Название">
           <input className="field" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
         </Field>
+
+        <PersonaField personas={personas} value={personaId} onChange={setPersonaId} current={session.persona_name} />
 
         <Field
           label="Свои инструкции (системный промпт)"

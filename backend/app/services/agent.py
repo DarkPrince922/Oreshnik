@@ -271,9 +271,10 @@ def listener_note() -> str:
     )
 
 
-def effective_instructions(own: str | None) -> str:
-    """The instructions a session's conversation gets: the user's own, then the panel's note about ports."""
-    return "\n\n".join(part for part in ((own or "").strip(), listener_note()) if part)
+def effective_instructions(own: str | None, persona: str | None = None) -> str:
+    """The instructions a session's conversation gets: its persona (who the agent is), the session's own, then the panel's note about
+    ports. A change of any of them reaches a conversation that has begun inside its next message (see agentd's instructions_notice)."""
+    return "\n\n".join(part for part in ((persona or "").strip(), (own or "").strip(), listener_note()) if part)
 
 
 def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, action: str = "message", extra: dict | None = None) -> None:
@@ -284,7 +285,11 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         if session is None:
             return
         key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
-        instructions, effort, approval_mode = effective_instructions(session.instructions), session.reasoning_effort, session.approval_mode or "auto"
+        from app.models.persona import Persona
+
+        persona = db.get(Persona, session.persona_id) if session.persona_id else None
+        instructions = effective_instructions(session.instructions, persona.instructions if persona else None)
+        effort, approval_mode = session.reasoning_effort, session.approval_mode or "auto"
         applied_instructions = session.thread_instructions
         web_search = session.web_search or "auto"
         # The goal feature of Codex is on only for a session that uses it: otherwise the model could set itself a goal and work unasked.

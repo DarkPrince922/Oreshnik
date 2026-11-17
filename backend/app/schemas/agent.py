@@ -13,6 +13,7 @@ class AgentSessionCreate(BaseModel):
     llm_model: str | None = Field(default=None, max_length=200)  # one of the profile's models; empty = its default
     # settings of the session (all can be changed later, between messages)
     instructions: str | None = Field(default=None, max_length=20_000)
+    persona_id: int | None = None        # who the agent is; none = the user's own default persona, if any
     reasoning_effort: str | None = None
     approval_mode: str = "auto"
     web_search: str = "auto"
@@ -58,6 +59,7 @@ class AgentSessionUpdate(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=200)
     instructions: str | None = Field(default=None, max_length=20_000)   # empty string clears it
+    persona_id: int | None = None                                       # null clears it (when sent)
     reasoning_effort: str | None = None                                 # empty string = the model's default
     approval_mode: str | None = None
     web_search: str | None = None
@@ -126,6 +128,8 @@ class AgentSessionOut(BaseModel):
     llm_profile_name: str | None
     llm_model: str | None  # the model the session talks to: the one chosen, else the profile's default
     instructions: str | None
+    persona_id: int | None
+    persona_name: str | None
     reasoning_effort: str | None
     approval_mode: str
     web_search: str
