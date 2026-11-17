@@ -70,13 +70,15 @@ export default function App() {
             />
             <Route path="runners" element={<Runners />} />
             <Route
-              path="agent"
+              path="code"
               element={
                 <ProtectedRoute roles={["admin", "operator"]}>
                   <Agent />
                 </ProtectedRoute>
               }
             />
+            {/* «Агент» was renamed «Код»; the old address leads there until the new «Агент» (OpenHands) takes it. */}
+            <Route path="agent" element={<Navigate to="/code" replace />} />
             <Route
               path="ops"
               element={

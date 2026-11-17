@@ -1,4 +1,4 @@
-/** The lights on «Сканы» and «Агент» in the menu: lit when something happened since the section was last opened, off once it is opened.
+/** The lights on «Сканы» and «Код» in the menu: lit when something happened since the section was last opened, off once it is opened.
  *
  * "Last opened" is remembered in this browser (per account), as the SERVER's time, so a wrong clock on the computer does not matter.
  */
@@ -14,11 +14,11 @@ export interface Light {
   title: string;
 }
 
-export const SECTION_PATH: Record<Section, string> = { scans: "/scans", agent: "/agent" };
+export const SECTION_PATH: Record<Section, string> = { scans: "/scans", agent: "/code" };
 
 export function sectionOf(pathname: string): Section | null {
   if (pathname === "/scans" || pathname.startsWith("/scans/")) return "scans";
-  if (pathname === "/agent" || pathname.startsWith("/agent/")) return "agent";
+  if (pathname === "/code" || pathname.startsWith("/code/")) return "agent";
   return null;
 }
 
@@ -69,8 +69,9 @@ export function lights(attention: Attention | null, current: Section | null): Pa
   }
   if (current !== "agent" && (agent.waiting > 0 || agent.finished > 0)) {
     const parts: string[] = [];
-    if (agent.waiting > 0) parts.push(`агент ждёт вашего ответа${agent.waiting > 1 ? ` (${agent.waiting})` : ""}`);
-    if (agent.finished > 0) parts.push(`агент закончил${agent.finished > 1 ? ` (${agent.finished})` : ""}`);
+    if (agent.waiting > 0) parts.push(`ждёт вашего ответа${agent.waiting > 1 ? ` (${agent.waiting})` : ""}`);
+    if (agent.finished > 0) parts.push(`закончил${agent.finished > 1 ? ` (${agent.finished})` : ""}`);
+    parts[0] = `Код ${parts[0]}`;
     out.agent = { tone: agent.waiting > 0 ? "warn" : "accent", pulse: agent.waiting > 0, title: parts.join(", ") };
   }
   return out;

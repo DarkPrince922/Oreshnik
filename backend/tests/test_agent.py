@@ -827,7 +827,7 @@ def test_the_panel_says_the_agent_is_fine_when_codex_starts(client, wired, tmp_p
     path.write_text("#!/bin/sh\necho codex-cli 0.169.0\n")
     path.chmod(0o755)
     monkeypatch.setattr(wired.module, "CODEX_BIN", str(path))
-    assert agent_service.agent_health() == {"ok": True, "detail": "Агент на связи"}
+    assert agent_service.agent_health() == {"ok": True, "detail": "на связи"}
 
 
 # ── context and spend ────────────────────────────────────────────────────────

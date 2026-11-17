@@ -145,7 +145,7 @@ def agent_async_client(timeout: float | httpx.Timeout = 30.0) -> httpx.AsyncClie
 def agent_health() -> dict:
     """What the agent container says about itself, or {"ok": False, "detail": why not}."""
     if not settings.agent_token:
-        return {"ok": False, "detail": "AGENT_TOKEN не задан: агент выключен"}
+        return {"ok": False, "detail": "AGENT_TOKEN не задан: «Код» выключен"}
     try:
         with agent_client(20.0) as client:  # the first check starts Codex once
             data = client.get("/health").json()
@@ -154,7 +154,7 @@ def agent_health() -> dict:
     if not data.get("codex"):
         why = str(data.get("codex_detail") or "").strip()
         return {"ok": False, "detail": f"Codex в контейнере агента не запускается: {why}" if why else "В контейнере агента нет Codex"}
-    return {"ok": True, "detail": "Агент на связи"}
+    return {"ok": True, "detail": "на связи"}
 
 
 def _call(method: str, path: str, *, json_body: dict | None = None, timeout: float = 20.0) -> dict:

@@ -149,7 +149,7 @@ export default function Dashboard() {
             <h2 className="pb-1 text-sm font-semibold text-white">Быстрые действия</h2>
             {[
               { to: "/scans/new", label: "Запустить скан" },
-              { to: "/agent", label: "Открыть агента" },
+              { to: "/code", label: "Открыть «Код»" },
               { to: "/schedules", label: "Настроить расписание" },
             ].map((a) => (
               <Link key={a.to} to={a.to} className="group/act flex h-11 items-center justify-between rounded-xl border border-white/10 bg-ink-800/70 px-3.5 text-sm text-white transition-colors hover:border-accent/40 hover:bg-accent/10">

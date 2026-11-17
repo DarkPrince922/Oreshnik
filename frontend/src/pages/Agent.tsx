@@ -385,7 +385,7 @@ export default function Agent() {
   useEffect(() => {
     void refresh();
     listProfiles().then(setProfiles).catch((e) => setError(errorMessage(e)));
-    getAgentHealth().then(setHealth).catch(() => setHealth({ ok: false, detail: "Не удалось проверить агента" }));
+    getAgentHealth().then(setHealth).catch(() => setHealth({ ok: false, detail: "Не удалось проверить «Код»" }));
   }, [refresh]);
 
   useEffect(() => {
@@ -434,7 +434,7 @@ export default function Agent() {
             <span aria-hidden="true" className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-glow text-white shadow-[0_8px_24px_-8px_rgba(124,92,255,0.8)]">
               <TerminalIcon className="h-5 w-5" />
             </span>
-            <h1 className="bg-gradient-to-r from-white to-accent-soft bg-clip-text text-2xl font-semibold tracking-tight text-transparent">Агент</h1>
+            <h1 className="bg-gradient-to-r from-white to-accent-soft bg-clip-text text-2xl font-semibold tracking-tight text-transparent">Код</h1>
             {health && (
               <Badge tone={health.ok ? "ok" : "bad"}>
                 <span className={clsx("h-1.5 w-1.5 rounded-full", health.ok ? "bg-signal-ok" : "bg-signal-bad")} />
@@ -494,7 +494,7 @@ export default function Agent() {
         </div>
       )}
 
-      <Modal open={creating} onClose={() => setCreating(false)} title="Новая сессия агента">
+      <Modal open={creating} onClose={() => setCreating(false)} title="Новая сессия «Кода»">
         <form onSubmit={create} className="space-y-4">
           {usable.length === 0 ? (
             <p className="text-sm text-slate-400">

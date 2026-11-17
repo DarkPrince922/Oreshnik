@@ -35,7 +35,7 @@ export default function AnalyzeModal({ open, scanId, onClose }: { open: boolean;
     try {
       const result = await createAgentFromScan(scanId, { llm_profile_id: choice.profileId, llm_model: modelToSend(profiles, choice) });
       onClose();
-      navigate("/agent", { state: { sessionId: result.session.id, draft: result.draft } });
+      navigate("/code", { state: { sessionId: result.session.id, draft: result.draft } });
     } catch (err) {
       setError(errorMessage(err));
       setBusy(false);
@@ -43,7 +43,7 @@ export default function AnalyzeModal({ open, scanId, onClose }: { open: boolean;
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="Разобрать скан в агенте">
+    <Modal open={open} onClose={onClose} title="Разобрать скан в «Коде»">
       <form onSubmit={submit} className="space-y-4">
         <p className="text-sm leading-relaxed text-slate-400">
           Создадим сессию агента и положим в её папку находки скана, отчёт и файлы Strix (папка <span className="font-mono text-slate-300">scan/</span>). Первое сообщение —

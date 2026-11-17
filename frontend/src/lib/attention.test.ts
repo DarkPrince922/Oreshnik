@@ -14,7 +14,7 @@ describe("sectionOf", () => {
     expect(sectionOf("/scans")).toBe("scans");
     expect(sectionOf("/scans/12")).toBe("scans");
     expect(sectionOf("/scans/new")).toBe("scans");
-    expect(sectionOf("/agent")).toBe("agent");
+    expect(sectionOf("/code")).toBe("agent");
     expect(sectionOf("/")).toBeNull();
     expect(sectionOf("/scansomething")).toBeNull();
   });
@@ -33,9 +33,9 @@ describe("lights", () => {
     expect(lights(att({ finished: 11 }), null).scans?.title).toBe("11 сканов завершено");
   });
   it("the agent's light pulses while it waits for an answer", () => {
-    expect(lights(att({}, { finished: 1 }), null).agent).toEqual({ tone: "accent", pulse: false, title: "агент закончил" });
-    expect(lights(att({}, { waiting: 1 }), null).agent).toEqual({ tone: "warn", pulse: true, title: "агент ждёт вашего ответа" });
-    expect(lights(att({}, { waiting: 2, finished: 3 }), null).agent).toMatchObject({ tone: "warn", pulse: true, title: "агент ждёт вашего ответа (2), агент закончил (3)" });
+    expect(lights(att({}, { finished: 1 }), null).agent).toEqual({ tone: "accent", pulse: false, title: "Код закончил" });
+    expect(lights(att({}, { waiting: 1 }), null).agent).toEqual({ tone: "warn", pulse: true, title: "Код ждёт вашего ответа" });
+    expect(lights(att({}, { waiting: 2, finished: 3 }), null).agent).toMatchObject({ tone: "warn", pulse: true, title: "Код ждёт вашего ответа (2), закончил (3)" });
   });
   it("the section being looked at has no light; the other one keeps its own", () => {
     const both = att({ finished: 1 }, { waiting: 1 });

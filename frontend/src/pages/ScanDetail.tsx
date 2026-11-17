@@ -269,8 +269,8 @@ function ScanDetailView({ scanId }: { scanId: number }) {
               <Button variant="danger" loading={busy === "cancel"} onClick={onCancel}>Остановить</Button>
             )}
             {canSeeAgents && finished && scan.run_name && (
-              <Button onClick={() => setAnalyzeOpen(true)} title="Создать сессию агента: находки и отчёт этого скана будут в её папке, агент поможет их проверить и исправить">
-                Разобрать в агенте
+              <Button onClick={() => setAnalyzeOpen(true)} title="Создать сессию в «Коде»: находки и отчёт этого скана будут в её папке, агент поможет их проверить и исправить">
+                Разобрать в «Коде»
               </Button>
             )}
             {canModify && contKind && (

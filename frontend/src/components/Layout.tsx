@@ -20,11 +20,11 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "manage", label: "Управление" },
 ];
 const GROUP_OF: Record<string, Group> = {
-  "/": "work", "/scans": "work", "/schedules": "work", "/agent": "work", "/ops": "work",
+  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/ops": "work",
   "/runners": "resources", "/llm": "resources", "/costs": "resources",
   "/settings": "manage", "/users": "manage", "/account": "manage",
 };
-const ORDER = ["/", "/scans", "/schedules", "/agent", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
+const ORDER = ["/", "/scans", "/schedules", "/code", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
 
 /** How many scans are in progress right now, for the label on «Сканы». Quietly absent when it cannot be asked. */
 function useRunningScans(enabled: boolean): number {
@@ -130,8 +130,8 @@ const NAV: NavItem[] = [
     ),
   },
   {
-    to: "/agent",
-    label: "Агент",
+    to: "/code",
+    label: "Код",
     roles: ["admin", "operator"],
     icon: icon(
       <>
