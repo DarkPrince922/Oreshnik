@@ -106,6 +106,16 @@ export default function Users() {
                   </select>
 
                   <div className="flex gap-2">
+                    {u.role !== "viewer" && (
+                      <Button
+                        className={u.role === "admin" || u.agent_access ? "!border-accent/40 !bg-accent/15 !px-3 !py-1.5 text-xs !text-white" : "!px-3 !py-1.5 text-xs"}
+                        disabled={u.role === "admin" || pending === u.id}
+                        title={u.role === "admin" ? "Администраторам «Агент» доступен всегда" : u.agent_access ? "Отключить доступ к «Агенту» (свой сервер с OpenHands, root на нём)" : "Дать доступ к «Агенту» (свой сервер с OpenHands, root на нём)"}
+                        onClick={() => mutate(u.id, () => updateUser(u.id, { agent_access: !u.agent_access }))}
+                      >
+                        Агент: {u.role === "admin" || u.agent_access ? "да" : "нет"}
+                      </Button>
+                    )}
                     <Button className="!px-3 !py-1.5 text-xs" disabled={pending === u.id} onClick={() => resetPassword(u)}>Пароль</Button>
                     <Button className="!px-3 !py-1.5 text-xs" disabled={self || pending === u.id} onClick={() => mutate(u.id, () => updateUser(u.id, { is_active: !u.is_active }))}>
                       {u.is_active ? "Отключить" : "Включить"}

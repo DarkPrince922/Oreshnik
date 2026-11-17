@@ -20,11 +20,11 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "manage", label: "Управление" },
 ];
 const GROUP_OF: Record<string, Group> = {
-  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/personas": "work", "/ops": "work",
+  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/agent": "work", "/personas": "work", "/ops": "work",
   "/runners": "resources", "/llm": "resources", "/costs": "resources",
   "/settings": "manage", "/users": "manage", "/account": "manage",
 };
-const ORDER = ["/", "/scans", "/schedules", "/code", "/personas", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
+const ORDER = ["/", "/scans", "/schedules", "/code", "/agent", "/personas", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
 
 /** How many scans are in progress right now, for the label on «Сканы». Quietly absent when it cannot be asked. */
 function useRunningScans(enabled: boolean): number {
@@ -58,6 +58,8 @@ interface NavItem {
   label: string;
   icon: ReactNode;
   roles?: Role[];
+  /** Shown to administrators and to users an administrator gave «Агент». */
+  agentAccess?: boolean;
   end?: boolean;
 }
 
@@ -141,6 +143,18 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    agentAccess: true,
+    to: "/agent",
+    label: "Агент",
+    roles: ["admin", "operator"],
+    icon: icon(
+      <>
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <path d="M7 20h10M12 16v4M7 8l3 2-3 2M12 12h4" />
+      </>
+    ),
+  },
+  {
     to: "/personas",
     label: "Личности",
     roles: ["admin", "operator"],
@@ -204,7 +218,7 @@ const SECTION_BY_PATH = Object.fromEntries(Object.entries(SECTION_PATH).map(([se
 export default function Layout() {
   const { user, logout, hasRole } = useAuth();
   const location = useLocation();
-  const items = NAV.filter((n) => !n.roles || hasRole(...n.roles)).sort((a, b) => ORDER.indexOf(a.to) - ORDER.indexOf(b.to));
+  const items = NAV.filter((n) => (!n.roles || hasRole(...n.roles)) && (!n.agentAccess || hasRole("admin") || user?.agent_access === true)).sort((a, b) => ORDER.indexOf(a.to) - ORDER.indexOf(b.to));
   const running = useRunningScans(user !== null);
   const canCreate = hasRole("admin", "operator");
   const lit = useAttention(user?.id ?? null, location.pathname);

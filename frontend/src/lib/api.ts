@@ -80,6 +80,8 @@ export interface User {
   email: string;
   role: Role;
   is_active: boolean;
+  /** May use «Агент» (their own OpenHands server). Administrators always may. */
+  agent_access: boolean;
   created_at: string;
 }
 
@@ -228,7 +230,7 @@ export const changePassword = (current_password: string, new_password: string) =
 export const listUsers = async () => (await api.get<User[]>("/api/users")).data;
 export const createUser = async (body: { email: string; password: string; role: Role }) =>
   (await api.post<User>("/api/users", body)).data;
-export const updateUser = async (id: number, body: Partial<{ role: Role; is_active: boolean; password: string }>) =>
+export const updateUser = async (id: number, body: Partial<{ role: Role; is_active: boolean; agent_access: boolean; password: string }>) =>
   (await api.patch<User>(`/api/users/${id}`, body)).data;
 export const deleteUser = (id: number) => api.delete(`/api/users/${id}`);
 
@@ -748,3 +750,41 @@ export const listPersonas = async () => (await api.get<Persona[]>("/api/personas
 export const createPersona = async (body: PersonaInput) => (await api.post<Persona>("/api/personas", body)).data;
 export const updatePersona = async (id: number, body: Partial<PersonaInput>) => (await api.patch<Persona>(`/api/personas/${id}`, body)).data;
 export const deletePersona = (id: number) => api.delete(`/api/personas/${id}`);
+
+// ── Агент (OpenHands на своём сервере) ───────────────────────────────────
+
+export type AgentServerStatus = "new" | "offline" | "installing" | "online" | "error";
+export interface AgentServer {
+  ssh_host: string;
+  ssh_port: number;
+  ssh_user: string;
+  has_key: boolean;
+  has_password: boolean;
+  /** The confirmed host key; null until the user compared and confirmed it. */
+  host_key_fingerprint: string | null;
+  /** A key the server showed that waits for confirmation. */
+  pending_fingerprint: string | null;
+  status: AgentServerStatus;
+  status_detail: string | null;
+  openhands_version: string | null;
+  installing: boolean;
+  checked_at: string | null;
+}
+export interface AgentServerInput {
+  ssh_host: string;
+  ssh_port: number;
+  ssh_user: string;
+  ssh_private_key?: string | null;
+  ssh_password?: string | null;
+  clear_key?: boolean;
+  clear_password?: boolean;
+}
+const AS = "/api/agent-server";
+export const getAgentServer = async () => (await api.get<AgentServer | null>(AS)).data;
+export const saveAgentServer = async (body: AgentServerInput) => (await api.put<AgentServer>(AS, body)).data;
+export const deleteAgentServer = () => api.delete(AS);
+export const checkAgentServer = async () => (await api.post<AgentServer>(`${AS}/check`, undefined, { timeout: 120_000 })).data;
+export const trustAgentServerKey = async (fingerprint: string) => (await api.post<AgentServer>(`${AS}/trust-host-key`, { fingerprint }, { timeout: 120_000 })).data;
+export const forgetAgentServerKey = async () => (await api.post<AgentServer>(`${AS}/forget-host-key`)).data;
+export const installAgentServer = async () => (await api.post<AgentServer>(`${AS}/install`)).data;
+export const getAgentServerLog = async () => (await api.get<{ running: boolean; log: string }>(`${AS}/install-log`)).data;

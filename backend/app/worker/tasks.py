@@ -644,3 +644,41 @@ def reap_stale_agent_turns() -> int:
     for key in reaped:
         agent_service.stop_turn(key)
     return len(reaped)
+
+
+@celery.task(name="oreshnik.agent_server_install")
+def agent_server_install(server_id: int) -> dict:
+    """Install OpenHands on a user's own «Агент» server, logging every step into the server's `install_log`."""
+    from app.models.agent_server import AgentServer
+    from app.services import openhands
+
+    def save(text: str) -> None:
+        with SessionLocal() as db:
+            db.execute(update(AgentServer).where(AgentServer.id == server_id).values(install_log=text))
+            db.commit()
+
+    buffer = openhands.LogBuffer(save)
+    with SessionLocal() as db:
+        server = db.get(AgentServer, server_id)
+        if server is None:
+            return {"status": "error", "detail": "server not found"}
+        db.expunge(server)  # do not hold a transaction open for the minutes the installation takes
+    try:
+        outcome = openhands.install(server, buffer)
+    except Exception:
+        log.exception("installation on agent server %s crashed", server_id)
+        buffer("✗ Внутренняя ошибка установки")
+        outcome = openhands.InstallOutcome("error", "Установка прервана: внутренняя ошибка")
+    buffer.flush()
+    with SessionLocal() as db:
+        row = db.get(AgentServer, server_id)
+        if row is not None:
+            row.status, row.status_detail = outcome.status, outcome.detail
+            row.install_started_at = None
+            row.checked_at = _utcnow()
+            if outcome.api_key_enc:
+                row.api_key_enc = outcome.api_key_enc
+            if outcome.version:
+                row.openhands_version = outcome.version
+            db.commit()
+    return {"status": outcome.status, "detail": outcome.detail}

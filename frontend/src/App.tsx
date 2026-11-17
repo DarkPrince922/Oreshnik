@@ -11,6 +11,7 @@ import LLMProfiles from "./pages/LLMProfiles";
 import Login from "./pages/Login";
 import NewScan from "./pages/NewScan";
 import Agent from "./pages/Agent";
+import AgentServerPage from "./pages/AgentServer";
 import Settings from "./pages/Settings";
 import Ops from "./pages/Ops";
 import Personas from "./pages/Personas";
@@ -86,8 +87,14 @@ export default function App() {
                 </ProtectedRoute>
               }
             />
-            {/* «Агент» was renamed «Код»; the old address leads there until the new «Агент» (OpenHands) takes it. */}
-            <Route path="agent" element={<Navigate to="/code" replace />} />
+            <Route
+              path="agent"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <AgentServerPage />
+                </ProtectedRoute>
+              }
+            />
             <Route
               path="ops"
               element={

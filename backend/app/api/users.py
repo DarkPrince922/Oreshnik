@@ -59,6 +59,8 @@ def update_user(
         user.role = body.role
     if body.is_active is not None:
         user.is_active = body.is_active
+    if body.agent_access is not None:
+        user.agent_access = body.agent_access
     if body.password is not None:
         user.password_hash = hash_password(body.password)
     db.commit()

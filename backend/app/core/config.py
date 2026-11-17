@@ -216,6 +216,8 @@ class Settings(BaseSettings):
     # an isolated network — see docs/ARCHITECTURE.md §27). Empty = feature off. Fixed at deploy time: docker-compose must
     # publish the same range, so changing it needs a restart, unlike the rest of «Настройки».
     agent_listener_ports: str = ""
+    # «Агент»: the OpenHands (Agent Canvas) release the panel installs on users' servers. Verified against 1.41.0.
+    openhands_version: str = Field(default="1.41.0", pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
     # A listener nobody has sent a byte through for this long is closed on its own.
     agent_listener_idle_seconds: int = Field(default=1800, ge=30)
 
