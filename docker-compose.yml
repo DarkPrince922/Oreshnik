@@ -17,6 +17,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    # The queue of scans waiting to start lives here: kept on disk (append-only file), it survives a restart of the server.
+    # (A scan whose task is lost anyway is sent again by the panel after a few minutes.)
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
     ports:
       - "127.0.0.1:6379:6379"  # this machine only: Redis has no password
     healthcheck:
@@ -151,6 +156,7 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   strix_runs:
   agent_data:
 

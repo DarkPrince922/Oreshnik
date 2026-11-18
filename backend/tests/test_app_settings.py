@@ -246,5 +246,8 @@ def test_a_waiting_scan_is_scheduled_again_in_a_real_worker(monkeypatch):
     monkeypatch.setattr(celery.conf, "task_always_eager", False)
     calls = []
     monkeypatch.setattr(tasks.scan_run, "apply_async", lambda args, countdown: calls.append((args, countdown)))
+    monkeypatch.setattr(tasks, "_own_wait_loop", lambda scan_id, token: True)
     assert tasks.scan_run(scan.id) == "waiting"
-    assert calls == [((scan.id,), tasks._WAIT_SECONDS)]
+    assert len(calls) == 1 and calls[0][0][0] == scan.id and calls[0][1] == tasks._WAIT_SECONDS
+    token = calls[0][0][1]                                  # the chain carries its token, so the next try is known as the same chain
+    assert tasks.scan_run(scan.id, token) == "waiting" and calls[1][0] == (scan.id, token)

@@ -13,11 +13,13 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 
 from app.core.config import settings
+from app.engine.clones import RESTORE_CLONES_PY
 from app.engine.base import RunResult, ScanSpec, strix_llm_timeout_env, strix_privacy_env, strix_reasoning_env, strix_sandbox_env, strix_tuning_env
 from app.engine.docker_cleanup import cleanup_containers, ensure_network
 from app.services.scan_files import INSTRUCTION_NAME
@@ -62,6 +64,22 @@ def strix_argv(spec: ScanSpec, strix_bin: str) -> list[str]:
     return argv
 
 
+def restore_clones(spec: ScanSpec, on_line: Callable[[str], None]) -> None:
+    """Clone again the repository targets of the run being continued whose copy is gone (see app/engine/clones.py)."""
+    run_dir = spec.work_dir / "strix_runs" / (spec.resume_run or "")
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", RESTORE_CLONES_PY, str(run_dir), str(spec.work_dir / "tmp")],
+            capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL,
+            env={k: os.environ[k] for k in _PASSTHROUGH if k in os.environ},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        on_line(f"[oreshnik] Не удалось проверить копии репозиториев: {exc.__class__.__name__}")
+        return
+    for line in (done.stdout or "").splitlines():
+        on_line(line)
+
+
 class LocalRunner:
     def __init__(self, strix_bin: str | None = None):
         self.strix_bin = strix_bin or settings.strix_bin
@@ -76,6 +94,9 @@ class LocalRunner:
         env.update(
             {
                 "HOME": str(spec.work_dir / "home"),
+                # Strix clones repository targets into $TMPDIR: inside the scan's directory (a volume) the clone outlives a
+                # restart of the server or a rebuild of this container, so the scan can still be continued
+                "TMPDIR": str(spec.work_dir / "tmp"),
                 "TERM": "dumb",
                 "NO_COLOR": "1",
                 "PYTHONUNBUFFERED": "1",
@@ -102,6 +123,9 @@ class LocalRunner:
     ) -> RunResult:
         spec.work_dir.mkdir(parents=True, exist_ok=True)
         (spec.work_dir / "home").mkdir(exist_ok=True)
+        (spec.work_dir / "tmp").mkdir(exist_ok=True)
+        if spec.resume_run:
+            restore_clones(spec, on_line)
         if spec.instruction:
             (spec.work_dir / INSTRUCTION_NAME).write_text(spec.instruction, encoding="utf-8")
 

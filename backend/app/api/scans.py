@@ -349,7 +349,7 @@ def continue_scan(
                 exit_code=None,
                 started_at=None,
                 finished_at=None,
-                heartbeat_at=None,
+                heartbeat_at=now,  # "a task holds it": the reaper does not send a second one
                 elapsed_base=scan.elapsed_base + max(ran, 0.0),
                 instruction=body.instruction or scan.instruction,
                 max_budget=body.max_budget,
@@ -382,7 +382,7 @@ def continue_scan(
             exit_code=None,
             started_at=None,
             finished_at=None,
-            heartbeat_at=None,
+            heartbeat_at=now,  # "a task holds it": the reaper does not send a second one
             resume_run_name=scan.run_name,
             resume_count=Scan.resume_count + 1,
             elapsed_base=scan.elapsed_base + max(ran, 0.0),
