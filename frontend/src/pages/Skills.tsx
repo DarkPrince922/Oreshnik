@@ -294,8 +294,8 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
                       </>
                     ) : (
                       <>
-                        <Field label="SKILL.md" hint={`Целиком, как в других инструментах: шапка между --- (name, description) и инструкции. ${draft.md.length}/100000`}>
-                          <textarea className="field min-h-[26rem] font-mono text-xs leading-relaxed" value={draft.md} maxLength={100000} required disabled={readOnly} spellCheck={false} onChange={(e) => setMd(e.target.value)} />
+                        <Field label="SKILL.md" hint={`Целиком, как в других инструментах: шапка между --- (name, description) и инструкции. ${draft.md.length}/400000`}>
+                          <textarea className="field min-h-[26rem] font-mono text-xs leading-relaxed" value={draft.md} maxLength={400000} required disabled={readOnly} spellCheck={false} onChange={(e) => setMd(e.target.value)} />
                         </Field>
                         <Field label="Каким агентам">
                           <select className="field max-w-xs" value={draft.scope} disabled={readOnly} onChange={(e) => setDraft({ ...draft, scope: e.target.value as SkillScope })}>

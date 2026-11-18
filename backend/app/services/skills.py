@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_NAME = 64
 MAX_DESCRIPTION = 1024
-MAX_SKILL_MD = 100_000              # characters
+MAX_SKILL_MD = 400_000              # characters (a big reference-style SKILL.md is injected to the model only when the skill is used)
 MAX_FILE = 1_000_000                # bytes, one file
 MAX_SKILL_BYTES = 2_000_000         # bytes, all files of a skill together (SKILL.md included)
 MAX_FILES = 200
