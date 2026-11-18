@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { McpServer, Skill } from "./api";
-import { composeSkillMd, effectiveMcp, effectiveSkills, insertSkill, matchSkills, skillMention, splitSkillMd } from "./workshop";
+import { composeSkillMd, effectiveMcp, skillsForPersona, effectiveSkills, insertSkill, matchSkills, skillMention, splitSkillMd } from "./workshop";
 
 const skill = (name: string, over: Partial<Skill> = {}): Skill => ({
   id: 1, name, description: `про ${name}`, skill_md: "", files: [], scope: "both", shared: false, enabled: true, mine: true, editable: true,
@@ -14,6 +14,15 @@ describe("what an agent gets", () => {
     expect(effectiveSkills(list, "code").map((s) => s.name)).toEqual(["a", "b"]);
     expect(effectiveSkills(list, "agent").map((s) => s.name)).toEqual(["a", "agent", "b"]);
     expect(effectiveMcp([{ ...skill("x"), last_check: null } as unknown as McpServer], "code")).toHaveLength(1);
+  });
+});
+
+describe("a persona's own skills", () => {
+  it("gives exactly the chosen ones, disabled too, and the own one over a shared one", () => {
+    const list = [skill("a"), skill("off", { enabled: false }), skill("x", { shared: true, id: 9 }), skill("x", { id: 10 }), skill("agent", { scope: "agent" })];
+    expect(skillsForPersona(list, { skills: ["off", "x", "agent"] }, "code").map((s) => [s.name, s.id])).toEqual([["off", 1], ["x", 10]]);
+    expect(skillsForPersona(list, { skills: null }, "code").map((s) => s.name)).toEqual(["a", "x", "x"]);
+    expect(skillsForPersona(list, { skills: [] }, "code")).toEqual([]);
   });
 });
 

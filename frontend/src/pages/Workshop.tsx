@@ -5,7 +5,7 @@ import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "../components/ui";
 import { listMcp, listPersonas, listSkills, type McpServer, type Persona, type Skill } from "../lib/api";
 import { defaultPersona } from "../lib/personas";
-import { effectiveMcp, effectiveSkills, mcpHealth } from "../lib/workshop";
+import { effectiveMcp, mcpHealth, skillsForPersona } from "../lib/workshop";
 import Mcp from "./Mcp";
 import Personas from "./Personas";
 import Skills from "./Skills";
@@ -54,7 +54,7 @@ export default function Workshop() {
 
   const go = (t: WorkshopTab) => setParams({ tab: t }, { replace: true });
   const persona = defaultPersona(personas, "code");
-  const gets = effectiveSkills(skills, "code");
+  const gets = skillsForPersona(skills, persona, "code");
   const mcp = effectiveMcp(servers, "code");
   const broken = mcp.filter((s) => mcpHealth(s) === "bad");
   const counts: Record<WorkshopTab, number> = { personas: personas.length, skills: skills.filter((s) => s.enabled).length, mcp: servers.filter((s) => s.enabled).length };

@@ -109,3 +109,23 @@ def test_a_session_of_kod_gets_the_enabled_skills_and_the_users_own_wins_over_a_
     skills = sent[-1]["skills"]
     assert [s["name"] for s in skills] == ["recon"] and sent[-1]["skills_digest"]
     assert "СВОЙ" in base64.b64decode(skills[0]["files"]["SKILL.md"]).decode()
+
+
+def test_a_persona_can_name_its_own_skills_disabled_ones_too(client, wired, monkeypatch):
+    sent: list[dict] = []
+    real = agent_service.stream_turn
+    monkeypatch.setattr(agent_service, "stream_turn", lambda **kw: sent.append(kw) or real(**kw))
+    user, h = op_user(client)
+    make(client, h)                                                        # recon: enabled
+    off = make(client, h, MD.replace("recon", "jwt"))
+    client.patch(f"/api/skills/{off['id']}", json={"enabled": False}, headers=h)   # jwt: kept for one role only
+    r = client.post("/api/personas", json={"name": "JWT-охотник", "instructions": "x", "skills": ["jwt"]}, headers=h)
+    assert r.status_code == 201 and r.json()["skills"] == ["jwt"]
+    persona = r.json()
+    report(client, h, new_session(client, h, openai_profile(user.id), persona_id=persona["id"])["id"])
+    assert [s["name"] for s in sent[-1]["skills"]] == ["jwt"]
+    # back to every enabled skill
+    assert client.patch(f"/api/personas/{persona['id']}", json={"skills": None}, headers=h).json()["skills"] is None
+    report(client, h, new_session(client, h, openai_profile(user.id, "b"), persona_id=persona["id"])["id"])
+    assert [s["name"] for s in sent[-1]["skills"]] == ["recon"]
+    assert client.post("/api/personas", json={"name": "x", "instructions": "x", "skills": ["Bad Name"]}, headers=h).status_code == 422

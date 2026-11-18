@@ -27,7 +27,7 @@ function size(n: number): string {
   return n < 1024 ? `${n} Б` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} КБ` : `${(n / 1024 / 1024).toFixed(1)} МБ`;
 }
 
-function Item({ skill, active, onPick, onToggle }: { skill: Skill; active: boolean; onPick: () => void; onToggle: (v: boolean) => void }) {
+function Item({ skill, active, onPick, onToggle, onDelete }: { skill: Skill; active: boolean; onPick: () => void; onToggle: (v: boolean) => void; onDelete: () => void }) {
   return (
     <div
       role="button"
@@ -43,7 +43,25 @@ function Item({ skill, active, onPick, onToggle }: { skill: Skill; active: boole
       <span className="flex items-center gap-2">
         <span className={clsx("min-w-0 truncate font-mono text-[14px] font-semibold", skill.enabled && !skill.overridden ? "text-white" : "text-slate-500")}>{skill.name}</span>
         {skill.overridden && <span className="shrink-0 text-[10px] uppercase tracking-wider text-signal-warn">заменён вашим</span>}
-        <span className="ml-auto">{skill.editable && <Switch checked={skill.enabled} onChange={onToggle} label={skill.enabled ? "Выключить" : "Включить"} />}</span>
+        {skill.editable && (
+          <span className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              title="Удалить навык"
+              aria-label={`Удалить навык ${skill.name}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 transition hover:bg-signal-bad/15 hover:text-signal-bad"
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+              </svg>
+            </button>
+            <Switch checked={skill.enabled} onChange={onToggle} label={skill.enabled ? "Выключить" : "Включить"} />
+          </span>
+        )}
       </span>
       <span className={clsx("mt-0.5 line-clamp-2 block text-[12.5px] leading-snug", skill.enabled ? "text-slate-300" : "text-slate-500")}>{skill.description}</span>
       <span className="mt-1 block text-[11px] text-slate-500">
@@ -152,13 +170,15 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
     onChanged?.();
   });
 
-  const remove = () => {
-    if (!current || !window.confirm(`Удалить навык ${current.name}? Агенты перестанут его видеть со следующего сообщения.`)) return;
+  const remove = (target: Skill | null = current) => {
+    if (!target || !window.confirm(`Удалить навык ${target.name}? Агенты перестанут его видеть со следующего сообщения.`)) return;
     void run("delete", async () => {
-      await deleteSkill(current.id);
+      await deleteSkill(target.id);
       const rows = await load();
-      if (rows && rows.length > 0) pick(rows[0]);
-      else setSelected(null);
+      if (target.id === selected) {
+        if (rows && rows.length > 0) pick(rows[0]);
+        else setSelected(null);
+      }
       onChanged?.();
     });
   };
@@ -225,9 +245,9 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
         <div className="grid items-start gap-5 lg:grid-cols-[22rem_minmax(0,1fr)]">
           <div className="min-w-0 space-y-2.5">
             {own.length > 0 && <p className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Мои</p>}
-            {own.map((s) => <Item key={s.id} skill={s} active={s.id === selected} onPick={() => pick(s)} onToggle={(v) => toggle(s, v)} />)}
+            {own.map((s) => <Item key={s.id} skill={s} active={s.id === selected} onPick={() => pick(s)} onToggle={(v) => toggle(s, v)} onDelete={() => remove(s)} />)}
             {shared.length > 0 && <p className="px-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Общие — от администратора</p>}
-            {shared.map((s) => <Item key={s.id} skill={s} active={s.id === selected} onPick={() => pick(s)} onToggle={(v) => toggle(s, v)} />)}
+            {shared.map((s) => <Item key={s.id} skill={s} active={s.id === selected} onPick={() => pick(s)} onToggle={(v) => toggle(s, v)} onDelete={() => remove(s)} />)}
             <p className="px-1 pt-2 text-[11px] leading-relaxed text-slate-500">Свой навык с тем же именем, что у общего, заменяет общий. Изменения доходят до агента с вашим следующим сообщением.</p>
           </div>
 
@@ -301,7 +321,7 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
                     <ErrorNote message={error} />
                     {!readOnly && (
                       <div className="flex flex-wrap justify-end gap-2 pt-1">
-                        {current && <Button type="button" variant="danger" onClick={remove} disabled={busy !== null}>Удалить</Button>}
+                        {current && <Button type="button" variant="danger" onClick={() => remove()} disabled={busy !== null}>Удалить</Button>}
                         <Button type="submit" variant="primary" loading={busy === "save"}>{selected === "new" ? "Создать" : "Сохранить"}</Button>
                       </div>
                     )}

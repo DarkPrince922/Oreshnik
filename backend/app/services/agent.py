@@ -335,7 +335,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
 
         skills_error: AgentError | None = None
         try:
-            skills, skills_digest = skills_payload(for_agent(db, session.user_id, "code"))
+            skills, skills_digest = skills_payload(for_agent(db, session.user_id, "code", persona.skills if persona else None))
             mcp_servers = mcp_api.for_agent(db, session.user_id, "code")
         except AgentError as exc:
             skills, skills_digest, mcp_servers, skills_error = [], "", [], exc

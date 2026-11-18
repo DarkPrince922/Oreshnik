@@ -39,7 +39,7 @@ import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
 import PersonaField from "../components/agent/PersonaField";
 import { defaultPersona } from "../lib/personas";
-import { effectiveMcp, effectiveSkills, insertSkill, matchSkills, mcpHealth, skillMention } from "../lib/workshop";
+import { effectiveMcp, insertSkill, matchSkills, mcpHealth, skillMention, skillsForPersona } from "../lib/workshop";
 
 const chip = "rounded-md border border-white/10 px-2 py-0.5 text-slate-400";
 const WEB_SEARCH: Record<string, string> = { auto: "авто", on: "включён", off: "выключен" };
@@ -103,9 +103,12 @@ function Chat({
   const [pickIndex, setPickIndex] = useState(0);
   const [mentionClosed, setMentionClosed] = useState(false);
   useEffect(() => {
-    listSkills().then((rows) => setSkills(effectiveSkills(rows, "code"))).catch(() => undefined);
+    // the session's persona may name its own skills (see app/api/skills.py `for_agent`)
+    Promise.all([listSkills(), current.persona_id ? listPersonas() : Promise.resolve([] as Persona[])])
+      .then(([rows, personas]) => setSkills(skillsForPersona(rows, personas.find((p) => p.id === current.persona_id), "code")))
+      .catch(() => undefined);
     listMcp().then((rows) => setServers(effectiveMcp(rows, "code"))).catch(() => undefined);
-  }, [session.id]);
+  }, [session.id, current.persona_id]);
   const mention = mentionClosed ? null : skillMention(text, caret);
   const offered = mention ? matchSkills(skills, mention.query) : [];
   const brokenMcp = servers.filter((m) => mcpHealth(m) === "bad");

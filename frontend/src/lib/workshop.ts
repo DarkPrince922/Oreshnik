@@ -7,6 +7,18 @@ export function effectiveSkills(skills: Skill[], where: Where): Skill[] {
   return skills.filter((s) => s.enabled && !s.overridden && (s.scope === "both" || s.scope === where)).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** The skills an agent with `persona` gets: the persona's own choice (enabled or not, the user's own skill winning over a shared one
+ * of the same name), or every enabled skill when the persona chose none. Mirrors app/api/skills.py `for_agent`. */
+export function skillsForPersona(skills: Skill[], persona: { skills: string[] | null } | null | undefined, where: Where): Skill[] {
+  if (!persona || persona.skills === null || persona.skills === undefined) return effectiveSkills(skills, where);
+  const wanted = new Set(persona.skills);
+  const chosen = new Map<string, Skill>();
+  for (const s of [...skills].sort((a, b) => Number(!a.shared) - Number(!b.shared))) {
+    if (wanted.has(s.name) && (s.scope === "both" || s.scope === where)) chosen.set(s.name, s);
+  }
+  return [...chosen.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** The same for MCP servers. */
 export function effectiveMcp(servers: McpServer[], where: Where): McpServer[] {
   return servers.filter((s) => s.enabled && !s.overridden && (s.scope === "both" || s.scope === where)).sort((a, b) => a.name.localeCompare(b.name));

@@ -2,11 +2,11 @@ import clsx from "clsx";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { Button, Card, EmptyState, ErrorNote, Field, PageHeader, Spinner } from "../components/ui";
-import { createPersona, deletePersona, errorMessage, listPersonas, updatePersona, type Persona, type PersonaInput, type PersonaScope } from "../lib/api";
+import { createPersona, deletePersona, errorMessage, listPersonas, listSkills, updatePersona, type Persona, type PersonaInput, type PersonaScope, type Skill } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { SCOPE_LABEL, personaInitial } from "../lib/personas";
 
-const EMPTY: PersonaInput = { name: "", description: "", instructions: "", scope: "both", shared: false, is_default: false };
+const EMPTY: PersonaInput = { name: "", description: "", instructions: "", scope: "both", shared: false, is_default: false, skills: null };
 
 const EXAMPLE = `Ты — опытный специалист по тестированию на проникновение.
 Отвечай по-русски, коротко и по делу.
@@ -45,10 +45,72 @@ function Card_({ persona, active, onPick }: { persona: Persona; active: boolean;
         <span className="block truncate text-[15px] font-semibold text-white">{persona.name}</span>
         {persona.description && <span className="block truncate text-[13px] text-slate-300">{persona.description}</span>}
         <span className="mt-1 block text-[11px] text-slate-400">
-          {[persona.is_default ? "по умолчанию" : "", SCOPE_LABEL[persona.scope], persona.sessions ? `сессий: ${persona.sessions}` : ""].filter(Boolean).join(" · ")}
+          {[persona.is_default ? "по умолчанию" : "", SCOPE_LABEL[persona.scope], persona.skills ? `навыков: ${persona.skills.length}` : "", persona.sessions ? `сессий: ${persona.sessions}` : ""].filter(Boolean).join(" · ")}
         </span>
       </span>
     </button>
+  );
+}
+
+/** Which skills an agent with the persona gets: every enabled one (null), or exactly the ones ticked — disabled ones too, so a skill
+ * can be kept for one role only. */
+function SkillPicker({ skills, value, disabled, onChange }: { skills: Skill[]; value: string[] | null; disabled: boolean; onChange: (v: string[] | null) => void }) {
+  const names = [...new Set(skills.map((s) => s.name))].sort((a, b) => a.localeCompare(b));
+  const byName = new Map(skills.map((s) => [s.name, s]));
+  const chosen = new Set(value ?? []);
+  const missing = (value ?? []).filter((n) => !byName.has(n)); // removed since: shown so they can be unticked
+  return (
+    <fieldset className="space-y-2.5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4" disabled={disabled}>
+      <legend className="px-1 text-sm text-slate-300">Навыки этой личности</legend>
+      <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Какие навыки получает агент">
+        {([[null, "Все включённые"], [[], "Только выбранные"]] as const).map(([v, t]) => {
+          const on = v === null ? value === null : value !== null;
+          return (
+            <button
+              key={t}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => onChange(v === null ? null : value ?? [])}
+              className={clsx("rounded-lg border px-3 py-1.5 text-xs transition-colors", on ? "border-accent/50 bg-accent/15 text-white" : "border-white/10 text-slate-400 hover:text-white")}
+            >
+              {t}
+            </button>
+          );
+        })}
+      </div>
+      {value === null ? (
+        <p className="text-[11.5px] leading-relaxed text-slate-500">Агент с этой личностью получает все навыки, включённые в «Мастерской».</p>
+      ) : names.length === 0 && missing.length === 0 ? (
+        <p className="text-[11.5px] text-slate-500">Навыков пока нет — добавьте их во вкладке «Навыки».</p>
+      ) : (
+        <>
+          <p className="text-[11.5px] leading-relaxed text-slate-500">Агент получит ровно отмеченные — даже выключенные в общем списке. Так навык можно держать только для одной роли.</p>
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            {[...names, ...missing].map((n) => {
+              const s = byName.get(n);
+              return (
+                <label key={n} className="flex min-w-0 items-start gap-2.5 rounded-lg px-2 py-1.5 text-sm hover:bg-white/[0.03]">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+                    checked={chosen.has(n)}
+                    onChange={(e) => onChange(e.target.checked ? [...(value ?? []), n] : (value ?? []).filter((x) => x !== n))}
+                  />
+                  <span className="min-w-0">
+                    <span className={clsx("block truncate font-mono text-[12.5px]", s ? "text-white" : "text-signal-warn")}>
+                      {n}
+                      {s && !s.enabled ? <span className="ml-1.5 font-sans text-[10.5px] text-slate-500">выкл.</span> : null}
+                    </span>
+                    <span className="block truncate text-[11px] text-slate-500">{s ? s.description : "навык удалён"}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </fieldset>
   );
 }
 
@@ -61,6 +123,10 @@ export default function Personas({ embedded = false, onChanged }: { embedded?: b
   const [form, setForm] = useState<PersonaInput>(EMPTY);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  useEffect(() => {
+    listSkills().then(setSkills).catch(() => setSkills([]));
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -83,7 +149,7 @@ export default function Personas({ embedded = false, onChanged }: { embedded?: b
 
   function pick(p: Persona) {
     setSelected(p.id);
-    setForm({ name: p.name, description: p.description, instructions: p.instructions, scope: p.scope, shared: p.shared, is_default: p.is_default });
+    setForm({ name: p.name, description: p.description, instructions: p.instructions, scope: p.scope, shared: p.shared, is_default: p.is_default, skills: p.skills });
     setError(null);
   }
   const startNew = () => {
@@ -100,7 +166,7 @@ export default function Personas({ embedded = false, onChanged }: { embedded?: b
       const saved =
         selected === "new"
           ? await createPersona(form)
-          : await updatePersona(selected as number, { name: form.name, description: form.description, instructions: form.instructions, scope: form.scope, is_default: form.is_default });
+          : await updatePersona(selected as number, { name: form.name, description: form.description, instructions: form.instructions, scope: form.scope, is_default: form.is_default, skills: form.skills });
       const rows = await load();
       const fresh = rows?.find((p) => p.id === saved.id);
       if (fresh) pick(fresh);
@@ -208,6 +274,8 @@ export default function Personas({ embedded = false, onChanged }: { embedded?: b
                     </label>
                   )}
                 </div>
+
+                <SkillPicker skills={skills} value={form.skills ?? null} disabled={readOnly} onChange={(v) => setForm({ ...form, skills: v })} />
 
                 {!form.shared && !readOnly && (
                   <label className="flex items-center gap-3 text-sm text-slate-300">

@@ -224,11 +224,13 @@ def read_file(skill_id: int, path: str = Query(...), user: User = Depends(requir
     return SkillFilePreview(path=path, size=len(raw), text=text[:200_000] if text is not None else None)
 
 
-def for_agent(db: Session, user_id: int, where: str) -> list[Skill]:
-    """The skills an agent of this user gets: the shared ones and the user's own, enabled and meant for `where` ("code"/"agent"). The
-    user's own skill replaces a shared one of the same name."""
-    rows = db.scalars(select(Skill).where(or_(Skill.user_id == user_id, Skill.shared.is_(True)), Skill.enabled.is_(True),
-                                          Skill.scope.in_(("both", where))))
+def for_agent(db: Session, user_id: int, where: str, names: list[str] | None = None) -> list[Skill]:
+    """The skills an agent of this user gets: the shared ones and the user's own, meant for `where` ("code"/"agent") — every enabled
+    one, or, when the session's persona names its skills (`names`), exactly those, enabled or not. The user's own skill replaces a
+    shared one of the same name."""
+    q = select(Skill).where(or_(Skill.user_id == user_id, Skill.shared.is_(True)), Skill.scope.in_(("both", where)))
+    q = q.where(Skill.enabled.is_(True)) if names is None else q.where(Skill.name.in_(names or [""]))
+    rows = db.scalars(q)
     chosen: dict[str, Skill] = {}
     for skill in sorted(rows, key=lambda s: (not s.shared, s.id)):   # shared first, so the user's own of the same name wins
         if skill.shared or skill.user_id == user_id:

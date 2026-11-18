@@ -6,7 +6,7 @@ administrator changes. A session of «Код» (and, later, of «Агент») n
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -29,5 +29,8 @@ class Persona(Base):
     instructions: Mapped[str] = mapped_column(Text)
     scope: Mapped[str] = mapped_column(String(8), default="both")
     is_default: Mapped[bool] = mapped_column(default=False)    # the owner's own default for new sessions (one per user)
+    # The skills an agent with this persona gets: exactly these names (disabled ones too: a skill kept for one role); None = every
+    # enabled skill (see app/api/skills.py `for_agent`).
+    skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

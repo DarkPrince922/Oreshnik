@@ -30,7 +30,7 @@ def _out(db: Session, user: User, persona: Persona) -> PersonaOut:
     return PersonaOut(
         id=persona.id, name=persona.name, description=persona.description, instructions=persona.instructions, scope=persona.scope,
         shared=persona.shared, is_default=persona.is_default and persona.user_id == user.id, mine=persona.user_id == user.id,
-        editable=_editable(user, persona), sessions=used or 0, created_at=persona.created_at, updated_at=persona.updated_at,
+        editable=_editable(user, persona), sessions=used or 0, skills=persona.skills, created_at=persona.created_at, updated_at=persona.updated_at,
     )
 
 
@@ -61,7 +61,7 @@ def create_persona(body: PersonaCreate, user: User = Depends(require_operator), 
         raise HTTPException(status.HTTP_409_CONFLICT, f"Не больше {MAX_PER_USER} личностей")
     persona = Persona(
         user_id=user.id, shared=body.shared, name=body.name, description=body.description.strip(), instructions=body.instructions,
-        scope=body.scope, is_default=body.is_default and not body.shared,
+        scope=body.scope, is_default=body.is_default and not body.shared, skills=body.skills,
     )
     db.add(persona)
     db.flush()
@@ -81,6 +81,8 @@ def update_persona(persona_id: int, body: PersonaUpdate, user: User = Depends(re
             setattr(persona, field, value)
     if body.description is not None:
         persona.description = body.description.strip()
+    if "skills" in body.model_fields_set:
+        persona.skills = body.skills
     if body.is_default is not None and not persona.shared:
         persona.is_default = body.is_default
         if body.is_default:

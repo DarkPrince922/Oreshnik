@@ -4,7 +4,7 @@ import type { Persona } from "./api";
 import { defaultPersona, personaInitial, personasFor } from "./personas";
 
 const p = (id: number, name: string, over: Partial<Persona> = {}): Persona => ({
-  id, name, description: "", instructions: "x", scope: "both", shared: false, is_default: false, mine: true, editable: true, sessions: 0,
+  id, name, description: "", instructions: "x", scope: "both", shared: false, is_default: false, mine: true, editable: true, sessions: 0, skills: null,
   created_at: "", updated_at: "", ...over,
 });
 

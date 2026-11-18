@@ -735,6 +735,8 @@ export interface Persona {
   editable: boolean;
   /** Sessions of the current user that run with it. */
   sessions: number;
+  /** The skills an agent with this persona gets: exactly these names; null = every enabled skill. */
+  skills: string[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -745,6 +747,7 @@ export interface PersonaInput {
   scope: PersonaScope;
   shared?: boolean;
   is_default: boolean;
+  skills?: string[] | null;
 }
 export const listPersonas = async () => (await api.get<Persona[]>("/api/personas")).data;
 export const createPersona = async (body: PersonaInput) => (await api.post<Persona>("/api/personas", body)).data;
