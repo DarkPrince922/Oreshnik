@@ -9,7 +9,7 @@ export default function PersonaField({ personas, value, onChange, current }: { p
   const options = personasFor(personas, "code");
   const missing = value !== null && !options.some((p) => p.id === value);
   return (
-    <Field label="Личность" hint="Кем быть агенту: её текст уходит ему первым, до инструкций сессии. Свои личности — в разделе «Личности».">
+    <Field label="Личность" hint="Кем быть агенту: её текст уходит ему первым, до инструкций сессии. Свои личности — в «Мастерской».">
       <select className="field" value={value ?? ""} onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
         <option value="">— без личности —</option>
         {missing && <option value={value ?? ""}>{current ?? "текущая"}</option>}
@@ -23,7 +23,7 @@ export default function PersonaField({ personas, value, onChange, current }: { p
       </select>
       {options.length === 0 && (
         <span className="mt-1.5 block text-[11px] text-slate-400">
-          Личностей пока нет — <Link to="/personas" className="text-accent-soft underline decoration-dotted">создать</Link>.
+          Личностей пока нет — <Link to="/workshop?tab=personas" className="text-accent-soft underline decoration-dotted">создать</Link>.
         </span>
       )}
     </Field>

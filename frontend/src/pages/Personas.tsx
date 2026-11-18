@@ -53,7 +53,7 @@ function Card_({ persona, active, onPick }: { persona: Persona; active: boolean;
 }
 
 /** «Личности»: who an AI agent is — role, tone, language, rules. Picked when a session of «Код» (later «Агент») is created. */
-export default function Personas() {
+export default function Personas({ embedded = false, onChanged }: { embedded?: boolean; onChanged?: () => void }) {
   const { hasRole } = useAuth();
   const isAdmin = hasRole("admin");
   const [list, setList] = useState<Persona[] | null>(null);
@@ -104,6 +104,7 @@ export default function Personas() {
       const rows = await load();
       const fresh = rows?.find((p) => p.id === saved.id);
       if (fresh) pick(fresh);
+      onChanged?.();
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -119,6 +120,7 @@ export default function Personas() {
       const rows = await load();
       if (rows && rows.length > 0) pick(rows[0]);
       else setSelected(null);
+      onChanged?.();
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -131,11 +133,18 @@ export default function Personas() {
 
   return (
     <>
-      <PageHeader
-        title="Личности"
-        subtitle="Кем быть агенту: роль, тон, язык ответов и правила. Выбирается при создании сессии в «Коде»; её текст уходит агенту первым."
-        action={<Button variant="primary" onClick={startNew}>+ Новая личность</Button>}
-      />
+      {embedded ? (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="max-w-3xl text-sm text-slate-400">Кем быть агенту: роль, тон, язык ответов и правила. Выбирается при создании сессии; её текст уходит агенту первым. Личность «по умолчанию» подставляется в новые сессии сама.</p>
+          <Button variant="primary" onClick={startNew}>+ Новая личность</Button>
+        </div>
+      ) : (
+        <PageHeader
+          title="Личности"
+          subtitle="Кем быть агенту: роль, тон, язык ответов и правила. Выбирается при создании сессии в «Коде»; её текст уходит агенту первым."
+          action={<Button variant="primary" onClick={startNew}>+ Новая личность</Button>}
+        />
+      )}
 
       {list === null && !error && <div className="flex justify-center py-20"><Spinner className="h-6 w-6" /></div>}
 

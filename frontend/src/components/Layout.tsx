@@ -4,10 +4,11 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { pluralRu } from "../lib/agentSessions";
-import { listScans, type Role } from "../lib/api";
+import { listMcp, listScans, type Role } from "../lib/api";
 import { SECTION_PATH, type Section, type Tone } from "../lib/attention";
 import { useAuth } from "../lib/auth";
 import { useAttention } from "../lib/useAttention";
+import { effectiveMcp, mcpHealth } from "../lib/workshop";
 import Logo from "./Logo";
 
 const ROLE_LABEL: Record<Role, string> = { admin: "администратор", operator: "оператор", viewer: "наблюдатель" };
@@ -20,11 +21,11 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "manage", label: "Управление" },
 ];
 const GROUP_OF: Record<string, Group> = {
-  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/agent": "work", "/personas": "work", "/skills": "work", "/mcp": "work", "/ops": "work",
+  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/agent": "work", "/workshop": "work", "/ops": "work",
   "/runners": "resources", "/llm": "resources", "/costs": "resources",
   "/settings": "manage", "/users": "manage", "/account": "manage",
 };
-const ORDER = ["/", "/scans", "/schedules", "/code", "/agent", "/personas", "/skills", "/mcp", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
+const ORDER = ["/", "/scans", "/schedules", "/code", "/agent", "/workshop", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
 
 /** How many scans are in progress right now, for the label on «Сканы». Quietly absent when it cannot be asked. */
 function useRunningScans(enabled: boolean): number {
@@ -155,36 +156,13 @@ const NAV: NavItem[] = [
     ),
   },
   {
-    to: "/personas",
-    label: "Личности",
+    to: "/workshop",
+    label: "Мастерская",
     roles: ["admin", "operator"],
     icon: icon(
       <>
-        <circle cx="12" cy="8" r="3.5" />
-        <path d="M5 20c.8-3.6 3.7-5.5 7-5.5s6.2 1.9 7 5.5" />
-        <path d="M17.5 4.5l1 1 2-2" />
-      </>
-    ),
-  },
-  {
-    to: "/skills",
-    label: "Навыки",
-    roles: ["admin", "operator"],
-    icon: icon(
-      <>
-        <path d="M5 4h9l5 5v11H5z" />
-        <path d="M14 4v5h5M8.5 13h7M8.5 16.5h4.5" />
-      </>
-    ),
-  },
-  {
-    to: "/mcp",
-    label: "MCP-серверы",
-    roles: ["admin", "operator"],
-    icon: icon(
-      <>
-        <path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0z" />
-        <path d="M12 16v5" />
+        <path d="M14 6l4 4-9 9H5v-4z" />
+        <path d="M12 8l4 4M16 4l4 4" />
       </>
     ),
   },
@@ -237,6 +215,23 @@ const NAV: NavItem[] = [
 const LIGHT_TONE: Record<Tone, string> = { ok: "bg-signal-ok", warn: "bg-signal-warn", bad: "bg-signal-bad", accent: "bg-accent-soft" };
 const SECTION_BY_PATH = Object.fromEntries(Object.entries(SECTION_PATH).map(([section, path]) => [path, section as Section]));
 
+/** Whether one of the user's enabled MCP servers failed its last check: the «Мастерская» item gets a red light. */
+function useMcpBroken(enabled: boolean, path: string): boolean {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    const check = () => listMcp().then((rows) => alive && setBroken(effectiveMcp(rows, "code").some((s) => mcpHealth(s) === "bad"))).catch(() => undefined);
+    void check();
+    const id = setInterval(check, 120_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [enabled, path]);
+  return broken;
+}
+
 export default function Layout() {
   const { user, logout, hasRole } = useAuth();
   const location = useLocation();
@@ -244,6 +239,7 @@ export default function Layout() {
   const running = useRunningScans(user !== null);
   const canCreate = hasRole("admin", "operator");
   const lit = useAttention(user?.id ?? null, location.pathname);
+  const mcpBroken = useMcpBroken(canCreate, location.pathname);
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
@@ -298,7 +294,7 @@ export default function Layout() {
                     </span>
                   )}
                   {(() => {
-                    const light = lit[SECTION_BY_PATH[item.to]];
+                    const light = item.to === "/workshop" ? (mcpBroken ? { tone: "bad" as Tone, pulse: false, title: "MCP-сервер не запускается" } : null) : lit[SECTION_BY_PATH[item.to]];
                     if (!light) return null;
                     return (
                       <span className={clsx("relative flex h-2 w-2", !(item.to === "/scans" && running > 0) && "ml-auto")} title={light.title} aria-label={light.title} role="status">

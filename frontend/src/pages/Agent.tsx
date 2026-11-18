@@ -27,6 +27,10 @@ import {
   steerAgentTurn,
   stopAgentTurn,
   listPersonas,
+  listMcp,
+  listSkills,
+  type McpServer,
+  type Skill,
   type AgentSession,
   type LLMProfile,
   type Persona,
@@ -35,6 +39,7 @@ import { defaultChoice, modelToSend, type Choice } from "../lib/modelChoice";
 import { useAgentStream } from "../lib/useAgentStream";
 import PersonaField from "../components/agent/PersonaField";
 import { defaultPersona } from "../lib/personas";
+import { effectiveMcp, effectiveSkills, insertSkill, matchSkills, mcpHealth, skillMention } from "../lib/workshop";
 
 const chip = "rounded-md border border-white/10 px-2 py-0.5 text-slate-400";
 const WEB_SEARCH: Record<string, string> = { auto: "авто", on: "включён", off: "выключен" };
@@ -90,6 +95,33 @@ function Chat({
   const scroller = useRef<HTMLDivElement>(null);
   const composerBox = useRef<HTMLTextAreaElement>(null);
   const stick = useRef(true);
+  const navigate = useNavigate();
+  // What this agent has besides the chat: the skills and MCP servers «Код» gets (shown in the header, offered after `$`).
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [servers, setServers] = useState<McpServer[]>([]);
+  const [caret, setCaret] = useState(0);
+  const [pickIndex, setPickIndex] = useState(0);
+  const [mentionClosed, setMentionClosed] = useState(false);
+  useEffect(() => {
+    listSkills().then((rows) => setSkills(effectiveSkills(rows, "code"))).catch(() => undefined);
+    listMcp().then((rows) => setServers(effectiveMcp(rows, "code"))).catch(() => undefined);
+  }, [session.id]);
+  const mention = mentionClosed ? null : skillMention(text, caret);
+  const offered = mention ? matchSkills(skills, mention.query) : [];
+  const brokenMcp = servers.filter((m) => mcpHealth(m) === "bad");
+  const pickSkill = (name: string) => {
+    if (!mention) return;
+    const next = insertSkill(text, mention.start, caret, name);
+    setText(next.text);
+    setCaret(next.caret);
+    requestAnimationFrame(() => {
+      const box = composerBox.current;
+      if (box) {
+        box.focus();
+        box.setSelectionRange(next.caret, next.caret);
+      }
+    });
+  };
 
   useEffect(() => setCurrent(session), [session]);
 
@@ -186,6 +218,23 @@ function Chat({
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (offered.length > 0 && !e.nativeEvent.isComposing) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setPickIndex((i) => (i + (e.key === "ArrowDown" ? 1 : offered.length - 1)) % offered.length);
+        return;
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        e.preventDefault();
+        pickSkill(offered[Math.min(pickIndex, offered.length - 1)].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionClosed(true);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void send();
@@ -197,7 +246,7 @@ function Chat({
     ? "Агент ждёт вашего ответа выше…"
     : running
       ? "Агент работает. Напишите — это дополнит ход. «Стоп» — прервать"
-      : "Что сделать?  !команда — выполнить самому · /goal /compact /review /undo /fork";
+      : `Что сделать?  !команда — выполнить самому · /goal /compact /review /undo /fork${skills.length ? " · $навык" : ""}`;
 
   return (
     <Card className="relative flex h-[calc(100vh-9.5rem)] min-h-[44rem] flex-col overflow-hidden">
@@ -212,6 +261,22 @@ function Chat({
               {current.llm_model ? ` · ${current.llm_model}` : ""}
             </span>
             {current.persona_name && <span className={clsx(chip, "border-accent/35 bg-accent/10 text-accent-soft")}>личность: {current.persona_name}</span>}
+            {skills.length > 0 && (
+              <button type="button" onClick={() => navigate("/workshop?tab=skills")} title={skills.map((k) => k.name).join(", ")} className={clsx(chip, "border-accent/35 bg-accent/10 text-accent-soft transition hover:-translate-y-px")}>
+                навыков: {skills.length}
+              </button>
+            )}
+            {servers.length > 0 && (
+              <button
+                type="button"
+                onClick={() => navigate("/workshop?tab=mcp")}
+                title={servers.map((m) => `${m.name}: ${mcpHealth(m) === "ok" ? "работает" : mcpHealth(m) === "bad" ? "не запускается" : "не проверен"}`).join("\n")}
+                className={clsx(chip, "inline-flex items-center gap-1.5 transition hover:-translate-y-px", brokenMcp.length ? "border-signal-warn/35 bg-signal-warn/10 text-signal-warn" : "border-signal-ok/30 bg-signal-ok/10 text-signal-ok")}
+              >
+                <span className={clsx("h-1.5 w-1.5 rounded-full", brokenMcp.length ? "bg-signal-bad" : "bg-signal-ok")} aria-hidden="true" />
+                {brokenMcp.length ? `MCP: ${brokenMcp.map((m) => m.name).join(", ")} не запускается` : `MCP: ${servers.length}`}
+              </button>
+            )}
             <span className={chip}>подтверждения: {current.approval_mode === "ask" ? "спрашивает" : "без вопросов"}</span>
             <span className={chip}>веб-поиск: {WEB_SEARCH[current.web_search] ?? current.web_search}</span>
             {current.instructions && <span className={chip}>свои инструкции</span>}
@@ -323,11 +388,44 @@ function Chat({
             </button>
           ))}
         </div>
+        {offered.length > 0 && (
+          <div className="relative">
+            <div role="listbox" aria-label="Навыки" className="absolute bottom-2 left-0 z-20 w-[min(30rem,100%)] overflow-hidden rounded-2xl border border-white/10 bg-ink-800 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.9)]">
+              <p className="px-4 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">Навык — вызвать явно · ↑↓ Enter</p>
+              <ul className="py-1.5">
+                {offered.map((k, i) => (
+                  <li key={k.id}>
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={i === pickIndex}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        pickSkill(k.name);
+                      }}
+                      onMouseEnter={() => setPickIndex(i)}
+                      className={clsx("flex w-full gap-3 px-4 py-2 text-left", i === pickIndex && "bg-accent/15")}
+                    >
+                      <span className="shrink-0 font-mono text-[13px] text-accent-soft">${k.name}</span>
+                      <span className="truncate text-[12px] text-slate-400">{k.description}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
         <div className="flex items-end gap-2 rounded-2xl border border-white/[0.12] bg-ink-800/80 py-2 pl-3.5 pr-2 transition-all focus-within:border-accent/60 focus-within:shadow-[0_0_0_4px_rgba(124,92,255,0.12),0_10px_40px_-12px_rgba(124,92,255,0.5)]">
           <textarea
             ref={composerBox}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              setCaret(e.target.selectionStart);
+              setPickIndex(0);
+              setMentionClosed(false);
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onKeyDown={onKey}
             rows={2}
             maxLength={50000}

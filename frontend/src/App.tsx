@@ -14,9 +14,7 @@ import Agent from "./pages/Agent";
 import AgentServerPage from "./pages/AgentServer";
 import Settings from "./pages/Settings";
 import Ops from "./pages/Ops";
-import Personas from "./pages/Personas";
-import Skills from "./pages/Skills";
-import Mcp from "./pages/Mcp";
+import Workshop from "./pages/Workshop";
 import Runners from "./pages/Runners";
 import Schedules from "./pages/Schedules";
 import ScanDetail from "./pages/ScanDetail";
@@ -82,29 +80,17 @@ export default function App() {
               }
             />
             <Route
-              path="skills"
+              path="workshop"
               element={
                 <ProtectedRoute roles={["admin", "operator"]}>
-                  <Skills />
+                  <Workshop />
                 </ProtectedRoute>
               }
             />
-            <Route
-              path="mcp"
-              element={
-                <ProtectedRoute roles={["admin", "operator"]}>
-                  <Mcp />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="personas"
-              element={
-                <ProtectedRoute roles={["admin", "operator"]}>
-                  <Personas />
-                </ProtectedRoute>
-              }
-            />
+            {/* the three sections that the workshop joined: old links keep working */}
+            <Route path="personas" element={<Navigate to="/workshop?tab=personas" replace />} />
+            <Route path="skills" element={<Navigate to="/workshop?tab=skills" replace />} />
+            <Route path="mcp" element={<Navigate to="/workshop?tab=mcp" replace />} />
             <Route
               path="agent"
               element={

@@ -103,7 +103,10 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
       aria-checked={checked}
       aria-label={label}
       disabled={disabled}
-      onClick={() => onChange(!checked)}
+      onClick={(e) => {
+        e.stopPropagation(); // a switch on a clickable card toggles, it does not open the card
+        onChange(!checked);
+      }}
       className={clsx(
         "relative h-6 w-11 shrink-0 rounded-full border transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-50",
         checked ? "border-accent/50 bg-accent/40" : "border-white/10 bg-white/10"
@@ -165,6 +168,7 @@ const PAGE_MARK: Record<string, ReactNode> = {
   "Настройки": <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>,
   "Пользователи": <><circle cx="9" cy="9" r="3" /><path d="M3.5 19c.6-3 2.8-4.7 5.5-4.7s4.9 1.7 5.5 4.7M16 6a3 3 0 0 1 0 6" /></>,
   "Агент": <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M7 20h10M12 16v4M7 8l3 2-3 2M12 12h4" /></>,
+  "Мастерская": <><path d="M14 6l4 4-9 9H5v-4z" /><path d="M12 8l4 4M16 4l4 4" /></>,
   "MCP-серверы": <><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0z" /><path d="M12 16v5" /></>,
   "Навыки": <><path d="M5 4h9l5 5v11H5z" /><path d="M14 4v5h5M8.5 13h7M8.5 16.5h4.5" /></>,
   "Личности": <><circle cx="12" cy="8" r="3.5" /><path d="M5 20c.8-3.6 3.7-5.5 7-5.5s6.2 1.9 7 5.5" /></>,
@@ -205,7 +209,7 @@ export function Modal({
   onClose: () => void;
   title: string;
   children: ReactNode;
-  wide?: boolean;
+  wide?: boolean | "xl";
 }) {
   useEffect(() => {
     if (!open) return;
@@ -232,7 +236,7 @@ export function Modal({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.98 }}
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-            className={clsx("glass relative max-h-[90vh] w-full overflow-y-auto rounded-3xl p-7 shadow-[0_30px_90px_-30px_rgba(124,92,255,0.55)]", wide ? "max-w-3xl" : "max-w-lg")}
+            className={clsx("glass relative max-h-[90vh] w-full overflow-y-auto rounded-3xl p-7 shadow-[0_30px_90px_-30px_rgba(124,92,255,0.55)]", wide === "xl" ? "max-w-5xl" : wide ? "max-w-3xl" : "max-w-lg")}
           >
             <span aria-hidden="true" className="pointer-events-none absolute inset-x-12 top-0 h-px bg-gradient-to-r from-transparent via-accent-soft/70 to-transparent" />
             <div className="mb-5 flex items-center justify-between">
