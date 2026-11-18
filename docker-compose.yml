@@ -109,6 +109,9 @@ services:
         # Extra Debian packages baked into the agent image on top of the default dev+network toolset (see agentd/Dockerfile).
         # Needs `docker compose build agent` to take effect — the image is immutable at runtime.
         AGENT_EXTRA_PACKAGES: ${AGENT_EXTRA_PACKAGES:-}
+        # Bake the red-team toolset (subfinder/httpx/dnsx/nuclei, trufflehog, gitleaks, kubectl, impacket, awscli) into the image for
+        # the «Навыки». 0 leaves it out (smaller image). Needs `docker compose build agent`.
+        AGENT_REDTEAM_TOOLS: ${AGENT_REDTEAM_TOOLS:-1}
     environment:
       AGENT_TOKEN: ${AGENT_TOKEN:-}
       AGENT_IDLE_SECONDS: ${AGENT_IDLE_SECONDS:-900}

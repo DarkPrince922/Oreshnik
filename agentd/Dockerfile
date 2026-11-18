@@ -14,6 +14,8 @@ ARG CODEX_VERSION=0.169.0
 # An admin can ADD more apt packages without touching this file — only AGENT_EXTRA_PACKAGES in .env, which goes straight into
 # the same `apt-get install` below and needs a rebuild (`docker compose build agent`) to take effect, nothing lighter: the image
 # is immutable at runtime (read-only root filesystem, cap_drop: [ALL], no root for the agent process).
+# A larger red-team toolset for the panel's «Навыки» (subfinder/httpx/dnsx/nuclei, trufflehog, gitleaks, kubectl, impacket, awscli)
+# is baked in further below, gated by AGENT_REDTEAM_TOOLS (default on).
 ARG AGENT_EXTRA_PACKAGES=""
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -50,6 +52,39 @@ RUN set -eux; \
     case "$(uname -m)" in x86_64) MAMBA_ARCH=linux-64 ;; aarch64) MAMBA_ARCH=linux-aarch64 ;; *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;; esac; \
     curl -Ls "https://micro.mamba.pm/api/micromamba/${MAMBA_ARCH}/latest" | tar -xj -C /usr/local bin/micromamba; \
     /usr/local/bin/micromamba --version
+
+# ── Baked red-team tooling for the «Навыки» (recon, web, secret-scanning, Active Directory, cloud, Kubernetes) ──────────────────
+# The skills in the panel call these by bare name. The agent could fetch most itself at runtime, but then it re-downloads them every
+# new session; baking them in makes them instant. Each tool is a pinned, published release — bump a version here and rebuild with
+# `docker compose build agent`. All of it is BEST-EFFORT: a failed download skips that one tool with a warning and the build goes on
+# (so a yanked release never bricks `./install.sh`; the agent can still self-install it — see docs/ARCHITECTURE.md §26). Turn the whole
+# block off with AGENT_REDTEAM_TOOLS=0 in .env. NOTE: these are for AUTHORIZED testing only; the container stays a locked sandbox
+# (no root, read-only FS, cap_drop ALL), so tools that need root, apt or raw sockets (Responder, hashcat) belong on «Агент», not here.
+ARG AGENT_REDTEAM_TOOLS=1
+# ProjectDiscovery recon chain — one static Go binary each, from the project's own release zip.
+RUN if [ "${AGENT_REDTEAM_TOOLS}" = "1" ]; then \
+    case "$(uname -m)" in x86_64) A=amd64 ;; aarch64) A=arm64 ;; *) A="" ;; esac; \
+    if [ -n "$A" ]; then for t in "subfinder:2.6.6" "httpx:1.6.9" "dnsx:1.2.1" "nuclei:3.3.7"; do \
+      n="${t%%:*}"; v="${t##*:}"; \
+      if curl -fsSL "https://github.com/projectdiscovery/$n/releases/download/v$v/${n}_${v}_linux_${A}.zip" -o "/tmp/$n.zip" \
+         && unzip -qo "/tmp/$n.zip" -d "/tmp/$n" && install -m755 "/tmp/$n/$n" "/usr/local/bin/$n"; then echo "baked $n $v"; \
+      else echo "WARNING: $n not baked (the agent can get it itself)" >&2; fi; rm -rf "/tmp/$n" "/tmp/$n.zip"; \
+    done; fi; fi
+# trufflehog & gitleaks (secret scanning) and kubectl — single binaries.
+RUN if [ "${AGENT_REDTEAM_TOOLS}" = "1" ]; then \
+    case "$(uname -m)" in x86_64) A=amd64; GL=x64; K=amd64 ;; aarch64) A=arm64; GL=arm64; K=arm64 ;; *) A="" ;; esac; \
+    if [ -n "$A" ]; then \
+      curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v3.88.0/trufflehog_3.88.0_linux_${A}.tar.gz" | tar -xz -C /usr/local/bin trufflehog || echo "WARNING: trufflehog not baked" >&2; \
+      curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_${GL}.tar.gz" | tar -xz -C /usr/local/bin gitleaks || echo "WARNING: gitleaks not baked" >&2; \
+      { curl -fsSL "https://dl.k8s.io/release/v1.37.2/bin/linux/${K}/kubectl" -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl && echo "baked kubectl"; } || echo "WARNING: kubectl not baked" >&2; \
+    fi; fi
+# impacket (AD: secretsdump, ntlmrelayx, GetUserSPNs, wmiexec…) and awscli — into the same venv as sqlmap. impacket's example scripts
+# install as `secretsdump.py`; the skills call `secretsdump`, `ntlmrelayx` and `impacket-ntlmrelayx` too, so expose all three forms.
+RUN if [ "${AGENT_REDTEAM_TOOLS}" = "1" ]; then \
+      if /opt/agent-tools/bin/pip install --no-cache-dir "impacket==0.13.1" "awscli==1.46.3"; then \
+        for f in /opt/agent-tools/bin/*.py; do b="$(basename "$f" .py)"; ln -sf "$f" "/usr/local/bin/$b"; ln -sf "$f" "/usr/local/bin/impacket-$b"; done; \
+        ln -sf /opt/agent-tools/bin/aws /usr/local/bin/aws; echo "baked impacket + awscli"; \
+      else echo "WARNING: impacket/awscli not baked (the agent can pip-install them)" >&2; fi; fi
 
 # `codex` is a thin JS launcher; the real binary is a separate package (@openai/codex-linux-x64 / -arm64) that npm installs as an
 # OPTIONAL dependency — and silently skips when it cannot fetch it (network trouble, `omit=optional`), leaving an image that builds
