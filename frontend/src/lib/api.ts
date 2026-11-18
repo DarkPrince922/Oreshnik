@@ -796,6 +796,63 @@ export const readSkillFile = async (id: number, path: string) =>
   (await api.get<{ path: string; size: number; text: string | null }>(`/api/skills/${id}/files/content`, { params: { path } })).data;
 export const exportSkill = (id: number, name: string) => saveBlob(`/api/skills/${id}/export`, {}, `${name}.zip`);
 
+// ── MCP-серверы ──────────────────────────────────────────────────────────
+
+export interface McpSecret {
+  name: string;
+  /** null keeps the stored value (the panel never shows it back). */
+  value: string | null;
+}
+export interface McpCheckResult {
+  ok: boolean;
+  tools: { name: string; description: string }[];
+  error: string | null;
+  at: string | null;
+}
+export interface McpServer {
+  id: number;
+  name: string;
+  description: string;
+  transport: "command" | "url";
+  command: string | null;
+  url: string | null;
+  env_names: string[];
+  header_names: string[];
+  has_token: boolean;
+  scope: PersonaScope;
+  enabled: boolean;
+  shared: boolean;
+  mine: boolean;
+  editable: boolean;
+  overridden: boolean;
+  startup_timeout_sec: number;
+  tool_timeout_sec: number;
+  last_check: McpCheckResult | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface McpInput {
+  name: string;
+  description: string;
+  transport: "command" | "url";
+  command: string | null;
+  url: string | null;
+  env: McpSecret[];
+  headers: McpSecret[];
+  /** null keeps the stored token, "" removes it. */
+  bearer_token: string | null;
+  scope: PersonaScope;
+  enabled: boolean;
+  shared?: boolean;
+  startup_timeout_sec: number;
+  tool_timeout_sec: number;
+}
+export const listMcp = async () => (await api.get<McpServer[]>("/api/mcp")).data;
+export const createMcp = async (body: McpInput) => (await api.post<McpServer>("/api/mcp", body)).data;
+export const updateMcp = async (id: number, body: Partial<McpInput>) => (await api.patch<McpServer>(`/api/mcp/${id}`, body)).data;
+export const deleteMcp = (id: number) => api.delete(`/api/mcp/${id}`);
+export const checkMcp = async (id: number) => (await api.post<McpServer>(`/api/mcp/${id}/check`, undefined, { timeout: 720_000 })).data;
+
 // ── Агент (OpenHands на своём сервере) ───────────────────────────────────
 
 export type AgentServerStatus = "new" | "offline" | "installing" | "online" | "error";

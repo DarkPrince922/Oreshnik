@@ -238,6 +238,9 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
       case "turn.error":
         put(`e${event.seq}`, { type: "notice", key: `e${event.seq}`, tone: "bad", text: str(p.message) });
         break;
+      case "mcp.status":
+        put(`m${event.seq}`, { type: "notice", key: `m${event.seq}`, tone: "warn", text: `MCP-сервер ${str(p.name)} не запустился — агент работает без него${p.error ? `: ${str(p.error)}` : ""}` });
+        break;
       case "turn.notice":
         put(`n${event.seq}`, { type: "notice", key: `n${event.seq}`, tone: "warn", text: str(p.message) });
         break;

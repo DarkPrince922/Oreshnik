@@ -222,6 +222,11 @@ def fork_files(key: str, new_key: str) -> None:
     _call("POST", f"/sessions/{key}/fork", json_body={"new_key": new_key}, timeout=300.0)
 
 
+def check_mcp(server: dict, timeout: float = 90.0) -> dict:
+    """Start one MCP server in the agent container and list its tools: {ok, tools: [{name, description}], error}."""
+    return _call("POST", "/mcp/check", json_body={"server": server}, timeout=timeout)
+
+
 def forget_session(key: str) -> None:
     try:
         _call("DELETE", f"/sessions/{key}", timeout=30.0)
@@ -234,6 +239,7 @@ def stream_turn(
     normalize_responses: bool = False, action: str = "message", instructions: str | None = None, effort: str | None = None,
     approval_mode: str = "auto", review_target: dict | None = None, revert_before: str | None = None, applied_instructions: str | None = None,
     web_search: str = "auto", goals: bool = False, goal_budget: int | None = None, skills: list[dict] | None = None, skills_digest: str = "",
+    mcp_servers: list[dict] | None = None,
 ) -> Iterator[dict]:
     """The agent's events for one action, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
@@ -243,7 +249,7 @@ def stream_turn(
         "instructions": instructions, "applied_instructions": applied_instructions, "effort": effort, "approval_mode": approval_mode,
         "review_target": review_target, "revert_before": revert_before,
         "web_search": web_search, "goals": goals, "goal_budget": goal_budget,
-        "skills": skills or [], "skills_digest": skills_digest,
+        "skills": skills or [], "skills_digest": skills_digest, "mcp_servers": mcp_servers or [],
     }
     timeout = httpx.Timeout(60.0, read=settings.agent_turn_timeout_seconds + 60.0)
     try:
@@ -325,11 +331,14 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
         from app.api.skills import for_agent
 
+        from app.api import mcp as mcp_api
+
         skills_error: AgentError | None = None
         try:
             skills, skills_digest = skills_payload(for_agent(db, session.user_id, "code"))
+            mcp_servers = mcp_api.for_agent(db, session.user_id, "code")
         except AgentError as exc:
-            skills, skills_digest, skills_error = [], "", exc
+            skills, skills_digest, mcp_servers, skills_error = [], "", [], exc
 
     error: str | None = None
     try:
@@ -348,7 +357,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
                 instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
                 review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
                 web_search="off" if forced_functions else web_search, goals=goals, goal_budget=extra.get("goal_budget"),
-                skills=skills, skills_digest=skills_digest,
+                skills=skills, skills_digest=skills_digest, mcp_servers=mcp_servers,
             ):
                 error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
             # A gateway that takes plain function tools only refuses the turn when Codex also offers it web search or its sub-agents
@@ -455,6 +464,8 @@ def _handle_event(db_factory: Callable[[], Session], session_id: int, event: dic
                 append_event(db, session_id, "goal.cleared", {})
         elif etype == "thread.reverted":
             append_event(db, session_id, "thread.reverted", {"turn_id": extra.get("revert_before")})
+        elif etype == "mcp.status" and event.get("status") == "failed":
+            append_event(db, session_id, "mcp.status", {k: event.get(k) for k in ("name", "status", "error")})
         elif etype == "agentd.error":
             error = error or str(event.get("message") or "Агент сообщил об ошибке")[:500]
         db.commit()

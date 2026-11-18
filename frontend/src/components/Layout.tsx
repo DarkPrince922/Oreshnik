@@ -20,11 +20,11 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "manage", label: "Управление" },
 ];
 const GROUP_OF: Record<string, Group> = {
-  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/agent": "work", "/personas": "work", "/skills": "work", "/ops": "work",
+  "/": "work", "/scans": "work", "/schedules": "work", "/code": "work", "/agent": "work", "/personas": "work", "/skills": "work", "/mcp": "work", "/ops": "work",
   "/runners": "resources", "/llm": "resources", "/costs": "resources",
   "/settings": "manage", "/users": "manage", "/account": "manage",
 };
-const ORDER = ["/", "/scans", "/schedules", "/code", "/agent", "/personas", "/skills", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
+const ORDER = ["/", "/scans", "/schedules", "/code", "/agent", "/personas", "/skills", "/mcp", "/ops", "/runners", "/llm", "/costs", "/settings", "/users", "/account"];
 
 /** How many scans are in progress right now, for the label on «Сканы». Quietly absent when it cannot be asked. */
 function useRunningScans(enabled: boolean): number {
@@ -174,6 +174,17 @@ const NAV: NavItem[] = [
       <>
         <path d="M5 4h9l5 5v11H5z" />
         <path d="M14 4v5h5M8.5 13h7M8.5 16.5h4.5" />
+      </>
+    ),
+  },
+  {
+    to: "/mcp",
+    label: "MCP-серверы",
+    roles: ["admin", "operator"],
+    icon: icon(
+      <>
+        <path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0z" />
+        <path d="M12 16v5" />
       </>
     ),
   },

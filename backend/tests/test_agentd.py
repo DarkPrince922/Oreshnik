@@ -702,7 +702,7 @@ def test_every_other_line_passes_through_untouched(agentd, line):
 
 
 def test_the_proxy_is_closed_to_everyone_but_this_container(agentd):
-    agentd.module._compat["tok"] = "http://127.0.0.1:1/v1"
+    agentd.module._compat["tok"] = agentd.module.Compat("http://127.0.0.1:1/v1")
     assert httpx.post(agentd.url + "/compat/unknown/v1/responses", json={}, timeout=20).status_code == 404  # no such token
 
 
@@ -734,7 +734,7 @@ def test_a_gateways_stream_comes_through_with_a_complete_usage(agentd):
     upstream = run_upstream(["event: response.created", sse({"type": "response.created", "response": {"id": "r1"}}), "", "event: response.output_text.delta", delta, "",
                              "event: response.completed", sse(BROKEN), "", "data: [DONE]", ""], seen)
     try:
-        agentd.module._compat["tok"] = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
+        agentd.module._compat["tok"] = agentd.module.Compat(f"http://127.0.0.1:{upstream.server_address[1]}/v1")
         r = httpx.post(f"{agentd.url}/compat/tok/responses", json={"model": "m", "input": []}, headers={"Authorization": "Bearer gateway-key"}, timeout=20)
     finally:
         upstream.shutdown()
@@ -895,3 +895,71 @@ def test_a_skill_file_cannot_leave_its_folder(agentd):
     assert not (Path(agentd.module.DATA_DIR) / "k1" / "escape.txt").exists()
     body = agentd.body("hello", skills=[{"name": "../up", "files": {}}], skills_digest="z")
     assert agentd.call("POST", "/turn", json=body).status_code == 422
+
+
+# ── MCP servers ───────────────────────────────────────────────────────────────────
+
+def _mcp_arg(argv: list[str], name: str) -> str:
+    return next(a for a in argv if a.startswith(f"mcp_servers.{name}="))
+
+
+def test_mcp_servers_reach_codex_with_their_secrets_in_the_environment_only(agentd):
+    servers = [
+        {"name": "shodan", "command": "npx", "args": ["-y", "shodan-mcp"], "env": {"TEST_MCP_KEY": "s3cr3t"}},
+        {"name": "burp", "url": "http://10.0.0.5:9876/mcp", "bearer_token": "tok-123", "headers": {"X-Api-Key": "hdr-456"}},
+    ]
+    report = agentd.report(mcp_servers=servers)
+    argv = " ".join(report["argv"])
+    assert "s3cr3t" not in argv and "tok-123" not in argv and "hdr-456" not in argv          # never on the command line
+    shodan = _mcp_arg(report["argv"], "shodan")
+    assert 'command = "npx", args = ["-y", "shodan-mcp"]' in shodan and 'env_vars = ["TEST_MCP_KEY"]' in shodan
+    assert 'default_tools_approval_mode = "approve"' in shodan                              # otherwise every call fails under approval "never"
+    burp = _mcp_arg(report["argv"], "burp")
+    assert 'url = "http://10.0.0.5:9876/mcp"' in burp and 'bearer_token_env_var = "ORESHNIK_MCP_BURP_TOKEN"' in burp
+    assert 'env_http_headers = { "X-Api-Key" = "ORESHNIK_MCP_BURP_H0" }' in burp
+    assert report["mcp_env"] == {"TEST_MCP_KEY": "s3cr3t", "ORESHNIK_MCP_BURP_TOKEN": "tok-123", "ORESHNIK_MCP_BURP_H0": "hdr-456"}
+    again = agentd.report(mcp_servers=servers[:1])
+    assert again["pid"] != report["pid"] and "mcp_servers.burp=" not in " ".join(again["argv"])   # a change restarts the process
+
+
+def test_bad_mcp_servers_are_refused(agentd):
+    for server in ({"name": "x", "command": "a", "env": {"PATH": "/evil"}}, {"name": "x", "command": "a", "env": {"ORESHNIK_AGENT_API_KEY": "v"}},
+                   {"name": "x"}, {"name": "x", "command": "a", "url": "http://h/"}, {"name": "Bad Name", "command": "a"}):
+        assert agentd.call("POST", "/turn", json=agentd.body("hi", mcp_servers=[server])).status_code == 422, server
+
+
+def test_a_gateway_with_mcp_tools_goes_through_the_proxy_even_without_the_usage_fix(agentd):
+    report = agentd.report(function_tools_only=True, mcp_servers=[{"name": "s", "command": "a"}])
+    provider = next(a for a in report["argv"] if a.startswith("model_providers.oreshnik="))
+    assert "/compat/" in provider
+    conf = next(iter(agentd.module._compat.values()))
+    assert conf.flatten and not conf.fix_usage
+
+
+def test_the_proxy_unfolds_mcp_namespaces_for_a_gateway_and_folds_the_models_call_back(agentd):
+    seen: list = []
+    call = {"type": "function_call", "id": "fc", "call_id": "c1", "name": "mcp__demo__echo", "arguments": "{}", "status": "completed"}
+    upstream = run_upstream(["event: response.output_item.done", sse({"type": "response.output_item.done", "output_index": 0, "item": call}), "",
+                             "event: response.completed", sse({"type": "response.completed", "response": {"id": "r", "output": [call], "usage": {}}}), ""], seen)
+    body = {"model": "m", "tools": [{"type": "function", "name": "exec_command"},
+                                    {"type": "namespace", "name": "mcp__demo", "tools": [{"type": "function", "name": "echo", "parameters": {}}]}],
+            "input": [{"type": "function_call", "namespace": "mcp__demo", "name": "echo", "call_id": "c0", "arguments": "{}"}]}
+    try:
+        agentd.module._compat["tok"] = agentd.module.Compat(f"http://127.0.0.1:{upstream.server_address[1]}/v1", fix_usage=False, flatten=True)
+        r = httpx.post(f"{agentd.url}/compat/tok/responses", json=body, timeout=20)
+    finally:
+        upstream.shutdown()
+    sent = seen[0]["body"]
+    assert [(t["type"], t["name"]) for t in sent["tools"]] == [("function", "exec_command"), ("function", "mcp__demo__echo")]
+    assert sent["input"][0] == {"type": "function_call", "name": "mcp__demo__echo", "call_id": "c0", "arguments": "{}"}
+    folded = [json.loads(l[5:]) for l in r.text.split("\n") if l.startswith("data:")]
+    assert folded[0]["item"]["namespace"] == "mcp__demo" and folded[0]["item"]["name"] == "echo"
+    assert folded[1]["response"]["output"][0]["namespace"] == "mcp__demo" and folded[1]["response"]["usage"] == {}   # no usage fix asked
+
+
+def test_long_mcp_tool_names_are_shortened_without_clashing():
+    sys.path.insert(0, str(AGENTD_DIR))
+    import toolfold
+
+    a, b = toolfold.flat_name("mcp__server", "x" * 80), toolfold.flat_name("mcp__server", "x" * 79 + "y")
+    assert len(a) == len(b) == 64 and a != b and toolfold.flat_name("mcp__s", "t") == "mcp__s__t"

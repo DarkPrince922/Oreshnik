@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
 import fsops
+import toolfold
 from normalize import approval_from_request, approval_result, normalize_item, plan_steps, usage_from
 from rpc import AppServer, RpcError
 
@@ -94,6 +95,41 @@ class SkillIn(BaseModel):
     files: dict[str, str] = Field(max_length=201)
 
 
+_ENV_NAME = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+# Variables an MCP server's env may not set: they would change how the agent itself or every program it starts behaves.
+_RESERVED_ENV = {"PATH", "HOME", "CODEX_HOME", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "NODE_OPTIONS", "SHELL", "USER", "TERM",
+                 "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
+
+
+class McpIn(BaseModel):
+    """One MCP server from the panel. A command runs inside this container; a URL is a streamable-HTTP server. The secrets (env values,
+    header values, the bearer token) reach Codex through its environment, never through its command line."""
+    name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    command: str | None = Field(default=None, max_length=500)
+    args: list[str] = Field(default_factory=list, max_length=100)
+    url: str | None = Field(default=None, max_length=2000, pattern=r"^https?://")
+    env: dict[str, str] = Field(default_factory=dict, max_length=50)
+    headers: dict[str, str] = Field(default_factory=dict, max_length=50)
+    bearer_token: str | None = Field(default=None, max_length=8000)
+    startup_timeout_sec: int = Field(default=30, ge=1, le=600)
+    tool_timeout_sec: int = Field(default=120, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def _one_transport(self) -> "McpIn":
+        if bool(self.command) == bool(self.url):
+            raise ValueError("an MCP server has either a command or a URL")
+        for key in self.env:
+            if not re.match(_ENV_NAME, key) or key in _RESERVED_ENV or key.startswith("ORESHNIK_"):
+                raise ValueError(f"bad env name {key!r}")
+        for key in self.headers:
+            if not re.match(r"^[A-Za-z0-9-]{1,100}$", key):
+                raise ValueError(f"bad header {key!r}")
+        return self
+
+    def env_key(self, suffix: str) -> str:
+        return "ORESHNIK_MCP_" + re.sub(r"[^A-Z0-9]", "_", self.name.upper()) + "_" + suffix
+
+
 class Turn(BaseModel):
     session_key: str
     action: Literal["message", "compact", "shell", "review", "revert", "goal", "goal_clear"] = "message"
@@ -128,6 +164,21 @@ class Turn(BaseModel):
     # when it starts).
     skills: list[SkillIn] = Field(default_factory=list, max_length=500)
     skills_digest: str = Field(default="", max_length=64)
+    # The user's MCP servers. Codex offers their tools to the model; for a gateway that takes plain functions only, the compat proxy
+    # unfolds them (see `flatten_tools`).
+    mcp_servers: list[McpIn] = Field(default_factory=list, max_length=50)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _mcp_unique(cls, v: list[McpIn]) -> list[McpIn]:
+        if len({m.name for m in v}) != len(v):
+            raise ValueError("MCP server names must be unique")
+        seen: dict[str, str] = {}
+        for m in v:
+            for key, value in m.env.items():
+                if seen.setdefault(key, value) != value:
+                    raise ValueError(f"two MCP servers set {key} to different values")
+        return v
 
     @field_validator("effort")
     @classmethod
@@ -237,7 +288,15 @@ class Session:
 
 
 _sessions: dict[str, Session] = {}
-_compat: dict[str, str] = {}   # compat proxy: unguessable token -> the upstream base URL (never the key: the caller sends it)
+@dataclass
+class Compat:
+    """What the compat proxy does for one session: where it forwards (never the key: the caller sends it) and what it fixes."""
+    upstream: str
+    fix_usage: bool = True
+    flatten: bool = False
+
+
+_compat: dict[str, Compat] = {}   # compat proxy: unguessable token -> its settings
 
 
 def get_session(key: str) -> Session:
@@ -328,6 +387,7 @@ def spawn_env(turn: Turn, session: Session) -> dict[str, str]:
         "GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_NAME": "Oreshnik agent", "GIT_AUTHOR_EMAIL": "agent@oreshnik.local",
         "GIT_COMMITTER_NAME": "Oreshnik agent", "GIT_COMMITTER_EMAIL": "agent@oreshnik.local",
     })
+    env.update(mcp_env(turn.mcp_servers))
     return env
 
 
@@ -344,14 +404,57 @@ def spawn_argv(turn: Turn, base_url: str) -> list[str]:
         argv += ["--disable", "multi_agent", "--disable", "image_generation"]
     if not turn.goals:
         argv += ["--disable", "goals"]  # otherwise the model could set itself a goal and Codex would go on working unasked
+    argv += mcp_args(turn.mcp_servers)
     return argv
+
+
+def mcp_args(servers: list[McpIn]) -> list[str]:
+    """`-c mcp_servers.<name>={...}` for each server — checked with the real Codex 0.169: `env_vars` hands a variable of Codex's own
+    environment to a command, `bearer_token_env_var` and `env_http_headers` read a URL server's token and headers from it, and
+    `default_tools_approval_mode = "approve"` runs the tools without asking (otherwise every call fails: "requires approval, but approval
+    policy is never"). The server was added on purpose by the user; «ask» sessions still ask before commands and file changes."""
+    out: list[str] = []
+    for m in servers:
+        parts = [f"startup_timeout_sec = {m.startup_timeout_sec}", f"tool_timeout_sec = {m.tool_timeout_sec}", 'default_tools_approval_mode = "approve"']
+        if m.command:
+            parts += [f"command = {toml_string(m.command)}", "args = [" + ", ".join(toml_string(a) for a in m.args) + "]"]
+            if m.env:
+                parts.append("env_vars = [" + ", ".join(toml_string(k) for k in sorted(m.env)) + "]")
+        else:
+            parts.append(f"url = {toml_string(m.url or '')}")
+            if m.bearer_token:
+                parts.append(f"bearer_token_env_var = {toml_string(m.env_key('TOKEN'))}")
+            if m.headers:
+                pairs = ", ".join(f"{toml_string(h)} = {toml_string(m.env_key(f'H{i}'))}" for i, h in enumerate(sorted(m.headers)))
+                parts.append("env_http_headers = { " + pairs + " }")
+        out += ["-c", f"mcp_servers.{m.name}={{ " + ", ".join(parts) + " }"]
+    return out
+
+
+def _mcp_error(error: object) -> str | None:
+    """Codex's MCP error, cut before the long transport type names it appends (`Transport [codex_rmcp_client::…]`)."""
+    if not error:
+        return None
+    text = re.sub(r"\s*Transport \[[^\]]*\]+", "", str(error))
+    return text[:600]
+
+
+def mcp_env(servers: list[McpIn]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for m in servers:
+        env.update(m.env)
+        if m.url and m.bearer_token:
+            env[m.env_key("TOKEN")] = m.bearer_token
+        for i, h in enumerate(sorted(m.headers)):
+            env[m.env_key(f"H{i}")] = m.headers[h]
+    return env
 
 
 def fingerprint(turn: Turn) -> str:
     """What cannot change under a running process: the endpoint, the key and the tool set. A change restarts it. (Not the system prompt:
     a thread that exists keeps the one it was started with, however often the process is restarted.)"""
     raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses, turn.web_search, turn.goals,
-                      turn.skills_digest])
+                      turn.skills_digest, [m.model_dump() for m in turn.mcp_servers]])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -390,9 +493,10 @@ async def ensure_server(session: Session, turn: Turn) -> None:
     await _stop_server(session)
     await _make_room()
     base_url = turn.base_url
-    if turn.normalize_responses:
+    if turn.normalize_responses or (turn.function_tools_only and turn.mcp_servers):
         session.compat_token = secrets.token_urlsafe(16)
-        _compat[session.compat_token] = turn.base_url.rstrip("/")
+        _compat[session.compat_token] = Compat(turn.base_url.rstrip("/"), fix_usage=turn.normalize_responses,
+                                               flatten=turn.function_tools_only)
         base_url = f"http://127.0.0.1:{PORT}/compat/{session.compat_token}"
     # The callbacks know which process they belong to: a process being replaced may still report (its own exit, a last notification)
     # while the next one already serves a turn, and that must not reach the new turn.
@@ -477,6 +581,10 @@ def on_notification(session: Session, message: dict) -> None:
             asyncio.create_task(_unattended(session))
             return
         session.emit({"type": "turn.started", "turn_id": session.active_turn})
+    elif method == "mcpServer/startupStatus/updated":
+        # Codex starts the MCP servers with its process: a server that fails is only a note in the feed (the agent goes on without it)
+        if params.get("status") in ("ready", "failed"):
+            session.emit({"type": "mcp.status", "name": params.get("name"), "status": params["status"], "error": _mcp_error(params.get("error"))})
     elif method == "thread/goal/updated":
         session.goal = goal_view(params.get("goal"))
         session.emit({"type": "goal.updated", "goal": session.goal})
@@ -1019,6 +1127,49 @@ async def health() -> dict:
     return {"ok": True, "codex": ok, "codex_detail": detail, "sessions": sum(1 for s in _sessions.values() if s.server is not None and s.server.alive)}
 
 
+# ── checking an MCP server ─────────────────────────────────────────────────────────────────────
+
+class McpCheck(BaseModel):
+    server: McpIn
+
+
+@app.post("/mcp/check", dependencies=[Depends(require_token)])
+async def mcp_check(body: McpCheck) -> dict:
+    """Start the server the way a session would and list its tools (checked with the real Codex: `mcpServerStatus/list` waits for the
+    servers to start and returns their tools, or why they did not start). Runs in a throwaway home, without any session's files."""
+    home = DATA_DIR / ".tmp" / f"mcp-{secrets.token_hex(6)}"
+    (home / ".codex").mkdir(parents=True, exist_ok=True)
+    env = {k: os.environ[k] for k in _PASSTHROUGH if k in os.environ}
+    env.update({"HOME": str(home), "CODEX_HOME": str(home / ".codex"), "TERM": "dumb", "NO_COLOR": "1"})
+    env.update(mcp_env([body.server]))
+    argv = [CODEX_BIN, "app-server", "-c", 'model="mcp-check"', *mcp_args([body.server])]
+    server = AppServer(argv, env, str(home), on_notification=lambda m: None, on_request=_refuse_request, on_exit=lambda: None)
+    try:
+        await server.start()
+        await server.request("initialize", {"clientInfo": {"name": "oreshnik", "title": "Oreshnik", "version": "1"}}, timeout=30)
+        server.notify("initialized")
+        result = await server.request("mcpServerStatus/list", {"detail": "toolsAndAuthOnly", "serverName": body.server.name},
+                                      timeout=body.server.startup_timeout_sec + 30)
+    except (RpcError, ConnectionError, TimeoutError, OSError) as exc:
+        tail = bytes(server.stderr_tail).decode("utf-8", "replace").strip()
+        return {"ok": False, "tools": [], "error": (tail[-400:] or f"{exc.__class__.__name__}: {exc}")}
+    finally:
+        await server.stop(grace=2.0)
+        shutil.rmtree(home, ignore_errors=True)
+    found = next((d for d in result.get("data") or [] if d.get("name") == body.server.name), None)
+    if found is None:
+        return {"ok": False, "tools": [], "error": "Codex не нашёл этот сервер в настройках"}
+    tools = found.get("tools") or {}
+    listed = [{"name": t.get("name") or key, "description": (t.get("description") or "")[:300]}
+              for key, t in (tools.items() if isinstance(tools, dict) else enumerate(tools)) if isinstance(t, dict)]
+    error = _mcp_error(found.get("toolsError"))
+    return {"ok": error is None, "tools": sorted(listed, key=lambda t: t["name"]), "error": error}
+
+
+async def _refuse_request(message: dict) -> None:
+    return None
+
+
 # ── the compat proxy: a gateway's answers, made digestible for Codex ─────────────────────────────
 #
 # Reproduced with the real Codex 0.169 against an endpoint whose final `response.completed` event carries `input_tokens_details` without
@@ -1071,13 +1222,23 @@ def fix_sse_line(line: str) -> str:
 
 @app.api_route("/compat/{token}/{path:path}", methods=["GET", "POST"])
 async def compat(token: str, path: str, request: Request) -> Response:
-    upstream = _compat.get(token)
-    if upstream is None or request.client is None or request.client.host not in _LOOPBACK:
+    conf = _compat.get(token)
+    if conf is None or request.client is None or request.client.host not in _LOOPBACK:
         raise HTTPException(404)
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+    content = await request.body()
+    mapping: dict[str, tuple[str, str]] = {}
+    if conf.flatten and content and "json" in request.headers.get("content-type", "json"):
+        try:
+            body = json.loads(content)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            body, mapping = toolfold.unfold_request(body)
+            content = json.dumps(body, ensure_ascii=False).encode()
     client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None))
     upstream_request = client.build_request(
-        request.method, f"{upstream}/{path}", params=request.query_params, headers=headers, content=await request.body()
+        request.method, f"{conf.upstream}/{path}", params=request.query_params, headers=headers, content=content
     )
     try:
         reply = await client.send(upstream_request, stream=True)
@@ -1086,15 +1247,22 @@ async def compat(token: str, path: str, request: Request) -> Response:
         raise HTTPException(502, f"upstream: {exc.__class__.__name__}") from exc
     out_headers = {k: v for k, v in reply.headers.items() if k.lower() not in _HOP}
     if "text/event-stream" not in reply.headers.get("content-type", ""):
-        body = await reply.aread()
+        body_bytes = await reply.aread()
         await reply.aclose()
         await client.aclose()
-        return Response(body, status_code=reply.status_code, headers=out_headers)
+        if mapping and "function_call" in body_bytes.decode("utf-8", "replace"):
+            try:
+                body_bytes = json.dumps(toolfold.fold_event(json.loads(body_bytes), mapping), ensure_ascii=False).encode()
+            except (ValueError, TypeError, AttributeError):
+                pass
+        return Response(body_bytes, status_code=reply.status_code, headers=out_headers)
 
     async def events():
         try:
             async for line in reply.aiter_lines():
-                yield fix_sse_line(line) + "\n"
+                if conf.fix_usage:
+                    line = fix_sse_line(line)
+                yield toolfold.fold_sse_line(line, mapping) + "\n"
         finally:
             await reply.aclose()
             await client.aclose()
