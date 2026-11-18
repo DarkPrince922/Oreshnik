@@ -85,10 +85,12 @@ describe("buildFeed: the history", () => {
       done({ id: "", type: "error", message: "Model metadata for `m` not found" }),
       ev("turn.error", { message: "boom" }),
       ev("turn.stopped", { message: "Остановлено оператором" }),
+      ev("turn.notice", { message: "повторяю ход" }),
     ]);
     expect(feed.slice(1).map((f) => [f.type, (f as { tone: string }).tone, (f as { text: string }).text])).toEqual([
       ["notice", "info", "Разговор сжат: старые ходы заменены кратким изложением"], ["notice", "info", "Код-ревью начато"], ["notice", "info", "Код-ревью закончено"],
       ["notice", "info", "Model metadata for `m` not found"], ["notice", "bad", "boom"], ["notice", "warn", "Остановлено оператором"],
+      ["notice", "warn", "повторяю ход"],
     ]);
   });
 

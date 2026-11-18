@@ -130,7 +130,7 @@ def _new_session(db: Session, user: User, profile: LLMProfile, body: AgentSessio
     session = AgentSession(
         user_id=user.id, title=title or body.title.strip() or NEW_TITLE, llm_profile_id=profile.id, llm_model=validate_model(profile, body.llm_model),
         instructions=(body.instructions or "").strip() or None, reasoning_effort=body.reasoning_effort, approval_mode=body.approval_mode,
-        persona_id=(lambda p: p.id if p else None)(pick_for_session(db, user, body.persona_id, "code")),
+        persona_id=(lambda p: p.id if p else None)(pick_for_session(db, user, body.persona_id, "code", "persona_id" not in body.model_fields_set)),
         web_search=body.web_search,
     )
     db.add(session)

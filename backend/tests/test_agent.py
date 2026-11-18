@@ -1009,3 +1009,49 @@ def test_a_new_conversation_starts_with_the_note_and_an_old_one_is_told_once(cli
     fresh = new_session(client, h, profile)
     seen = report(client, h, fresh["id"])["seen"]
     assert "4444–4450" in seen["developerInstructions"] and seen["lastPrompt"] == "report"
+
+
+def test_a_gateway_refusing_other_tools_switches_the_session_to_functions_and_asks_again(client, monkeypatch):
+    """«This endpoint supports function tools only»: seen when Codex offered web search or sub-agents to a gateway (web search «Включён»,
+    AGENT_TOOLS=full, an OpenAI profile). The session is switched to plain functions for good and the turn is asked again, once."""
+    user, h = op_user(client)
+    profile = openai_profile(user.id)
+    with SessionLocal() as db:
+        s = AgentSession(user_id=user.id, title="t", llm_profile_id=profile.id, web_search="on")
+        db.add(s)
+        db.commit()
+        sid = s.id
+    calls: list[dict] = []
+    refusal = '{"error":{"message":"This endpoint supports function tools only","type":"invalid_request_error"}}'
+
+    def fake_stream(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            yield {"type": "turn.completed", "status": "failed", "error": refusal, "usage": {"input_tokens": 10, "output_tokens": 0}}
+        else:
+            yield {"type": "turn.completed", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
+
+    monkeypatch.setattr(agent_service, "stream_turn", fake_stream)
+    agent_service.run_turn(SessionLocal, sid, "привет")
+    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(False, "on"), (True, "off")]
+    with SessionLocal() as db:
+        s = db.get(AgentSession, sid)
+        assert s.functions_only and s.last_error is None
+        kinds = [e.kind for e in db.query(AgentEvent).filter(AgentEvent.session_id == sid).order_by(AgentEvent.seq)]
+    assert kinds == ["turn.completed", "turn.notice", "turn.completed"]
+
+    calls.clear()
+    agent_service.run_turn(SessionLocal, sid, "ещё")                     # the next turn starts with plain functions right away
+    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(True, "off")]
+
+    # a gateway that refuses even plain functions: asked once more, never in a loop, and the error says what to do
+    def always_refuse(**kw):
+        calls.append(kw)
+        yield {"type": "turn.completed", "status": "failed", "error": refusal}
+
+    calls.clear()
+    monkeypatch.setattr(agent_service, "stream_turn", always_refuse)
+    agent_service.run_turn(SessionLocal, sid, "и ещё")
+    assert len(calls) == 1
+    with SessionLocal() as db:
+        assert "только обычные функции" in db.get(AgentSession, sid).last_error

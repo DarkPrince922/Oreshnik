@@ -97,9 +97,9 @@ def delete_persona(persona_id: int, user: User = Depends(require_operator), db: 
     db.commit()
 
 
-def pick_for_session(db: Session, user: User, persona_id: int | None, where: str) -> Persona | None:
-    """The persona a new session of «Код»/«Агент» runs with: the one asked for (it must be visible and allowed there), else the user's own
-    default, else none."""
+def pick_for_session(db: Session, user: User, persona_id: int | None, where: str, use_default: bool = False) -> Persona | None:
+    """The persona a new session of «Код»/«Агент» runs with: the one asked for (it must be visible and allowed there). None means none —
+    «без личности» picked on purpose; the user's own default only with `use_default` (the request did not mention a persona at all)."""
     if persona_id is not None:
         persona = db.scalar(select(Persona).where(Persona.id == persona_id, visible(user)))
         if persona is None:
@@ -107,4 +107,6 @@ def pick_for_session(db: Session, user: User, persona_id: int | None, where: str
         if persona.scope not in ("both", where):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Эта личность не для этого раздела")
         return persona
+    if not use_default:
+        return None
     return db.scalar(select(Persona).where(Persona.user_id == user.id, Persona.is_default.is_(True), Persona.scope.in_(("both", where))))

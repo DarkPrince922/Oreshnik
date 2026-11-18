@@ -84,6 +84,8 @@ def test_the_default_persona_is_taken_when_none_is_named_and_scope_is_respected(
     profile = openai_profile(user.id)
     default = make(client, h, name="По умолчанию", is_default=True)
     assert new_session(client, h, profile)["persona_id"] == default["id"]
+    # «— без личности —» picked on purpose is kept: the default does not sneak in
+    assert new_session(client, h, profile, persona_id=None)["persona_id"] is None
     agent_only = make(client, h, name="Только для Агента", scope="agent")
     r = client.post("/api/agent/sessions", json={"llm_profile_id": profile.id, "persona_id": agent_only["id"]}, headers=h)
     assert r.status_code == 422

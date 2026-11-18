@@ -238,6 +238,9 @@ export function buildFeed(events: AgentEvent[], live: Record<string, Obj> = {}):
       case "turn.error":
         put(`e${event.seq}`, { type: "notice", key: `e${event.seq}`, tone: "bad", text: str(p.message) });
         break;
+      case "turn.notice":
+        put(`n${event.seq}`, { type: "notice", key: `n${event.seq}`, tone: "warn", text: str(p.message) });
+        break;
       case "turn.stopped":
         put(`s${event.seq}`, { type: "notice", key: `s${event.seq}`, tone: "warn", text: str(p.message) || "Остановлено" });
         break;

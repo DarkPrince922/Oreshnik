@@ -566,7 +566,7 @@ export interface AgentListenerRange {
 }
 
 /** One stored event: `kind` is "user", "action", "turn.started", "item.completed", "turn.diff", "turn.plan", "approval.requested/resolved",
- * "turn.completed", "thread.reverted", "turn.error"/"turn.stopped" (the panel's own notes). */
+ * "turn.completed", "thread.reverted", "turn.error"/"turn.stopped"/"turn.notice" (the panel's own notes). */
 export interface AgentEvent {
   seq: number;
   kind: string;

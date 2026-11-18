@@ -13,7 +13,7 @@ class AgentSessionCreate(BaseModel):
     llm_model: str | None = Field(default=None, max_length=200)  # one of the profile's models; empty = its default
     # settings of the session (all can be changed later, between messages)
     instructions: str | None = Field(default=None, max_length=20_000)
-    persona_id: int | None = None        # who the agent is; none = the user's own default persona, if any
+    persona_id: int | None = None        # who the agent is; null = none; left out = the user's own default persona, if any
     reasoning_effort: str | None = None
     approval_mode: str = "auto"
     web_search: str = "auto"

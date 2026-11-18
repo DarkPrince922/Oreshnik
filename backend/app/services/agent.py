@@ -73,6 +73,22 @@ def function_tools_only(profile: LLMProfile) -> bool:
     return profile.provider != Provider.openai
 
 
+RETRYABLE_ACTIONS = ("message", "review", "compact", "goal")
+FUNCTIONS_ONLY_NOTE = ("Шлюз модели принимает только обычные функции. Сессия переключена на них (без встроенного веб-поиска Codex "
+                       "и его под-агентов) — повторяю ход.")
+
+
+def refuses_tools(error: str | None) -> bool:
+    """Whether the model's gateway refused the request for offering tools other than plain functions."""
+    return bool(error) and "function tools only" in error.lower()
+
+
+def _cancelled(db_factory: Callable[[], Session], session_id: int) -> bool:
+    with db_factory() as db:
+        session = db.get(AgentSession, session_id)
+        return session is None or session.cancel_requested
+
+
 def normalize_responses(profile: LLMProfile) -> bool:
     """Whether the agent's requests go through agentd's compat proxy, which completes a gateway's incomplete `usage`
     (without it Codex fails to parse the final event and repeats the request). Not for OpenAI's own API."""
@@ -292,6 +308,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         effort, approval_mode = session.reasoning_effort, session.approval_mode or "auto"
         applied_instructions = session.thread_instructions
         web_search = session.web_search or "auto"
+        forced_functions = session.functions_only
         # The goal feature of Codex is on only for a session that uses it: otherwise the model could set itself a goal and work unasked.
         goals = session.goal is not None or action in ("goal", "goal_clear")
         profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
@@ -302,19 +319,37 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             raise AgentError("Профиль LLM удалён: выберите другой")
         base_url, model = endpoint_for(profile, chosen_model)
         api_key = decrypt(profile.api_key_enc)
-        for event in stream_turn(
-            key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key, action=action,
-            function_tools_only=function_tools_only(profile), normalize_responses=normalize_responses(profile),
-            instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
-            review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
-            web_search=web_search, goals=goals, goal_budget=extra.get("goal_budget"),
-        ):
-            error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
+        for attempt in (1, 2):
+            only_functions = forced_functions or function_tools_only(profile)
+            error = None
+            for event in stream_turn(
+                key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key, action=action,
+                function_tools_only=only_functions, normalize_responses=normalize_responses(profile),
+                instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
+                review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
+                web_search="off" if forced_functions else web_search, goals=goals, goal_budget=extra.get("goal_budget"),
+            ):
+                error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
+            # A gateway that takes plain function tools only refuses the turn when Codex also offers it web search or its sub-agents
+            # (the session's web search set to «Включён», «Какие инструменты видит модель» = full, or an OpenAI profile pointed at a
+            # gateway). The session is switched to plain functions for good and the turn is asked again, once.
+            if attempt == 1 and not forced_functions and refuses_tools(error) and action in RETRYABLE_ACTIONS and not _cancelled(db_factory, session_id):
+                forced_functions = True
+                with db_factory() as db:
+                    session = db.get(AgentSession, session_id)
+                    session.functions_only = True
+                    thread_id, applied_instructions = session.thread_id, session.thread_instructions  # the first try may have begun the thread
+                    append_event(db, session_id, "turn.notice", {"message": FUNCTIONS_ONLY_NOTE})
+                    db.commit()
+                continue
+            break
     except AgentError as exc:
         error = str(exc)
     except Exception as exc:  # a bug must not leave the session "running" forever
         log.exception("agent turn of session %s crashed", session_id)
         error = f"Внутренняя ошибка панели: {exc.__class__.__name__}"
+    if error and refuses_tools(error):
+        error += " — шлюз модели принимает только обычные функции. Выключите веб-поиск сессии («Настройки сессии» → «Веб-поиск»: «Выключен»)."
 
     with db_factory() as db:
         live_delete(db, session_id)

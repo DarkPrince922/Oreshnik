@@ -54,6 +54,8 @@ class AgentSession(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)  # how hard the model thinks; None = the model's default
     approval_mode: Mapped[str] = mapped_column(String(8), default="auto")             # auto: no questions · ask: approve commands and file changes
     web_search: Mapped[str] = mapped_column(String(8), default="auto")               # Codex's own web search: auto | on | off
+    # The model's gateway refused Codex's other tool kinds ("function tools only") once: from then on it is offered plain functions only.
+    functions_only: Mapped[bool] = mapped_column(default=False)
     # The goal of the session as Codex last reported it ({objective, status, token_budget, tokens_used, seconds_used}); None = no goal.
     goal: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # How full the model's context was after the last turn, and what the session has spent in total (kept across restarts of the thread).
