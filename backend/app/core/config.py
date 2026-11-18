@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # update notice is of no use to it. Turn either one on only if you want it.
     strix_telemetry: bool = False
     strix_update_check: bool = False
+    # A short HTTPQL cheat sheet sent to the scan's agents with the instruction (app/engine/hints.py): models often write filters
+    # for `list_requests` that Caido refuses («Invalid HTTPQL query»).
+    strix_httpql_hint: bool = True
     # How hard each model call thinks before answering: none|minimal|low|medium|high|xhigh|max. "high" is Strix's own
     # default (unset is the same as "high"), so the default here changes nothing. Lower trades thoroughness for speed
     # and cost; only matters for a model LiteLLM's own catalog marks as reasoning-capable — for a model it doesn't

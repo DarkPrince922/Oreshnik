@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal
 from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
+from app.engine.hints import scan_instruction
 from app.engine.retry import run_with_retries
 from app.models.llm_profile import LLMProfile
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
@@ -397,7 +398,7 @@ def scan_run(scan_id: int) -> str:
             scan_id=scan_id,
             targets=snap.targets,
             scan_mode=snap.scan_mode,
-            instruction=snap.instruction,
+            instruction=scan_instruction(snap.instruction, resumed=snap.resume_run is not None),
             max_budget=snap.max_budget,
             work_dir=work_dir,
             run_label=run_label(scan_id),

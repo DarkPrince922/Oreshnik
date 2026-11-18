@@ -17,6 +17,8 @@ os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 # The tests about the queue and the settings page were written against these two baselines; the shipped defaults are higher.
 os.environ["SCAN_CONCURRENCY"] = "2"
 os.environ["MAX_ACTIVE_SCANS_PER_USER"] = "3"
+# The fake Strix (tests/fake_strix.py) reads the instruction as its script; the panel's HTTPQL note has tests of its own (test_hints.py).
+os.environ["STRIX_HTTPQL_HINT"] = "false"
 os.environ["JWT_SECRET"] = "t" * 48
 os.environ["ADMIN_EMAIL"] = "root@example.com"
 os.environ["ADMIN_PASSWORD"] = "bootstrap-pass"
