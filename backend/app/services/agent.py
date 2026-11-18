@@ -64,13 +64,12 @@ def endpoint_for(profile: LLMProfile, model: str | None = None) -> tuple[str, st
 
 
 def function_tools_only(profile: LLMProfile) -> bool:
-    """Whether the agent should offer its model plain function tools only. A gateway (a `custom` profile, or Grok's own API, which
-    is not OpenAI's) often refuses Codex's other tool types; OpenAI's own API takes them all. `AGENT_TOOLS` overrides this."""
-    if settings.agent_tools == "functions":
-        return True
-    if settings.agent_tools == "full":
-        return False
-    return profile.provider != Provider.openai
+    """Whether to offer the model plain function tools only from the start. The default is No: send the full Codex tool set (sub-agents,
+    web search, …) to every profile, exactly like the stock Codex CLI — many gateways (DeepSeek and others) handle it. A gateway that
+    does not answers "This endpoint supports function tools only", and `run_turn` then downgrades that one session for good and asks
+    again. `AGENT_TOOLS` forces it: "functions" = always plain functions (a gateway known not to take the rest), "full" = always the
+    full set with no auto-downgrade."""
+    return settings.agent_tools == "functions"
 
 
 RETRYABLE_ACTIONS = ("message", "review", "compact", "goal")
@@ -384,7 +383,8 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             # A gateway that takes plain function tools only refuses the turn when Codex also offers it web search or its sub-agents
             # (the session's web search set to «Включён», «Какие инструменты видит модель» = full, or an OpenAI profile pointed at a
             # gateway). The session is switched to plain functions for good and the turn is asked again, once.
-            if attempt == 1 and not forced_functions and refused and action in RETRYABLE_ACTIONS and not _cancelled(db_factory, session_id):
+            # «full» means the admin vouches the gateway takes the full tool set — do not second-guess it with a downgrade.
+            if attempt == 1 and not forced_functions and refused and settings.agent_tools != "full" and action in RETRYABLE_ACTIONS and not _cancelled(db_factory, session_id):
                 forced_functions = True
                 with db_factory() as db:
                     session = db.get(AgentSession, session_id)

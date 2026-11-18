@@ -777,10 +777,12 @@ def provider_arg(argv: list[str]) -> str:
     return next(a for a in argv if a.startswith("model_providers.oreshnik="))
 
 
-def test_a_gateway_gets_function_tools_only_and_goes_through_the_proxy(client, wired):
+def test_a_gateway_gets_the_full_tool_set_by_default_but_still_goes_through_the_proxy(client, wired):
+    # By default every profile is offered the full Codex tool set, like the stock CLI (a gateway that refuses is downgraded per session
+    # at run time). A gateway still goes through the usage-fixing proxy.
     user, h = op_user(client)
     argv = report(client, h, new_session(client, h, custom_gateway(user.id))["id"])["argv"]
-    assert has_run(argv, FUNCTION_ONLY)
+    assert "multi_agent" not in argv and 'web_search="disabled"' not in argv
     assert f'base_url = "http://127.0.0.1:{wired.port}/compat/' in provider_arg(argv) and "gw.internal" not in provider_arg(argv)
 
 
