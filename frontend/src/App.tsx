@@ -15,6 +15,7 @@ import AgentServerPage from "./pages/AgentServer";
 import Settings from "./pages/Settings";
 import Ops from "./pages/Ops";
 import Personas from "./pages/Personas";
+import Skills from "./pages/Skills";
 import Runners from "./pages/Runners";
 import Schedules from "./pages/Schedules";
 import ScanDetail from "./pages/ScanDetail";
@@ -76,6 +77,14 @@ export default function App() {
               element={
                 <ProtectedRoute roles={["admin", "operator"]}>
                   <Agent />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="skills"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Skills />
                 </ProtectedRoute>
               }
             />

@@ -2,6 +2,7 @@ from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionSt
 from app.models.app_setting import AppSetting
 from app.models.llm_profile import LLMProfile, Provider
 from app.models.persona import Persona
+from app.models.skill import Skill
 from app.models.agent_server import AgentServer
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
@@ -18,6 +19,7 @@ from app.models.user import Role, User
 
 __all__ = [
     "Persona",
+    "Skill",
     "AgentServer",
     "AppSetting",
     "AgentSession",

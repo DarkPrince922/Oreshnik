@@ -751,6 +751,51 @@ export const createPersona = async (body: PersonaInput) => (await api.post<Perso
 export const updatePersona = async (id: number, body: Partial<PersonaInput>) => (await api.patch<Persona>(`/api/personas/${id}`, body)).data;
 export const deletePersona = (id: number) => api.delete(`/api/personas/${id}`);
 
+// ── Навыки ───────────────────────────────────────────────────────────────
+
+export type SkillScope = PersonaScope;
+/** An Agent Skill: SKILL.md (name, description, instructions) and the files next to it — the open format of Codex, OpenHands, Claude Code. */
+export interface Skill {
+  id: number;
+  name: string;
+  description: string;
+  skill_md: string;
+  files: { path: string; size: number }[];
+  scope: SkillScope;
+  shared: boolean;
+  enabled: boolean;
+  mine: boolean;
+  editable: boolean;
+  /** A shared skill the user's own one of the same name replaces. */
+  overridden: boolean;
+  /** What the panel repaired in SKILL.md on this save. */
+  notes: string[];
+  created_at: string;
+  updated_at: string;
+}
+export interface SkillInput {
+  skill_md: string;
+  scope: SkillScope;
+  enabled: boolean;
+  shared?: boolean;
+}
+export const listSkills = async () => (await api.get<Skill[]>("/api/skills")).data;
+export const createSkill = async (body: SkillInput) => (await api.post<Skill>("/api/skills", body)).data;
+export const updateSkill = async (id: number, body: Partial<SkillInput>) => (await api.patch<Skill>(`/api/skills/${id}`, body)).data;
+export const deleteSkill = (id: number) => api.delete(`/api/skills/${id}`);
+export const importSkills = async (file: File, shared = false) => {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("shared", String(shared));
+  return (await api.post<{ skills: Skill[] }>("/api/skills/import", form, { timeout: 300_000 })).data.skills;
+};
+export const putSkillFile = async (id: number, path: string, file: File) =>
+  (await api.put<Skill>(`/api/skills/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
+export const deleteSkillFile = async (id: number, path: string) => (await api.delete<Skill>(`/api/skills/${id}/files`, { params: { path } })).data;
+export const readSkillFile = async (id: number, path: string) =>
+  (await api.get<{ path: string; size: number; text: string | null }>(`/api/skills/${id}/files/content`, { params: { path } })).data;
+export const exportSkill = (id: number, name: string) => saveBlob(`/api/skills/${id}/export`, {}, `${name}.zip`);
+
 // ── Агент (OpenHands на своём сервере) ───────────────────────────────────
 
 export type AgentServerStatus = "new" | "offline" | "installing" | "online" | "error";

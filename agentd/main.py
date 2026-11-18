@@ -85,6 +85,15 @@ def require_token(authorization: str = Header(default="")) -> None:
 
 # ── request bodies ───────────────────────────────────────────────────────────────────────────
 
+_SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+class SkillIn(BaseModel):
+    """One Agent Skill from the panel: its folder name and its files (SKILL.md among them), base64."""
+    name: str = Field(max_length=64, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    files: dict[str, str] = Field(max_length=201)
+
+
 class Turn(BaseModel):
     session_key: str
     action: Literal["message", "compact", "shell", "review", "revert", "goal", "goal_clear"] = "message"
@@ -115,6 +124,10 @@ class Turn(BaseModel):
     # has a budget, every self-started turn is read by the panel, and a goal is paused whenever nobody is reading.
     goals: bool = False
     goal_budget: int | None = Field(default=None, ge=1000, le=50_000_000)
+    # The user's Agent Skills, written to ~/.agents/skills where Codex finds them; a new digest restarts the process (Codex reads skills
+    # when it starts).
+    skills: list[SkillIn] = Field(default_factory=list, max_length=500)
+    skills_digest: str = Field(default="", max_length=64)
 
     @field_validator("effort")
     @classmethod
@@ -240,6 +253,51 @@ def prepare_dirs(session: Session) -> None:
     (session.home / ".codex").mkdir(parents=True, exist_ok=True)  # Codex refuses to start when CODEX_HOME does not exist
 
 
+SKILLS_MANIFEST = ".oreshnik-skills.json"
+
+
+def _skill_file(root: Path, rel: str) -> Path:
+    """Where a skill's file goes, never outside its folder."""
+    parts = rel.replace("\\", "/").split("/")
+    if not rel or rel.startswith("/") or any(p in ("", ".", "..") for p in parts) or "\x00" in rel or len(rel) > 300:
+        raise HTTPException(422, "bad skill file path")
+    return root.joinpath(*parts)
+
+
+def sync_skills(session: Session, turn: Turn) -> None:
+    """The panel's skills in ~/.agents/skills (checked with the real Codex: it loads `~/.agents/skills/<name>/SKILL.md`). Only the
+    folders the panel put there are replaced or removed; a skill the agent made itself next to them is left alone."""
+    base = session.home / ".agents" / "skills"
+    manifest = base / SKILLS_MANIFEST
+    try:
+        before = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        before = {}
+    if before.get("digest", "") == turn.skills_digest and (turn.skills_digest or not before.get("names")):
+        return
+    import base64
+
+    for name in before.get("names", []):
+        if isinstance(name, str) and _SKILL_NAME.match(name):
+            shutil.rmtree(base / name, ignore_errors=True)
+    names = []
+    for skill in turn.skills:
+        folder = base / skill.name
+        shutil.rmtree(folder, ignore_errors=True)
+        for rel, content in skill.files.items():
+            target = _skill_file(folder, rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.write_bytes(base64.b64decode(content, validate=True))
+            except ValueError:
+                raise HTTPException(422, "bad skill file content")
+            if target.suffix in (".sh", ".py") or rel.startswith("scripts/"):
+                target.chmod(0o755)
+        names.append(skill.name)
+    base.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"digest": turn.skills_digest, "names": names}))
+
+
 async def init_git(session: Session) -> None:
     """A git repository in the working directory: Codex shows a turn's diff and reviews changes through it."""
     if (session.workdir / ".git").exists():
@@ -292,7 +350,8 @@ def spawn_argv(turn: Turn, base_url: str) -> list[str]:
 def fingerprint(turn: Turn) -> str:
     """What cannot change under a running process: the endpoint, the key and the tool set. A change restarts it. (Not the system prompt:
     a thread that exists keeps the one it was started with, however often the process is restarted.)"""
-    raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses, turn.web_search, turn.goals])
+    raw = json.dumps([turn.base_url, turn.api_key, turn.function_tools_only, turn.normalize_responses, turn.web_search, turn.goals,
+                      turn.skills_digest])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -323,6 +382,7 @@ async def _make_room() -> None:
 async def ensure_server(session: Session, turn: Turn) -> None:
     """The session's app-server process, running and attached to its thread (a new one when the settings that need a restart changed)."""
     prepare_dirs(session)
+    sync_skills(session, turn)
     await init_git(session)
     fp = fingerprint(turn)
     if session.server is not None and session.server.alive and session.fingerprint == fp:

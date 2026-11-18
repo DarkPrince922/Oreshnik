@@ -89,6 +89,16 @@ def _cancelled(db_factory: Callable[[], Session], session_id: int) -> bool:
         return session is None or session.cancel_requested
 
 
+def skills_payload(rows) -> tuple[list[dict], str]:
+    """The user's skills as a turn hands them to agentd, or AgentError when together they are too big to send with every turn."""
+    from app.services import skills as skill_svc
+
+    out, digest = skill_svc.payload(rows)
+    if sum(len(c) for s in out for c in s["files"].values()) * 3 // 4 > skill_svc.MAX_SENT_BYTES:
+        raise AgentError(f"Включённые навыки вместе больше {skill_svc.MAX_SENT_BYTES // 1_000_000} МБ: выключите лишние в разделе «Навыки»", 422)
+    return out, digest
+
+
 def normalize_responses(profile: LLMProfile) -> bool:
     """Whether the agent's requests go through agentd's compat proxy, which completes a gateway's incomplete `usage`
     (without it Codex fails to parse the final event and repeats the request). Not for OpenAI's own API."""
@@ -223,7 +233,7 @@ def stream_turn(
     *, key: str, prompt: str, thread_id: str | None, base_url: str, model: str, api_key: str, function_tools_only: bool = False,
     normalize_responses: bool = False, action: str = "message", instructions: str | None = None, effort: str | None = None,
     approval_mode: str = "auto", review_target: dict | None = None, revert_before: str | None = None, applied_instructions: str | None = None,
-    web_search: str = "auto", goals: bool = False, goal_budget: int | None = None,
+    web_search: str = "auto", goals: bool = False, goal_budget: int | None = None, skills: list[dict] | None = None, skills_digest: str = "",
 ) -> Iterator[dict]:
     """The agent's events for one action, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
@@ -233,6 +243,7 @@ def stream_turn(
         "instructions": instructions, "applied_instructions": applied_instructions, "effort": effort, "approval_mode": approval_mode,
         "review_target": review_target, "revert_before": revert_before,
         "web_search": web_search, "goals": goals, "goal_budget": goal_budget,
+        "skills": skills or [], "skills_digest": skills_digest,
     }
     timeout = httpx.Timeout(60.0, read=settings.agent_turn_timeout_seconds + 60.0)
     try:
@@ -312,11 +323,20 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         # The goal feature of Codex is on only for a session that uses it: otherwise the model could set itself a goal and work unasked.
         goals = session.goal is not None or action in ("goal", "goal_clear")
         profile = db.get(LLMProfile, session.llm_profile_id) if session.llm_profile_id else None
+        from app.api.skills import for_agent
+
+        skills_error: AgentError | None = None
+        try:
+            skills, skills_digest = skills_payload(for_agent(db, session.user_id, "code"))
+        except AgentError as exc:
+            skills, skills_digest, skills_error = [], "", exc
 
     error: str | None = None
     try:
         if profile is None:
             raise AgentError("Профиль LLM удалён: выберите другой")
+        if skills_error is not None:
+            raise skills_error
         base_url, model = endpoint_for(profile, chosen_model)
         api_key = decrypt(profile.api_key_enc)
         for attempt in (1, 2):
@@ -328,6 +348,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
                 instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
                 review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
                 web_search="off" if forced_functions else web_search, goals=goals, goal_budget=extra.get("goal_budget"),
+                skills=skills, skills_digest=skills_digest,
             ):
                 error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
             # A gateway that takes plain function tools only refuses the turn when Codex also offers it web search or its sub-agents

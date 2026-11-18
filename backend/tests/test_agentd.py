@@ -862,3 +862,36 @@ def test_goals_are_refused_unless_the_session_uses_them_and_a_new_goal_needs_a_b
     assert agentd.call("POST", "/turn", json=agentd.body("цель", action="goal", goals=True, goal_budget=10)).status_code == 422  # absurd budget
     assert agentd.call("POST", "/turn", json=agentd.body("", action="goal", goals=True)).status_code == 502                   # nothing to resume
     assert agentd.report()["argv"][-2:] == ["--disable", "goals"] and agentd.report(goals=True)["argv"][-1] != "goals"
+
+
+def _skill(name: str, text: str, **extra: str) -> dict:
+    import base64
+
+    files = {"SKILL.md": text, **extra}
+    return {"name": name, "files": {p: base64.b64encode(c.encode()).decode() for p, c in files.items()}}
+
+
+def test_skills_land_in_agents_skills_and_a_change_restarts_codex_on_the_same_thread(agentd):
+    skills_dir = Path(agentd.module.DATA_DIR) / "k1" / ".agents" / "skills"
+    one = _skill("recon", "---\nname: recon\ndescription: d\n---\nx", **{"scripts/run.sh": "echo hi"})
+    first = agentd.report(skills=[one], skills_digest="d1")
+    assert (skills_dir / "recon" / "SKILL.md").read_text().startswith("---\nname: recon")
+    assert (skills_dir / "recon" / "scripts" / "run.sh").read_text() == "echo hi"
+    (skills_dir / "own-made").mkdir()                       # a skill the agent made itself
+    same = agentd.report(skills=[one], skills_digest="d1")
+    assert same["pid"] == first["pid"]                      # nothing changed: the same process
+    other = _skill("jwt", "---\nname: jwt\ndescription: d\n---\ny")
+    changed = agentd.report(skills=[other], skills_digest="d2")
+    assert changed["pid"] != first["pid"] and changed["seen"]["method"] == "thread/resume"
+    assert not (skills_dir / "recon").exists() and (skills_dir / "jwt" / "SKILL.md").exists() and (skills_dir / "own-made").is_dir()
+    agentd.report(skills=[], skills_digest="")
+    assert not (skills_dir / "jwt").exists() and (skills_dir / "own-made").is_dir()
+
+
+def test_a_skill_file_cannot_leave_its_folder(agentd):
+    for bad in ("../escape.txt", "/etc/x", "a/../../x"):
+        body = agentd.body("hello", skills=[_skill("s", "---\nname: s\ndescription: d\n---\n", **{bad: "x"})], skills_digest="z")
+        assert agentd.call("POST", "/turn", json=body).status_code == 422
+    assert not (Path(agentd.module.DATA_DIR) / "k1" / "escape.txt").exists()
+    body = agentd.body("hello", skills=[{"name": "../up", "files": {}}], skills_digest="z")
+    assert agentd.call("POST", "/turn", json=body).status_code == 422
