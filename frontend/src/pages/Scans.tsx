@@ -10,6 +10,7 @@ import { useAuth } from "../lib/auth";
 import { continueKind } from "../lib/continueScan";
 import { formatCost, formatDuration, scanDuration, targetsLabel } from "../lib/format";
 import { pageRange, scansSummary, sections, SEVERITY_LETTER, tileCount, TILES, type Counts, type ScanFilter } from "../lib/scansList";
+import { confirm } from "../lib/confirm";
 
 const PAGE = 15;
 const LIVE_LIMIT = 30;
@@ -261,7 +262,7 @@ export default function Scans() {
   const showOwner = splitByOwner ? owner === "others" : !hasRole("operator");
   const canModify = (scan: Scan) => hasRole("admin") || (hasRole("operator") && scan.user_id === user?.id);
   const stop = async (scan: Scan) => {
-    if (!window.confirm(scan.status === "queued" ? `Отменить скан #${scan.id}?` : `Остановить скан #${scan.id}? Уже найденное сохранится.`)) return;
+    if (!await confirm(scan.status === "queued" ? `Отменить скан #${scan.id}?` : `Остановить скан #${scan.id}? Уже найденное сохранится.`)) return;
     try {
       await cancelScan(scan.id);
       await load();

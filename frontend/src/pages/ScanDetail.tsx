@@ -28,6 +28,7 @@ import { continueKind } from "../lib/continueScan";
 import { formatCost, formatDateTime, formatDuration, formatTokens, scanDuration, timesRu } from "../lib/format";
 import { useScanActivity } from "../lib/useScanActivity";
 import { useScanStream } from "../lib/useScanStream";
+import { confirm } from "../lib/confirm";
 
 // The markdown stack is only needed for the report tab, so it is loaded on demand.
 const SafeMarkdown = lazy(() => import("../components/Markdown"));
@@ -176,14 +177,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   };
 
   const onCancel = () =>
-    window.confirm("Остановить скан? Уже найденное сохранится.") &&
-    run("cancel", async () => setScan(await cancelScan(scanId)));
+    void confirm("Остановить скан? Уже найденное сохранится.").then((ok) => void (ok && run("cancel", async () => setScan(await cancelScan(scanId)))));
   const onDelete = () =>
-    window.confirm("Удалить скан вместе с находками и логом? Это необратимо.") &&
-    run("delete", async () => {
+    void confirm("Удалить скан вместе с находками и логом? Это необратимо.").then((ok) => void (ok && run("delete", async () => {
       await deleteScan(scanId);
       navigate("/scans", { replace: true });
-    });
+    })));
 
   if (missing) {
     return (

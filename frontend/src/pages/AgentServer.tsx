@@ -7,6 +7,7 @@ import {
   trustAgentServerKey, type AgentServer, type AgentServerInput,
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { confirm } from "../lib/confirm";
 
 const TONE = { online: "ok", installing: "accent", new: "warn", offline: "warn", error: "bad" } as const;
 const LABEL = { online: "работает", installing: "идёт установка", new: "нужно подтвердить ключ", offline: "не готов", error: "ошибка" } as const;
@@ -199,11 +200,11 @@ export default function AgentServerPage() {
                 {server.openhands_version ? "Переустановить" : "Установить OpenHands"}
               </Button>
               {server.host_key_fingerprint && (
-                <Button disabled={server.installing} onClick={() => window.confirm("Сбросить подтверждённый ключ сервера? Понадобится подтвердить его заново.") && act("forget", forgetAgentServerKey)}>
+                <Button disabled={server.installing} onClick={() => void confirm("Сбросить подтверждённый ключ сервера? Понадобится подтвердить его заново.").then((ok) => void (ok && act("forget", forgetAgentServerKey)))}>
                   Сбросить ключ
                 </Button>
               )}
-              <Button variant="danger" disabled={server.installing} onClick={() => window.confirm("Убрать сервер из панели? На самом сервере ничего не удаляется.") && act("delete", async () => { await deleteAgentServer(); setServer(null); })}>
+              <Button variant="danger" disabled={server.installing} onClick={() => void confirm("Убрать сервер из панели? На самом сервере ничего не удаляется.").then((ok) => void (ok && act("delete", async () => { await deleteAgentServer(); setServer(null); })))}>
                 Убрать
               </Button>
             </div>

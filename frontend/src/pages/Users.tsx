@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Badge, Button, Card, ErrorNote, Field, Modal, PageHeader, Spinner, rise, stagger } from "../components/ui";
 import { createUser, deleteUser, errorMessage, listUsers, updateUser, type Role, type User } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { confirm } from "../lib/confirm";
 
 const ROLES: { value: Role; label: string }[] = [
   { value: "admin", label: "admin" },
@@ -124,7 +125,7 @@ export default function Users() {
                       variant="danger"
                       className="!px-3 !py-1.5 text-xs"
                       disabled={self || pending === u.id}
-                      onClick={() => window.confirm(`Удалить ${u.email}? Его LLM-профили тоже будут удалены.`) && mutate(u.id, () => deleteUser(u.id))}
+                      onClick={() => void confirm(`Удалить ${u.email}? Его LLM-профили тоже будут удалены.`).then((ok) => void (ok && mutate(u.id, () => deleteUser(u.id))))}
                     >
                       ✕
                     </Button>

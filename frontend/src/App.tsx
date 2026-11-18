@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import AnimatedBackground from "./components/AnimatedBackground";
+import ConfirmHost from "./components/ConfirmHost";
 import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { AuthProvider } from "./lib/auth";
@@ -26,6 +27,7 @@ export default function App() {
     <AuthProvider>
       <div className="relative min-h-screen">
         <AnimatedBackground />
+        <ConfirmHost />
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route

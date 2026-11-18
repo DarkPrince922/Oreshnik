@@ -9,6 +9,7 @@ import {
 import { useAuth } from "../lib/auth";
 import { SCOPE_LABEL } from "../lib/personas";
 import { SKILL_TEMPLATES, composeSkillMd, splitSkillMd, type SkillFields } from "../lib/workshop";
+import { confirm } from "../lib/confirm";
 
 type Mode = "fields" | "raw";
 interface Draft {
@@ -170,8 +171,8 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
     onChanged?.();
   });
 
-  const remove = (target: Skill | null = current) => {
-    if (!target || !window.confirm(`Удалить навык ${target.name}? Агенты перестанут его видеть со следующего сообщения.`)) return;
+  const remove = async (target: Skill | null = current) => {
+    if (!target || !(await confirm(`Удалить навык ${target.name}? Агенты перестанут его видеть со следующего сообщения.`))) return;
     void run("delete", async () => {
       await deleteSkill(target.id);
       const rows = await load();
@@ -351,7 +352,7 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
                           </button>
                           <span className="shrink-0 text-[11px] text-slate-500">{size(f.size)}</span>
                           {!readOnly && (
-                            <button type="button" className="shrink-0 text-[11px] text-signal-bad hover:underline" onClick={() => window.confirm(`Удалить ${f.path}?`) && void run("rm", async () => { await deleteSkillFile(current.id, f.path); await reloadTo(current.id); })}>
+                            <button type="button" className="shrink-0 text-[11px] text-signal-bad hover:underline" onClick={() => void confirm(`Удалить ${f.path}?`).then((ok) => void (ok && run("rm", async () => { await deleteSkillFile(current.id, f.path); await reloadTo(current.id); })))}>
                               удалить
                             </button>
                           )}

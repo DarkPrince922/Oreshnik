@@ -9,6 +9,7 @@ import { useAuth } from "../lib/auth";
 import { MCP_PRESETS, type McpPreset } from "../lib/mcpCatalog";
 import { SCOPE_LABEL } from "../lib/personas";
 import { mcpHealth } from "../lib/workshop";
+import { confirm } from "../lib/confirm";
 
 const EMPTY: McpInput = {
   name: "", description: "", transport: "command", command: "", url: "", env: [], headers: [], bearer_token: null,
@@ -399,8 +400,8 @@ export default function Mcp({ embedded = false, onChanged }: { embedded?: boolea
     });
   };
 
-  const remove = () => {
-    if (!current || !window.confirm(`Удалить MCP-сервер ${current.name}?`)) return;
+  const remove = async () => {
+    if (!current || !await confirm(`Удалить MCP-сервер ${current.name}?`)) return;
     void run("delete", async () => {
       await deleteMcp(current.id);
       setOpenId(null);

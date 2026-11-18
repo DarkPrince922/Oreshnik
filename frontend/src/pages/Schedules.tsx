@@ -26,6 +26,7 @@ import { defaultChoice, modelToSend, resolveChoice, type Choice } from "../lib/m
 import { useAuth } from "../lib/auth";
 import { CRON_PRESETS, browserZone, budgetRequired, describeCron, formatWhen, normalizeCronInput, relativeIn, zoneOptions } from "../lib/schedule";
 import { parseTargets } from "../lib/targets";
+import { confirm } from "../lib/confirm";
 
 const MODES: ScanMode[] = ["quick", "standard", "deep"];
 const KIND_LABEL = { mock: "симуляция", local: "этот сервер", ssh: "SSH" } as const;
@@ -424,17 +425,17 @@ export default function Schedules() {
   };
 
   const onToggle = (s: Schedule, next: boolean) => act(s.id, async () => { await updateSchedule(s.id, { enabled: next }); await load(); });
-  const onRun = (s: Schedule) => {
+  const onRun = async (s: Schedule) => {
     const paid = s.runner_kind !== null && s.runner_kind !== "mock";
     const text = paid ? `Запустить «${s.name}» сейчас? Скан использует LLM и потратит токены.` : `Запустить «${s.name}» сейчас?`;
-    if (!window.confirm(text)) return;
+    if (!await confirm(text)) return;
     void act(s.id, async () => {
       const { scan_id } = await runSchedule(s.id);
       navigate(`/scans/${scan_id}`);
     });
   };
-  const onDelete = (s: Schedule) => {
-    if (!window.confirm(`Удалить расписание «${s.name}»? Уже запущенные им сканы останутся.`)) return;
+  const onDelete = async (s: Schedule) => {
+    if (!await confirm(`Удалить расписание «${s.name}»? Уже запущенные им сканы останутся.`)) return;
     void act(s.id, async () => { await deleteSchedule(s.id); await load(); });
   };
 

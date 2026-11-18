@@ -5,6 +5,7 @@ import { Button, Card, EmptyState, ErrorNote, Field, PageHeader, Spinner } from 
 import { createPersona, deletePersona, errorMessage, listPersonas, listSkills, updatePersona, type Persona, type PersonaInput, type PersonaScope, type Skill } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { SCOPE_LABEL, personaInitial } from "../lib/personas";
+import { confirm } from "../lib/confirm";
 
 const EMPTY: PersonaInput = { name: "", description: "", instructions: "", scope: "both", shared: false, is_default: false, skills: null };
 
@@ -179,7 +180,7 @@ export default function Personas({ embedded = false, onChanged }: { embedded?: b
   };
 
   const remove = async () => {
-    if (!current || !window.confirm(`Удалить личность «${current.name}»? Сессии с ней продолжат работать без неё.`)) return;
+    if (!current || !await confirm(`Удалить личность «${current.name}»? Сессии с ней продолжат работать без неё.`)) return;
     setBusy(true);
     try {
       await deletePersona(current.id);

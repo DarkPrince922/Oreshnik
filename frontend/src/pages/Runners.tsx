@@ -20,6 +20,7 @@ import {
 import { useAuth } from "../lib/auth";
 import { authLabel, groupFingerprint, hasLogin, shortFingerprint, sshActions } from "../lib/hostKey";
 import { MAX_SCANS_PER_USER_CAP, MAX_TARGETS_CAP, defaultTargetsField, limitsLine, parseLimit } from "../lib/runnerLimits";
+import { confirm } from "../lib/confirm";
 
 const KIND_LABEL: Record<RunnerKind, string> = { mock: "Mock", local: "Локальный", ssh: "SSH" };
 const STATUS: Record<RunnerStatus, { label: string; tone: "ok" | "warn" | "bad" | "muted" }> = {
@@ -272,7 +273,7 @@ export default function Runners() {
 
   const replace = (updated: Runner) => setRunners((list) => list?.map((x) => (x.id === updated.id ? updated : x)) ?? null);
   const forget = async (r: Runner) => {
-    if (!window.confirm(`Сбросить подтверждённый ключ хоста «${r.name}»? Следующая проверка покажет новый отпечаток для подтверждения.`)) return;
+    if (!await confirm(`Сбросить подтверждённый ключ хоста «${r.name}»? Следующая проверка покажет новый отпечаток для подтверждения.`)) return;
     setActing(r.id);
     try {
       replace(await forgetHostKey(r.id));
@@ -366,7 +367,7 @@ export default function Runners() {
   };
 
   const remove = async (r: Runner) => {
-    if (!window.confirm(`Удалить раннер «${r.name}»?`)) return;
+    if (!await confirm(`Удалить раннер «${r.name}»?`)) return;
     setDeleting(r.id);
     try {
       await deleteRunner(r.id);

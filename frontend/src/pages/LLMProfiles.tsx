@@ -17,6 +17,7 @@ import {
   type ProviderPreset,
 } from "../lib/api";
 import { canFetchModels as computeCanFetchModels, mergeModelOptions, modelHint } from "../lib/llmProfile";
+import { confirm } from "../lib/confirm";
 
 interface Form {
   name: string;
@@ -156,7 +157,7 @@ export default function LLMProfiles() {
   };
 
   const remove = async (p: LLMProfile) => {
-    if (!window.confirm(`Удалить профиль «${p.name}»?`)) return;
+    if (!await confirm(`Удалить профиль «${p.name}»?`)) return;
     setDeleting(p.id);
     try {
       await deleteProfile(p.id);

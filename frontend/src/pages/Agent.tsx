@@ -40,6 +40,7 @@ import { useAgentStream } from "../lib/useAgentStream";
 import PersonaField from "../components/agent/PersonaField";
 import { defaultPersona } from "../lib/personas";
 import { effectiveMcp, insertSkill, matchSkills, mcpHealth, skillMention, skillsForPersona } from "../lib/workshop";
+import { confirm } from "../lib/confirm";
 
 const chip = "rounded-md border border-white/10 px-2 py-0.5 text-slate-400";
 const WEB_SEARCH: Record<string, string> = { auto: "авто", on: "включён", off: "выключен" };
@@ -526,7 +527,7 @@ export default function Agent() {
   };
 
   const remove = async (s: AgentSession) => {
-    if (!window.confirm(`Удалить сессию «${s.title}» вместе с её файлами в контейнере агента?`)) return;
+    if (!await confirm(`Удалить сессию «${s.title}» вместе с её файлами в контейнере агента?`)) return;
     try {
       await deleteAgentSession(s.id);
       await refresh();
