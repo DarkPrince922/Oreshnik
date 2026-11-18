@@ -83,6 +83,21 @@ def refuses_tools(error: str | None) -> bool:
     return bool(error) and "function tools only" in error.lower()
 
 
+def event_refuses_tools(event: dict) -> bool:
+    """Whether this stream event is the gateway's "function tools only" refusal. It surfaces as a feed error item (Codex retries it
+    on its own and then ends the turn with a generic "stream disconnected", which carries no such text), as agentd's own error, or on
+    the failed turn."""
+    etype = event.get("type")
+    if etype == "item.completed":
+        item = event.get("item") or {}
+        return item.get("type") == "error" and refuses_tools(str(item.get("message") or ""))
+    if etype == "turn.completed":
+        return refuses_tools(str(event.get("error") or ""))
+    if etype == "agentd.error":
+        return refuses_tools(str(event.get("message") or ""))
+    return False
+
+
 def _cancelled(db_factory: Callable[[], Session], session_id: int) -> bool:
     with db_factory() as db:
         session = db.get(AgentSession, session_id)
@@ -341,6 +356,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             skills, skills_digest, mcp_servers, skills_error = [], "", [], exc
 
     error: str | None = None
+    refused = False
     try:
         if profile is None:
             raise AgentError("Профиль LLM удалён: выберите другой")
@@ -351,6 +367,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         for attempt in (1, 2):
             only_functions = forced_functions or function_tools_only(profile)
             error = None
+            refused = False
             for event in stream_turn(
                 key=key, prompt=prompt, thread_id=thread_id, base_url=base_url, model=model, api_key=api_key, action=action,
                 function_tools_only=only_functions, normalize_responses=normalize_responses(profile),
@@ -359,11 +376,15 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
                 web_search="off" if forced_functions else web_search, goals=goals, goal_budget=extra.get("goal_budget"),
                 skills=skills, skills_digest=skills_digest, mcp_servers=mcp_servers,
             ):
+                # The gateway's "function tools only" refusal arrives as a feed error item (Codex retries it internally and then fails
+                # the turn with a different, generic message), so it has to be caught on the event, not only on the final turn error.
+                refused = refused or event_refuses_tools(event)
                 error = _handle_event(db_factory, session_id, redact(event, api_key), error, extra)
+            refused = refused or refuses_tools(error)
             # A gateway that takes plain function tools only refuses the turn when Codex also offers it web search or its sub-agents
             # (the session's web search set to «Включён», «Какие инструменты видит модель» = full, or an OpenAI profile pointed at a
             # gateway). The session is switched to plain functions for good and the turn is asked again, once.
-            if attempt == 1 and not forced_functions and refuses_tools(error) and action in RETRYABLE_ACTIONS and not _cancelled(db_factory, session_id):
+            if attempt == 1 and not forced_functions and refused and action in RETRYABLE_ACTIONS and not _cancelled(db_factory, session_id):
                 forced_functions = True
                 with db_factory() as db:
                     session = db.get(AgentSession, session_id)
@@ -378,8 +399,10 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
     except Exception as exc:  # a bug must not leave the session "running" forever
         log.exception("agent turn of session %s crashed", session_id)
         error = f"Внутренняя ошибка панели: {exc.__class__.__name__}"
-    if error and refuses_tools(error):
-        error += " — шлюз модели принимает только обычные функции. Выключите веб-поиск сессии («Настройки сессии» → «Веб-поиск»: «Выключен»)."
+    if error and refused:
+        # Even plain functions were refused (or the retry was not reached): say what to do rather than leave the raw gateway error.
+        error = ("Шлюз модели принял запрос только с обычными функциями, но ход всё равно не прошёл. Откройте «Настройки сессии» и "
+                 "поставьте «Веб-поиск» → «Выключен»; если не поможет — в «Настройках» панели «Какие инструменты видит модель» → «auto».")
 
     with db_factory() as db:
         live_delete(db, session_id)

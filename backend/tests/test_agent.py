@@ -1054,4 +1054,34 @@ def test_a_gateway_refusing_other_tools_switches_the_session_to_functions_and_as
     agent_service.run_turn(SessionLocal, sid, "и ещё")
     assert len(calls) == 1
     with SessionLocal() as db:
-        assert "только обычные функции" in db.get(AgentSession, sid).last_error
+        assert "ход всё равно не прошёл" in db.get(AgentSession, sid).last_error
+
+
+def test_a_refusal_shown_only_as_a_feed_item_still_triggers_the_retry(client, monkeypatch):
+    """The real gateway case: the "function tools only" text arrives as a feed error item (Codex retries it on its own and then ends
+    the turn with a generic "stream disconnected" that has no such text). The switch to functions must fire on the feed item too."""
+    user, h = op_user(client)
+    profile = openai_profile(user.id)
+    with SessionLocal() as db:
+        s = AgentSession(user_id=user.id, title="t", llm_profile_id=profile.id, web_search="on")
+        db.add(s)
+        db.commit()
+        sid = s.id
+    calls: list[dict] = []
+    refusal = '{"error":{"message":"This endpoint supports function tools only","type":"invalid_request_error"}}'
+
+    def fake_stream(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            # exactly what agentd emits: the refusal as a feed item, then the turn fails with an unrelated message
+            yield {"type": "item.completed", "item": {"id": "", "type": "error", "message": refusal}}
+            yield {"type": "turn.completed", "status": "failed", "error": "stream disconnected before completion: error sending request"}
+        else:
+            yield {"type": "turn.completed", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
+
+    monkeypatch.setattr(agent_service, "stream_turn", fake_stream)
+    agent_service.run_turn(SessionLocal, sid, "сделай разведку")
+    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(False, "on"), (True, "off")]  # retried in functions mode
+    with SessionLocal() as db:
+        s = db.get(AgentSession, sid)
+        assert s.functions_only and s.last_error is None
