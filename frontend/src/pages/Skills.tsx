@@ -187,8 +187,10 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
     const file = files?.[0];
     if (!file) return;
     void run("import", async () => {
-      const got = await importSkills(file, importShared);
-      if (got[0]) await reloadTo(got[0].id, got.length > 1 ? [`Импортировано навыков: ${got.length} — ${got.map((s) => s.name).join(", ")}`, ...got[0].notes] : got[0].notes);
+      const { skills: got, skipped } = await importSkills(file, importShared);
+      const head = got.length > 1 ? [`Импортировано навыков: ${got.length} — ${got.map((s) => s.name).join(", ")}`] : [];
+      const skip = skipped.length ? [`Пропущено ${skipped.length}: ${skipped.join("; ")}`] : [];
+      if (got[0]) await reloadTo(got[0].id, [...head, ...skip, ...(got.length > 1 ? [] : got[0].notes)]);
     });
     if (importInput.current) importInput.current.value = "";
   };
@@ -294,8 +296,8 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
                       </>
                     ) : (
                       <>
-                        <Field label="SKILL.md" hint={`Целиком, как в других инструментах: шапка между --- (name, description) и инструкции. ${draft.md.length}/400000`}>
-                          <textarea className="field min-h-[26rem] font-mono text-xs leading-relaxed" value={draft.md} maxLength={400000} required disabled={readOnly} spellCheck={false} onChange={(e) => setMd(e.target.value)} />
+                        <Field label="SKILL.md" hint={`Целиком, как в других инструментах: шапка между --- (name, description) и инструкции. ${draft.md.length}/600000`}>
+                          <textarea className="field min-h-[26rem] font-mono text-xs leading-relaxed" value={draft.md} maxLength={600000} required disabled={readOnly} spellCheck={false} onChange={(e) => setMd(e.target.value)} />
                         </Field>
                         <Field label="Каким агентам">
                           <select className="field max-w-xs" value={draft.scope} disabled={readOnly} onChange={(e) => setDraft({ ...draft, scope: e.target.value as SkillScope })}>

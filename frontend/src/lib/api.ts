@@ -790,7 +790,7 @@ export const importSkills = async (file: File, shared = false) => {
   const form = new FormData();
   form.append("file", file);
   form.append("shared", String(shared));
-  return (await api.post<{ skills: Skill[] }>("/api/skills/import", form, { timeout: 300_000 })).data.skills;
+  return (await api.post<{ skills: Skill[]; skipped: string[] }>("/api/skills/import", form, { timeout: 300_000 })).data;
 };
 export const putSkillFile = async (id: number, path: string, file: File) =>
   (await api.put<Skill>(`/api/skills/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;

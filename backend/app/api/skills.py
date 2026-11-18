@@ -137,9 +137,10 @@ async def import_skills(
     _check_shared(user, shared)
     data = await file.read(svc.MAX_ZIP_BYTES + 1)
     filename = file.filename or ""
+    skipped: list[str] = []
     try:
         if filename.lower().endswith(".zip") or data[:4] == b"PK\x03\x04":
-            found = svc.read_archive(data)
+            found, skipped = svc.read_archive(data)
         else:
             stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
             found = [svc.parse_skill_md(data.decode("utf-8", "replace"), "" if stem.upper() == "SKILL" else stem)]
@@ -160,7 +161,7 @@ async def import_skills(
         saved.append((skill, notes))
     db.commit()
     own = _own_names(db, user)
-    return SkillImport(skills=[_out(user, s, own, n) for s, n in saved])
+    return SkillImport(skills=[_out(user, s, own, n) for s, n in saved], skipped=skipped)
 
 
 @router.get("/{skill_id}/export")

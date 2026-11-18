@@ -12,7 +12,7 @@ def _scope(v: str | None) -> str | None:
 
 
 class SkillCreate(BaseModel):
-    skill_md: str = Field(min_length=1, max_length=400_000)
+    skill_md: str = Field(min_length=1, max_length=600_000)
     scope: str = "both"
     shared: bool = False       # administrators only
     enabled: bool = True
@@ -24,7 +24,7 @@ class SkillCreate(BaseModel):
 
 
 class SkillUpdate(BaseModel):
-    skill_md: str | None = Field(default=None, min_length=1, max_length=400_000)
+    skill_md: str | None = Field(default=None, min_length=1, max_length=600_000)
     scope: str | None = None
     enabled: bool | None = None
 
@@ -64,3 +64,4 @@ class SkillFilePreview(BaseModel):
 
 class SkillImport(BaseModel):
     skills: list[SkillOut]
+    skipped: list[str] = []   # "<folder>: why" for skills in the archive that could not be taken

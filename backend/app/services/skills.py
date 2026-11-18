@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_NAME = 64
-MAX_DESCRIPTION = 1024
-MAX_SKILL_MD = 400_000              # characters (a big reference-style SKILL.md is injected to the model only when the skill is used)
+MAX_DESCRIPTION = 2048
+MAX_SKILL_MD = 600_000              # characters (a big reference-style SKILL.md is injected to the model only when the skill is used)
 MAX_FILE = 1_000_000                # bytes, one file
 MAX_SKILL_BYTES = 2_000_000         # bytes, all files of a skill together (SKILL.md included)
 MAX_FILES = 200
@@ -191,9 +191,9 @@ def check_files(skill_md: str, files: dict[str, str]) -> None:
 _SKIP = re.compile(r"(^|/)(__MACOSX|\.git|\.DS_Store|node_modules|__pycache__)(/|$)")
 
 
-def read_archive(data: bytes) -> list[ParsedSkill]:
-    """Every skill in a .zip: each folder holding a SKILL.md (an archive of one skill folder, of a skills/ folder of many, or of the files
-    of one skill at its root)."""
+def read_archive(data: bytes) -> tuple[list[ParsedSkill], list[str]]:
+    """Every skill in a .zip (each folder holding a SKILL.md), plus a list of "<folder>: why" for the ones that could not be taken. A
+    bad skill is skipped, not fatal: a collection of dozens must not fail to import over one broken file."""
     if len(data) > MAX_ZIP_BYTES:
         raise SkillError(f"Архив больше {MAX_ZIP_BYTES // 1_000_000} МБ")
     try:
@@ -205,22 +205,29 @@ def read_archive(data: bytes) -> list[ParsedSkill]:
     roots = [r for r in roots if not any(r != o and r.startswith(o + "/") for o in roots if o) and not ("" in roots and r != "")]
     if not roots:
         raise SkillError("В архиве нет SKILL.md")
-    skills = []
+    skills: list[ParsedSkill] = []
+    skipped: list[str] = []
     for root in roots:
-        prefix = root + "/" if root else ""
-        with archive.open(entries[prefix + "SKILL.md"]) as f:
-            text = f.read(MAX_SKILL_MD * 4 + 1).decode("utf-8", "replace")
-        skill = parse_skill_md(text, posixpath.basename(root) or "skill")
-        for path, info in entries.items():
-            if not path.startswith(prefix) or path == prefix + "SKILL.md":
-                continue
-            if info.file_size > MAX_FILE:
-                raise SkillError(f"{path}: файл больше {MAX_FILE // 1_000_000} МБ")
-            with archive.open(info) as f:
-                skill.files[clean_path(path[len(prefix):])] = base64.b64encode(f.read(MAX_FILE + 1)).decode()
-        check_files(skill.skill_md, skill.files)
-        skills.append(skill)
-    return skills
+        label = posixpath.basename(root) or "skill"
+        try:
+            prefix = root + "/" if root else ""
+            with archive.open(entries[prefix + "SKILL.md"]) as f:
+                text = f.read(MAX_SKILL_MD * 4 + 1).decode("utf-8", "replace")
+            skill = parse_skill_md(text, label)
+            for path, info in entries.items():
+                if not path.startswith(prefix) or path == prefix + "SKILL.md":
+                    continue
+                if info.file_size > MAX_FILE:
+                    raise SkillError(f"файл {path} больше {MAX_FILE // 1_000_000} МБ")
+                with archive.open(info) as f:
+                    skill.files[clean_path(path[len(prefix):])] = base64.b64encode(f.read(MAX_FILE + 1)).decode()
+            check_files(skill.skill_md, skill.files)
+            skills.append(skill)
+        except SkillError as exc:
+            skipped.append(f"{label}: {exc}")
+    if not skills:
+        raise SkillError("Ни один навык из архива не подошёл: " + "; ".join(skipped[:5]))
+    return skills, skipped
 
 
 def build_archive(name: str, skill_md: str, files: dict[str, str]) -> bytes:

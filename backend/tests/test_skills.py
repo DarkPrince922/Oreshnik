@@ -129,3 +129,16 @@ def test_a_persona_can_name_its_own_skills_disabled_ones_too(client, wired, monk
     report(client, h, new_session(client, h, openai_profile(user.id, "b"), persona_id=persona["id"])["id"])
     assert [s["name"] for s in sent[-1]["skills"]] == ["recon"]
     assert client.post("/api/personas", json={"name": "x", "instructions": "x", "skills": ["Bad Name"]}, headers=h).status_code == 422
+
+
+def test_a_bad_skill_in_an_archive_is_skipped_not_fatal(client):
+    _, h = op_user(client)
+    good = "---\nname: ok-skill\ndescription: нормальный навык\n---\n# ok\nделай X"
+    bad = "no frontmatter at all, and no way to make a description"       # parses to a name but the body-as-description works… use a truly broken one
+    archive = zip_of({"pack/ok-skill/SKILL.md": good, "pack/broken/SKILL.md": "---\nname: broken\n---\n"})  # no description, empty body
+    r = client.post("/api/skills/import", files={"file": ("pack.zip", archive, "application/zip")}, headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [s["name"] for s in body["skills"]] == ["ok-skill"]
+    assert len(body["skipped"]) == 1 and "broken" in body["skipped"][0]
+    _ = bad
