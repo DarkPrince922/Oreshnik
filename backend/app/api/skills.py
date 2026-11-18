@@ -17,7 +17,7 @@ from app.services import skills as svc
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
-MAX_PER_USER = 200
+MAX_PER_USER = 500
 
 
 def visible(user: User):
