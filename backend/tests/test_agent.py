@@ -1033,7 +1033,7 @@ def test_a_gateway_refusing_other_tools_switches_the_session_to_functions_and_as
 
     monkeypatch.setattr(agent_service, "stream_turn", fake_stream)
     agent_service.run_turn(SessionLocal, sid, "привет")
-    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(False, "on"), (True, "off")]
+    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(False, "on"), (True, "on")]  # web search kept; only sub-agents dropped
     with SessionLocal() as db:
         s = db.get(AgentSession, sid)
         assert s.functions_only and s.last_error is None
@@ -1042,7 +1042,7 @@ def test_a_gateway_refusing_other_tools_switches_the_session_to_functions_and_as
 
     calls.clear()
     agent_service.run_turn(SessionLocal, sid, "ещё")                     # the next turn starts with plain functions right away
-    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(True, "off")]
+    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(True, "on")]
 
     # a gateway that refuses even plain functions: asked once more, never in a loop, and the error says what to do
     def always_refuse(**kw):
@@ -1054,7 +1054,7 @@ def test_a_gateway_refusing_other_tools_switches_the_session_to_functions_and_as
     agent_service.run_turn(SessionLocal, sid, "и ещё")
     assert len(calls) == 1
     with SessionLocal() as db:
-        assert "ход всё равно не прошёл" in db.get(AgentSession, sid).last_error
+        assert "Какие инструменты видит модель" in db.get(AgentSession, sid).last_error
 
 
 def test_a_refusal_shown_only_as_a_feed_item_still_triggers_the_retry(client, monkeypatch):
@@ -1081,7 +1081,7 @@ def test_a_refusal_shown_only_as_a_feed_item_still_triggers_the_retry(client, mo
 
     monkeypatch.setattr(agent_service, "stream_turn", fake_stream)
     agent_service.run_turn(SessionLocal, sid, "сделай разведку")
-    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(False, "on"), (True, "off")]  # retried in functions mode
+    assert [(c["function_tools_only"], c["web_search"]) for c in calls] == [(False, "on"), (True, "on")]  # web search kept; only sub-agents dropped  # retried in functions mode
     with SessionLocal() as db:
         s = db.get(AgentSession, sid)
         assert s.functions_only and s.last_error is None

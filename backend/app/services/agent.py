@@ -74,8 +74,8 @@ def function_tools_only(profile: LLMProfile) -> bool:
 
 
 RETRYABLE_ACTIONS = ("message", "review", "compact", "goal")
-FUNCTIONS_ONLY_NOTE = ("Шлюз модели принимает только обычные функции. Сессия переключена на них (без встроенного веб-поиска Codex "
-                       "и его под-агентов) — повторяю ход.")
+FUNCTIONS_ONLY_NOTE = ("Шлюз модели отклонил не-функциональные инструменты (под-агенты Codex). Сессия переключена на обычные функции — "
+                       "повторяю ход. Веб-поиск остаётся как в настройках сессии.")
 
 
 def refuses_tools(error: str | None) -> bool:
@@ -373,7 +373,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
                 function_tools_only=only_functions, normalize_responses=normalize_responses(profile),
                 instructions=instructions, applied_instructions=applied_instructions, effort=effort, approval_mode=approval_mode,
                 review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
-                web_search="off" if forced_functions else web_search, goals=goals, goal_budget=extra.get("goal_budget"),
+                web_search=web_search, goals=goals, goal_budget=extra.get("goal_budget"),
                 skills=skills, skills_digest=skills_digest, mcp_servers=mcp_servers,
             ):
                 # The gateway's "function tools only" refusal arrives as a feed error item (Codex retries it internally and then fails
@@ -400,9 +400,10 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         log.exception("agent turn of session %s crashed", session_id)
         error = f"Внутренняя ошибка панели: {exc.__class__.__name__}"
     if error and refused:
-        # Even plain functions were refused (or the retry was not reached): say what to do rather than leave the raw gateway error.
-        error = ("Шлюз модели принял запрос только с обычными функциями, но ход всё равно не прошёл. Откройте «Настройки сессии» и "
-                 "поставьте «Веб-поиск» → «Выключен»; если не поможет — в «Настройках» панели «Какие инструменты видит модель» → «auto».")
+        # Even after dropping the sub-agents the gateway refused: say what to do rather than leave the raw gateway error. (Web search
+        # is kept — many gateways, e.g. DeepSeek via Bing, support it; it is the sub-agent/namespace tools they reject.)
+        error = ("Шлюз модели отклонил запрос даже с обычными функциями. В «Настройках» панели поставьте «Какие инструменты видит "
+                 "модель» → «auto», а если и так не проходит — «functions». Веб-поиск трогать не нужно.")
 
     with db_factory() as db:
         live_delete(db, session_id)
