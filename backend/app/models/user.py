@@ -21,6 +21,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[Role] = mapped_column(Enum(Role, name="role"), default=Role.operator)
     is_active: Mapped[bool] = mapped_column(default=True)
+    # May use «Агент» (their own OpenHands server, root on it): an administrator decides. Administrators always may.
+    agent_access: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

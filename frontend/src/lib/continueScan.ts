@@ -7,6 +7,18 @@ import type { Scan } from "./api";
 export const canContinueInPlace = (scan: Pick<Scan, "user_id">, userId: number | null | undefined): boolean =>
   userId !== null && userId !== undefined && scan.user_id === userId;
 
+/**
+ * What «Продолжить» does for a finished scan. "resume": Strix picks the scan's run up where it left off. "restart": the scan
+ * failed or was stopped before Strix created a run (the model was unreachable, Docker failed, it was stopped in the queue),
+ * so there is nothing to resume and the same scan starts again from the beginning. null: neither is possible.
+ */
+export type ContinueKind = "resume" | "restart";
+export const continueKind = (scan: Pick<Scan, "status" | "run_name" | "runner_name">): ContinueKind | null => {
+  if (!scan.runner_name) return null; // the runner was deleted
+  if (scan.run_name) return "resume";
+  return scan.status === "failed" || scan.status === "cancelled" ? "restart" : null;
+};
+
 /** A scan that finished on its own has nothing left to do without a new instruction; a stopped or failed one can just be picked up again. */
 export const instructionRequired = (scan: Pick<Scan, "status">): boolean =>
   scan.status === "succeeded" || scan.status === "vulns_found";

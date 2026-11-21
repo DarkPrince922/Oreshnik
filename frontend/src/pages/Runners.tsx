@@ -20,6 +20,7 @@ import {
 import { useAuth } from "../lib/auth";
 import { authLabel, groupFingerprint, hasLogin, shortFingerprint, sshActions } from "../lib/hostKey";
 import { MAX_SCANS_PER_USER_CAP, MAX_TARGETS_CAP, defaultTargetsField, limitsLine, parseLimit } from "../lib/runnerLimits";
+import { confirm } from "../lib/confirm";
 
 const KIND_LABEL: Record<RunnerKind, string> = { mock: "Mock", local: "Локальный", ssh: "SSH" };
 const STATUS: Record<RunnerStatus, { label: string; tone: "ok" | "warn" | "bad" | "muted" }> = {
@@ -272,7 +273,7 @@ export default function Runners() {
 
   const replace = (updated: Runner) => setRunners((list) => list?.map((x) => (x.id === updated.id ? updated : x)) ?? null);
   const forget = async (r: Runner) => {
-    if (!window.confirm(`Сбросить подтверждённый ключ хоста «${r.name}»? Следующая проверка покажет новый отпечаток для подтверждения.`)) return;
+    if (!await confirm(`Сбросить подтверждённый ключ хоста «${r.name}»? Следующая проверка покажет новый отпечаток для подтверждения.`)) return;
     setActing(r.id);
     try {
       replace(await forgetHostKey(r.id));
@@ -366,7 +367,7 @@ export default function Runners() {
   };
 
   const remove = async (r: Runner) => {
-    if (!window.confirm(`Удалить раннер «${r.name}»?`)) return;
+    if (!await confirm(`Удалить раннер «${r.name}»?`)) return;
     setDeleting(r.id);
     try {
       await deleteRunner(r.id);
@@ -528,7 +529,7 @@ export default function Runners() {
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Сканов на аккаунт" hint="Сколько сканов одного пользователя может быть активно (в очереди или идёт) на этом раннере. Пусто — по умолчанию панели (обычно 3).">
-              <input className="field font-mono" inputMode="numeric" value={form.max_scans_per_user} onChange={(e) => setForm({ ...form, max_scans_per_user: e.target.value })} placeholder="3" aria-label="Сканов на аккаунт" />
+              <input className="field font-mono" inputMode="numeric" value={form.max_scans_per_user} onChange={(e) => setForm({ ...form, max_scans_per_user: e.target.value })} placeholder="как в настройках" aria-label="Сканов на аккаунт" />
             </Field>
             <Field label="Целей одновременно" hint="Сколько разных доменов и хостов сканируется на раннере сразу, все пользователи вместе. Пусто — без лимита.">
               <input className="field font-mono" inputMode="numeric" value={form.max_targets} onChange={(e) => setForm({ ...form, max_targets: e.target.value, targets_touched: true })} placeholder="без лимита" aria-label="Целей одновременно" />

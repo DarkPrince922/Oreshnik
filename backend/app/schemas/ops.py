@@ -11,6 +11,7 @@ class OpsRunCreate(BaseModel):
     name: str = Field(default="", max_length=200)
     goal: str = Field(min_length=1, max_length=10000)
     llm_profile_id: int
+    llm_model: str | None = Field(default=None, max_length=200)  # one of the profile's models; empty = its default
     runner_ids: list[int] = Field(min_length=1, max_length=MAX_RUNNERS_PER_TASK)
 
     @field_validator("goal")
@@ -55,6 +56,7 @@ class OpsRunOut(BaseModel):
     goal: str
     llm_profile_id: int | None
     llm_profile_name: str | None
+    llm_model: str | None  # what the script was (or will be) written with: the one chosen, else the profile's default
     status: OpsRunStatus
     script: str | None
     script_error: str | None

@@ -15,7 +15,7 @@ function Prose({ text }: { text: string }) {
 
 function Code({ text }: { text: string }) {
   return (
-    <pre className="overflow-x-auto rounded-xl border border-white/10 bg-ink-950 p-4 font-mono text-xs leading-relaxed text-slate-200">
+    <pre className="whitespace-pre-wrap rounded-xl border border-white/10 bg-ink-950 p-4 font-mono text-xs leading-relaxed text-slate-200 [overflow-wrap:anywhere]">
       {text}
     </pre>
   );

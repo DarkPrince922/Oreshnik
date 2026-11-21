@@ -18,6 +18,7 @@ class ScheduleCreate(BaseModel):
     max_budget: float | None = Field(default=None, gt=0, le=10000)
     runner_id: int | None = None
     llm_profile_id: int | None = None
+    llm_model: str | None = Field(default=None, max_length=200)  # one of the profile's models; empty = its default
 
     @field_validator("name")
     @classmethod
@@ -46,6 +47,7 @@ class ScheduleUpdate(BaseModel):
     max_budget: float | None = Field(default=None, gt=0, le=10000)
     runner_id: int | None = None
     llm_profile_id: int | None = None
+    llm_model: str | None = Field(default=None, max_length=200)  # one of the profile's models; empty = its default
 
     @field_validator("instruction")
     @classmethod
@@ -70,6 +72,7 @@ class ScheduleOut(BaseModel):
     runner_kind: str | None
     llm_profile_id: int | None
     llm_profile_name: str | None
+    llm_model: str | None
     next_run_at: datetime | None
     next_runs: list[datetime]  # the next few firing times, UTC (empty while disabled)
     last_run_at: datetime | None

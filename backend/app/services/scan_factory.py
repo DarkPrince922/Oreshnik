@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.llm_profile import LLMProfile
+from app.services.llm import profile_models
 from app.models.runner import Runner, RunnerKind
 from app.models.scan import ACTIVE_STATUSES, Scan, ScanMode, ScanStatus
 from app.models.user import Role, User
@@ -39,6 +40,7 @@ class Resolved:
     targets: list[str]
     runner: Runner
     profile: LLMProfile | None
+    model: str | None = None   # chosen from the profile's models; None = the profile's own default
 
 
 def check_runner_usable(runner: Runner) -> None:
@@ -60,6 +62,7 @@ def resolve_request(
     targets: list[str],
     runner_id: int | None,
     llm_profile_id: int | None,
+    llm_model: str | None = None,
 ) -> Resolved:
     """Validate everything except the active-scan limit and return the resolved objects."""
     try:
@@ -101,7 +104,18 @@ def resolve_request(
     elif runner.kind != RunnerKind.mock:
         raise ScanRequestError(422, "Для этого раннера нужно выбрать LLM-профиль")
 
-    return Resolved(targets=[t for t, _ in classified], runner=runner, profile=profile)
+    model: str | None = None
+    if llm_model is not None:
+        if profile is None:
+            raise ScanRequestError(422, "Модель выбирается вместе с LLM-профилем")
+        if llm_model not in profile_models(profile):
+            raise ScanRequestError(
+                422,
+                f"Модели «{llm_model}» нет в профиле «{profile.name}»: загрузите список моделей в разделе «LLM-профили»",
+            )
+        model = llm_model
+
+    return Resolved(targets=[t for t, _ in classified], runner=runner, profile=profile, model=model)
 
 
 def effective_scans_per_user(runner: Runner) -> int:
@@ -169,14 +183,16 @@ def create_queued_scan(
     runner_id: int | None,
     llm_profile_id: int | None,
     schedule_id: int | None = None,
+    llm_model: str | None = None,
 ) -> Scan:
     """Validate, apply the per-user limit and persist a `queued` scan. The caller enqueues it."""
-    resolved = resolve_request(db, user, targets=targets, runner_id=runner_id, llm_profile_id=llm_profile_id)
+    resolved = resolve_request(db, user, targets=targets, runner_id=runner_id, llm_profile_id=llm_profile_id, llm_model=llm_model)
     check_runner_capacity(db, user, resolved.runner, resolved.targets)
     scan = Scan(
         user_id=user.id,
         runner_id=resolved.runner.id,
         llm_profile_id=resolved.profile.id if resolved.profile else None,
+        llm_model=resolved.model,
         targets=resolved.targets,
         scan_mode=scan_mode,
         instruction=instruction,

@@ -44,6 +44,7 @@ class OpsRun(Base):
     name: Mapped[str] = mapped_column(String(200))
     goal: Mapped[str] = mapped_column(Text)  # the operator's own words; sent to the LLM verbatim
     llm_profile_id: Mapped[int | None] = mapped_column(ForeignKey("llm_profiles.id", ondelete="SET NULL"), nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(200), nullable=True)  # None = the profile's own default
     status: Mapped[OpsRunStatus] = mapped_column(Enum(OpsRunStatus, name="ops_run_status"), default=OpsRunStatus.drafting)
     script: Mapped[str | None] = mapped_column(Text, nullable=True)  # exactly what was sent to every host, verbatim
     script_error: Mapped[str | None] = mapped_column(Text, nullable=True)  # why drafting failed

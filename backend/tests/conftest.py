@@ -14,6 +14,11 @@ from cryptography.fernet import Fernet
 # Must be set before anything from `app` is imported (settings are read once).
 os.environ["POSTGRES_DB"] = "oreshnik_test"
 os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+# The tests about the queue and the settings page were written against these two baselines; the shipped defaults are higher.
+os.environ["SCAN_CONCURRENCY"] = "2"
+os.environ["MAX_ACTIVE_SCANS_PER_USER"] = "3"
+# The fake Strix (tests/fake_strix.py) reads the instruction as its script; the panel's HTTPQL note has tests of its own (test_hints.py).
+os.environ["STRIX_HTTPQL_HINT"] = "false"
 os.environ["JWT_SECRET"] = "t" * 48
 os.environ["ADMIN_EMAIL"] = "root@example.com"
 os.environ["ADMIN_PASSWORD"] = "bootstrap-pass"
@@ -24,6 +29,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
+from app.core import runtime_settings  # noqa: E402  (takes the baseline now, before any test changes `settings`)
 from app.core.db import SessionLocal, engine  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 from app.models import LLMProfile, Provider, Role, Runner, RunnerKind, RunnerStatus, Scan, ScanMode, ScanStatus, Schedule, User  # noqa: E402
@@ -58,6 +64,8 @@ def _database():
 def _clean_state(monkeypatch, tmp_path):
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE users, llm_profiles, runners, scans, findings, schedules RESTART IDENTITY CASCADE"))
+
+    runtime_settings.apply({})  # nothing set in «Настройки» leaks from one test into the next
 
     # Scan artifacts go to a per-test directory; the simulated runner runs at full speed;
     # a stuck fake Strix is escalated quickly.
