@@ -371,10 +371,10 @@ async def init_git(session: Session) -> None:
 def spawn_env(turn: Turn, session: Session) -> dict[str, str]:
     env = {k: os.environ[k] for k in _PASSTHROUGH if k in os.environ}
     home = str(session.home)
-    # Layer-2 self-install locations: all three point into the session's OWN writable folder (on the `agent_data` volume,
-    # the one place the agent container can write — its root filesystem is read_only). `pip install --user` already
-    # defaults under $HOME with no extra variable; npm and micromamba need to be told explicitly, since their defaults are
-    # system paths the agent (uid 1000, cap_drop: ALL, no root) cannot write to. The matching PATH prepend that makes
+    # Layer-2 self-install locations: all three point into the session's OWN folder on the `agent_data` volume, so each
+    # session keeps its own tools and they survive container restarts (the rest of the root filesystem is ephemeral). The
+    # container runs as root, so system installs (apt, npm -g) also work; we still keep per-session HOME here. `pip install
+    # --user` already defaults under $HOME with no extra variable; npm and micromamba need to be told explicitly. The matching PATH prepend that makes
     # anything installed this way (plus the Layer-1 apt/venv tools baked into the image) reachable by bare name lives in
     # /etc/profile.d/agent-tools.sh (agentd/Dockerfile) — commands actually run as `bash -lc "..."`, a LOGIN shell, and
     # Debian's /etc/profile resets PATH before sourcing profile.d, so a plain env var here would be overwritten for those;

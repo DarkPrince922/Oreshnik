@@ -122,10 +122,15 @@ services:
     volumes:
       - agent_data:/data/agent
     networks: [agentnet]
-    read_only: true
+    # «Код» работает ОТ ROOT внутри своего контейнера: агент полностью владеет своей песочницей (ставит пакеты, пишет куда угодно,
+    # управляет процессами). Контейнер при этом остаётся границей безопасности — у него по-прежнему НЕТ docker.sock, НЕТ .env, НЕТ
+    # доступа к Postgres/Redis и только сеть `agentnet`, поэтому root здесь не дотянется до секретов панели и данных других
+    # пользователей на той же машине. read_only снят, потому что root нужна записываемая системная ФС.
+    user: "0:0"
     tmpfs:
       - /tmp
     cap_drop: [ALL]
+    cap_add: [NET_RAW]            # сырые сокеты для сканеров (ping, nmap SYN); остальные capabilities остаются сброшены — так root не ломает изоляцию от хоста
     security_opt:
       - no-new-privileges:true
     pids_limit: 512
