@@ -219,6 +219,12 @@ class Settings(BaseSettings):
     # an isolated network — see docs/ARCHITECTURE.md §27). Empty = feature off. Fixed at deploy time: docker-compose must
     # publish the same range, so changing it needs a restart, unlike the rest of «Настройки».
     agent_listener_ports: str = ""
+    # When on, the agent may open its own session's listener itself (it runs `oreshnik-listen <port>` in the container, which calls
+    # the panel with a per-session token — see app/api/agent.py open_listener_self). Off = only a user opens it from the UI, as before.
+    # Bounded either way: a session can open only a port in `agent_listener_ports`, and only for itself.
+    agent_listener_self: bool = True
+    # How the agent container reaches this backend over `agentnet` (for the self-listener call above). Internal URL, not public.
+    panel_internal_url: str = "http://backend:8000"
     # «Агент»: the OpenHands (Agent Canvas) release the panel installs on users' servers. Verified against 1.41.0.
     openhands_version: str = Field(default="1.41.0", pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
     # A listener nobody has sent a byte through for this long is closed on its own.

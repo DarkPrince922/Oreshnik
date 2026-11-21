@@ -20,7 +20,7 @@ from starlette.background import BackgroundTask
 from app.api.deps import require_operator
 from app.core.config import settings
 from app.core.db import SessionLocal, get_db
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, decode_listener_token
 from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus, new_session_key
 from app.models.llm_profile import LLMProfile
 from app.models.persona import Persona
@@ -393,6 +393,43 @@ async def open_listener(session_id: int, body: AgentListenerOpen, user: User = D
 async def close_listener(session_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
     session = _own_or_404(db, user, session_id)
     await agent_listener.close_for_session(session.key)
+
+
+# ── the agent opens its own listener (no user click) ─────────────────────────────────────────────────────────────────
+# Reached from inside the agent container (over `agentnet`) by the `oreshnik-listen` helper, authenticated by the short-lived,
+# session-scoped token the panel put in the turn's environment. Gated by AGENT_LISTENER_SELF; still bounded to the one session
+# and the configured port range, so even on, a session can only open a port in that range for itself.
+
+def _listener_claims(request: Request) -> dict:
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нет токена листенера")
+    try:
+        claims = decode_listener_token(auth[7:].strip())
+    except jwt.PyJWTError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен листенера")
+    if not settings.agent_listener_self:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Самозапрос листенера выключен (AGENT_LISTENER_SELF)")
+    return claims
+
+
+@router.post("/internal/listener", response_model=AgentListenerOut)
+async def open_listener_self(body: AgentListenerOpen, request: Request) -> AgentListenerOut:
+    claims = _listener_claims(request)
+    _require_enabled()
+    try:
+        listener = await agent_listener.open_listener(
+            port=body.port, session_key=claims["skey"], session_id=int(claims["sid"]), user_id=int(claims["uid"]),
+        )
+    except AgentError as exc:
+        raise _agent_http_error(exc)
+    return _listener_out(listener)
+
+
+@router.delete("/internal/listener", status_code=status.HTTP_204_NO_CONTENT)
+async def close_listener_self(body: AgentListenerOpen, request: Request) -> None:
+    claims = _listener_claims(request)
+    await agent_listener.close_listener(body.port, session_key=claims["skey"])
 
 
 # ── the session's files ───────────────────────────────────────────────────────────────────────

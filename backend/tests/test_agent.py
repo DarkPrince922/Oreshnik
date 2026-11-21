@@ -978,8 +978,14 @@ def test_a_fork_keeps_the_goal_the_web_search_choice_and_the_context(client, wir
 
 def test_the_note_names_the_forwarded_range_or_says_there_is_none(monkeypatch):
     monkeypatch.setattr(settings, "agent_listener_ports", "4444-4450")
+    # Self-listener on: the agent is told it opens the port itself with the helper command.
+    monkeypatch.setattr(settings, "agent_listener_self", True)
+    on = REAL_LISTENER_NOTE()
+    assert "4444–4450" in on and "0.0.0.0" in on and "oreshnik-listen" in on
+    # Self-listener off: the agent must ask the user to open it in the session settings.
+    monkeypatch.setattr(settings, "agent_listener_self", False)
     note = REAL_LISTENER_NOTE()
-    assert "4444–4450" in note and "0.0.0.0" in note and "настройках сессии" in note
+    assert "4444–4450" in note and "0.0.0.0" in note and "настройках сессии" in note and "oreshnik-listen" not in note
     monkeypatch.setattr(settings, "agent_listener_ports", "4444-4444")
     assert "диапазона 4444 " in REAL_LISTENER_NOTE()  # one port is not written as a range
     monkeypatch.setattr(settings, "agent_listener_ports", "")

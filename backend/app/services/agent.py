@@ -253,7 +253,7 @@ def stream_turn(
     normalize_responses: bool = False, action: str = "message", instructions: str | None = None, effort: str | None = None,
     approval_mode: str = "auto", review_target: dict | None = None, revert_before: str | None = None, applied_instructions: str | None = None,
     web_search: str = "auto", goals: bool = False, goal_budget: int | None = None, skills: list[dict] | None = None, skills_digest: str = "",
-    mcp_servers: list[dict] | None = None,
+    mcp_servers: list[dict] | None = None, listener_token: str | None = None, panel_url: str | None = None,
 ) -> Iterator[dict]:
     """The agent's events for one action, as dicts. Ends with agentd's own `{"type": "agentd.exit", ...}` line."""
     body = {
@@ -264,6 +264,7 @@ def stream_turn(
         "review_target": review_target, "revert_before": revert_before,
         "web_search": web_search, "goals": goals, "goal_budget": goal_budget,
         "skills": skills or [], "skills_digest": skills_digest, "mcp_servers": mcp_servers or [],
+        "listener_token": listener_token, "panel_url": panel_url,
     }
     timeout = httpx.Timeout(60.0, read=settings.agent_turn_timeout_seconds + 60.0)
     try:
@@ -306,12 +307,20 @@ def listener_note() -> str:
         )
     lo, hi = rng
     ports = str(lo) if lo == hi else f"{lo}–{hi}"
-    return (
+    head = (
         "[Панель: доступ к этому контейнеру снаружи]\n"
         f"У контейнера нет опубликованных портов. Панель умеет пробрасывать ОДИН TCP-порт из диапазона {ports} со своего хоста на такой же "
-        "порт внутри этого контейнера. Поэтому всё, что пользователь должен открыть сам (веб-страница, приёмник обратного соединения, "
+        "порт внутри этого контейнера. Поэтому всё, что должно быть доступно снаружи (веб-страница, приёмник обратного соединения, "
         f"вебхук), запускай ТОЛЬКО на порту из {ports} и на адресе 0.0.0.0 — любой другой порт (8000, 3000, 8080 ...) снаружи недоступен. "
-        "Сервер запускай так, чтобы он пережил завершение команды (например `nohup ... &` или `setsid`), и проверь, что он слушает. "
+        "Сервер/слушатель запускай так, чтобы он пережил завершение команды (например `nohup ... &` или `setsid`), и проверь, что он слушает. "
+    )
+    if settings.agent_listener_self:
+        return head + (
+            f"Проброс порта наружу ты открываешь САМ командой `oreshnik-listen <порт>` (порт из {ports}) — выполни её после того, как "
+            "слушатель внутри поднят. Она вернёт подтверждение; порт закрывается командой `oreshnik-listen close <порт>` или сам по простою. "
+            "Внешний адрес для пейлоада/пользователя — http://<адрес панели или ВДС>:<порт>/."
+        )
+    return head + (
         "Пользователю скажи два шага: 1) в настройках сессии открыть листенер на этом порту; 2) открыть "
         "http://<адрес панели>:<порт>/ (если панель на его же компьютере — http://localhost:<порт>/). "
         "Порт открывает панель по действию пользователя, сам ты его открыть не можешь."
@@ -332,6 +341,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
         if session is None:
             return
         key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
+        user_id = session.user_id
         from app.models.persona import Persona
 
         persona = db.get(Persona, session.persona_id) if session.persona_id else None
@@ -363,6 +373,16 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             raise skills_error
         base_url, model = endpoint_for(profile, chosen_model)
         api_key = decrypt(profile.api_key_enc)
+        # When self-listeners are on and a port range is configured, hand the agent a short-lived, session-scoped token so it can
+        # open its own listener (reverse-shell catcher, webhook) without a manual UI step. Still bounded to this session and the range.
+        listener_token = panel_url = None
+        from app.services.agent_listener import port_range as _lport_range
+
+        if settings.agent_listener_self and _lport_range() is not None:
+            from app.core.security import create_listener_token
+
+            listener_token = create_listener_token(session_id, key, user_id, settings.agent_turn_timeout_seconds + 120)
+            panel_url = settings.panel_internal_url
         for attempt in (1, 2):
             only_functions = forced_functions or function_tools_only(profile)
             error = None
@@ -374,6 +394,7 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
                 review_target=extra.get("review_target"), revert_before=extra.get("revert_before"),
                 web_search=web_search, goals=goals, goal_budget=extra.get("goal_budget"),
                 skills=skills, skills_digest=skills_digest, mcp_servers=mcp_servers,
+                listener_token=listener_token, panel_url=panel_url,
             ):
                 # The gateway's "function tools only" refusal arrives as a feed error item (Codex retries it internally and then fails
                 # the turn with a different, generic message), so it has to be caught on the event, not only on the final turn error.

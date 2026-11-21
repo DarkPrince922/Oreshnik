@@ -40,3 +40,21 @@ def create_access_token(subject: str, extra: dict | None = None) -> str:
 
 def decode_access_token(token: str) -> dict:
     return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+
+
+def create_listener_token(session_id: int, session_key: str, user_id: int, ttl_seconds: int) -> str:
+    """A short-lived token the agent presents to open ITS OWN session's listener (typ 'lstn'). Scoped to one session and user,
+    so even when self-listeners are enabled a session can act only for itself. TTL ties it to the turn that issued it."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "typ": "lstn", "sid": session_id, "skey": session_key, "uid": user_id,
+        "iat": now, "exp": now + timedelta(seconds=max(60, ttl_seconds)),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_listener_token(token: str) -> dict:
+    data = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    if data.get("typ") != "lstn":
+        raise jwt.InvalidTokenError("not a listener token")
+    return data

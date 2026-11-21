@@ -241,3 +241,33 @@ def test_deleting_a_session_closes_its_listener(client):
     assert agent_listener.status_for("sess-d") is not None
     client.delete(f"/api/agent/sessions/{session.id}", headers=headers)
     assert agent_listener.status_for("sess-d") is None
+
+
+def test_the_agent_opens_its_own_listener_with_a_session_token(client, monkeypatch):
+    """The internal endpoint the `oreshnik-listen` helper calls: a session-scoped token opens that session's own port, a
+    missing or wrong-type token is refused, and the whole path is gated by AGENT_LISTENER_SELF."""
+    from app.core.db import SessionLocal
+    from app.core.security import create_access_token, create_listener_token
+    from app.models.agent import AgentSession
+
+    user, _ = op_user(client)
+    with SessionLocal() as db:
+        session = AgentSession(user_id=user.id, title="t", key="sess-self")
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
+    token = create_listener_token(session.id, session.key, user.id, 300)
+    auth = {"Authorization": f"Bearer {token}"}
+
+    monkeypatch.setattr(settings, "agent_listener_self", True)
+    opened = client.post("/api/agent/internal/listener", json={"port": 33002}, headers=auth)
+    assert opened.status_code == 200 and opened.json()["port"] == 33002
+    assert client.request("DELETE", "/api/agent/internal/listener", json={"port": 33002}, headers=auth).status_code == 204
+
+    assert client.post("/api/agent/internal/listener", json={"port": 33002}).status_code == 401  # no token
+    bad = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+    assert client.post("/api/agent/internal/listener", json={"port": 33002}, headers=bad).status_code == 401  # wrong type
+
+    monkeypatch.setattr(settings, "agent_listener_self", False)
+    assert client.post("/api/agent/internal/listener", json={"port": 33003}, headers=auth).status_code == 403  # feature off

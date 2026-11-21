@@ -167,6 +167,10 @@ class Turn(BaseModel):
     # The user's MCP servers. Codex offers their tools to the model; for a gateway that takes plain functions only, the compat proxy
     # unfolds them (see `flatten_tools`).
     mcp_servers: list[McpIn] = Field(default_factory=list, max_length=50)
+    # When set, the agent may open its OWN session's listener: this per-session token and the panel's internal URL are put into the
+    # command environment so the `oreshnik-listen` helper can call the panel. Absent = the agent cannot open a port by itself.
+    listener_token: str | None = Field(default=None, max_length=4000)
+    panel_url: str | None = Field(default=None, max_length=500, pattern=r"^https?://")
 
     @field_validator("mcp_servers")
     @classmethod
@@ -388,6 +392,9 @@ def spawn_env(turn: Turn, session: Session) -> dict[str, str]:
         "GIT_COMMITTER_NAME": "Oreshnik agent", "GIT_COMMITTER_EMAIL": "agent@oreshnik.local",
     })
     env.update(mcp_env(turn.mcp_servers))
+    if turn.listener_token and turn.panel_url:
+        env["ORESHNIK_LISTENER_TOKEN"] = turn.listener_token
+        env["ORESHNIK_PANEL_URL"] = turn.panel_url
     return env
 
 

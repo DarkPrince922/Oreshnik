@@ -116,7 +116,11 @@ RUN printf '%s\n' \
     'export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$MAMBA_ROOT_PREFIX/envs/tools/bin:/opt/agent-tools/bin:$PATH"' \
     > /etc/profile.d/agent-tools.sh
 
-# The image's own `node` user (uid 1000) runs everything; the volume is its to write.
+# Helper the agent runs to open its own session's panel listener (only works when the panel enabled it for the session).
+COPY oreshnik-listen /usr/local/bin/oreshnik-listen
+RUN chmod 0755 /usr/local/bin/oreshnik-listen
+
+# The volume is writable by the container (the compose service runs it as root; left owned by node for direct `docker run` use).
 RUN mkdir -p /data/agent && chown node:node /data/agent
 USER node
 ENV AGENT_DATA_DIR=/data/agent
