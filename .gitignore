@@ -10,7 +10,12 @@ venv/
 
 # Env / secrets
 .env
+# copies of .env hold the same secrets (.env.backup, .env.bak.2026-11-16 ...); only the example belongs in git
+.env.*
+!.env.example
 *.local
+# your own additions to docker-compose.yml on this machine (Tor, extra ports ...): local, never committed
+docker-compose.override.yml
 
 # Node / frontend
 node_modules/

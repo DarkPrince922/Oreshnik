@@ -29,6 +29,7 @@ class UserOut(BaseModel):
     email: str
     role: Role
     is_active: bool
+    agent_access: bool = False
     created_at: datetime
 
 
@@ -49,6 +50,7 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     role: Role | None = None
     is_active: bool | None = None
+    agent_access: bool | None = None
     password: str | None = Field(default=None, min_length=8, max_length=128)
 
 

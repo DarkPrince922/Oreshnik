@@ -1,0 +1,17 @@
+# The panel as it is meant to run on a server: built once into static files and served by nginx, which also hands /api
+# (and its WebSockets) on to the backend. One address for everything — no VITE_API_BASE, no CORS to set up.
+#
+# NOT built in the environment this was written in (no Docker daemon there); `npm run build` itself was run and passes.
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+# Empty = "the same address the page was opened at" (see src/lib/api.ts).
+ENV VITE_API_BASE=""
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 5173

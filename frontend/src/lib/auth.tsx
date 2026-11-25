@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { getMe, getToken, login as apiLogin, setToken, setUnauthorizedHandler, type Role, type User } from "./api";
+import { getMe, getToken, login as apiLogin, setToken, setUnauthorizedHandler, TOKEN_KEY, type Role, type User } from "./api";
 
 interface AuthState {
   user: User | null;
@@ -33,6 +33,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       alive = false;
     };
   }, [logout]);
+
+  // The token lives in the browser, not in the tab: signing in (or out) in another tab changes the account for this one too. Without
+  // this the tab would go on showing the old account's name over the new account's data — an operator's page full of the admin's
+  // scans. Reload, so the tab is honestly the account it now acts as.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === TOKEN_KEY && e.oldValue !== e.newValue) window.location.reload();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   // Any 401 from the API (expired token, deactivated account) ends the session.
   useEffect(() => {

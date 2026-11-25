@@ -426,3 +426,14 @@ def test_leftovers_of_an_earlier_attempt_on_the_host_do_not_leak_into_the_new_ru
     assert scan_run(scan.id) == "vulns_found"
     assert sorted(p.name for p in (scan_dir(scan.id) / "strix_runs").iterdir()) == ["fake-run"]
     assert load_scan(scan.id).cost == 0.42 and load_scan(scan.id).run_name == "fake-run"
+
+
+def test_a_continuation_on_a_host_clones_its_repositories_again_first():
+    """The host's scan directory starts empty on every run, so a repository clone is never there on a continuation."""
+    fresh = ScanSpec(scan_id=5, targets=["x"], scan_mode="quick", instruction=None, max_budget=None, work_dir=Path("/x"), run_label="l")
+    resumed = ScanSpec(scan_id=5, targets=["x"], scan_mode="quick", instruction=None, max_budget=None, work_dir=Path("/x"), run_label="l",
+                       resume_run="example-com_ab12")
+    plain, again = build_script(fresh, ["strix"], remote_dir(5)), build_script(resumed, ["strix"], remote_dir(5))
+    assert 'export TMPDIR="$PWD/tmp"' in plain and "strix_repos" not in plain
+    assert "strix_repos" in again and "strix_runs/example-com_ab12" in again
+    assert again.index("strix_repos") < again.index("exec ")            # before Strix starts

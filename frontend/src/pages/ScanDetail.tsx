@@ -1,10 +1,11 @@
 import clsx from "clsx";
 import { motion } from "framer-motion";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import AgentsPanel from "../components/AgentsPanel";
 import BudgetBar from "../components/BudgetBar";
+import AnalyzeModal from "../components/agent/AnalyzeModal";
 import ContinueModal from "../components/ContinueModal";
 import FindingsPanel from "../components/FindingsPanel";
 import LogViewer from "../components/LogViewer";
@@ -23,9 +24,11 @@ import {
   type Scan,
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { continueKind } from "../lib/continueScan";
 import { formatCost, formatDateTime, formatDuration, formatTokens, scanDuration, timesRu } from "../lib/format";
 import { useScanActivity } from "../lib/useScanActivity";
 import { useScanStream } from "../lib/useScanStream";
+import { confirm } from "../lib/confirm";
 
 // The markdown stack is only needed for the report tab, so it is loaded on demand.
 const SafeMarkdown = lazy(() => import("../components/Markdown"));
@@ -74,6 +77,10 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   const [report, setReport] = useState<string | null | undefined>(undefined);
   const [busy, setBusy] = useState<"cancel" | "delete" | ExportFormat | null>(null);
   const [continueOpen, setContinueOpen] = useState(false);
+  // «Продолжить» in the scans list leads here and asks for the dialog to be opened straight away (once).
+  const location = useLocation();
+  const wantsContinue = (location.state as { continue?: boolean } | null)?.continue === true;
+  const [analyzeOpen, setAnalyzeOpen] = useState(false);
   const tabChosen = useRef(false);
   const scanRef = useRef<Scan | null>(null);
   scanRef.current = scan;
@@ -109,6 +116,14 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   // Results exist once the scan is over — and, for a scan that is being continued, from its earlier runs.
   const finished = scan !== null && !active;
   const continuing = scan !== null && active && scan.resume_count > 0;
+  // «Продолжить»: pick the run up again, or — for a scan that never got to start Strix — start it again.
+  const contKind = scan !== null && finished ? continueKind(scan) : null;
+  useEffect(() => {
+    if (!wantsContinue || scan === null) return;
+    if (contKind && canModify) setContinueOpen(true);
+    navigate(location.pathname, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsContinue, scan === null]);
   const findingsKey = scan ? `${scan.status}:${scan.findings_total}` : "";
   useEffect(() => {
     if (!finished && !continuing) return;
@@ -162,14 +177,12 @@ function ScanDetailView({ scanId }: { scanId: number }) {
   };
 
   const onCancel = () =>
-    window.confirm("Остановить скан? Уже найденное сохранится.") &&
-    run("cancel", async () => setScan(await cancelScan(scanId)));
+    void confirm("Остановить скан? Уже найденное сохранится.").then((ok) => void (ok && run("cancel", async () => setScan(await cancelScan(scanId)))));
   const onDelete = () =>
-    window.confirm("Удалить скан вместе с находками и логом? Это необратимо.") &&
-    run("delete", async () => {
+    void confirm("Удалить скан вместе с находками и логом? Это необратимо.").then((ok) => void (ok && run("delete", async () => {
       await deleteScan(scanId);
       navigate("/scans", { replace: true });
-    });
+    })));
 
   if (missing) {
     return (
@@ -201,7 +214,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-xl font-semibold tracking-tight text-white">Скан #{scan.id}</h1>
+              <h1 className="bg-gradient-to-r from-white to-accent-soft bg-clip-text text-xl font-semibold tracking-tight text-transparent">Скан #{scan.id}</h1>
               <StatusBadge status={scan.status} />
             </div>
             {scan.schedule_id !== null && (
@@ -254,8 +267,17 @@ function ScanDetailView({ scanId }: { scanId: number }) {
             {canModify && active && scan.status !== "cancelling" && (
               <Button variant="danger" loading={busy === "cancel"} onClick={onCancel}>Остановить</Button>
             )}
-            {canModify && finished && scan.run_name && scan.runner_name && (
-              <Button variant="primary" onClick={() => setContinueOpen(true)} title="Продолжить этот прогон с новой инструкцией (новый скан)">
+            {canSeeAgents && finished && scan.run_name && (
+              <Button onClick={() => setAnalyzeOpen(true)} title="Создать сессию в «Коде»: находки и отчёт этого скана будут в её папке, агент поможет их проверить и исправить">
+                Разобрать в «Коде»
+              </Button>
+            )}
+            {canModify && contKind && (
+              <Button
+                variant="primary"
+                onClick={() => setContinueOpen(true)}
+                title={contKind === "restart" ? "Скан не дошёл до старта Strix — запустить его заново, с теми же целями и инструкцией" : "Продолжить этот прогон с новой инструкцией"}
+              >
                 Продолжить…
               </Button>
             )}
@@ -304,7 +326,8 @@ function ScanDetailView({ scanId }: { scanId: number }) {
       </Card>
 
       <ErrorNote message={error} />
-      {scan.run_name && <ContinueModal scan={scan} open={continueOpen} onClose={() => setContinueOpen(false)} onContinued={onContinued} />}
+      {canSeeAgents && <AnalyzeModal open={analyzeOpen} scanId={scan.id} onClose={() => setAnalyzeOpen(false)} />}
+      {contKind && <ContinueModal scan={scan} kind={contKind} open={continueOpen} onClose={() => setContinueOpen(false)} onContinued={onContinued} />}
 
       <div className="mb-5 mt-8 flex gap-1 border-b border-white/10">
         {tabs.map((t) => (
@@ -362,6 +385,7 @@ function ScanDetailView({ scanId }: { scanId: number }) {
         <Card className="space-y-5 p-6">
           <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
             <Stat label="LLM-профиль" value={scan.llm_profile_name ?? "—"} />
+            {scan.llm_model && <Stat label="Модель" value={scan.llm_model} />}
             <Stat label="Лимит бюджета" value={scan.max_budget ? `$${scan.max_budget}` : "не задан"} />
             <Stat label="Создан" value={formatDateTime(scan.created_at)} />
           </dl>

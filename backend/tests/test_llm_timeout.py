@@ -14,7 +14,7 @@ from tests.test_strix_privacy import spec
 
 def test_the_default_is_strixs_own_so_it_changes_nothing():
     assert Settings(_env_file=None).llm_preflight_timeout == 30
-    assert strix_llm_timeout_env() == {"LLM_PREFLIGHT_TIMEOUT": "30"}
+    assert strix_llm_timeout_env() == {"LLM_PREFLIGHT_TIMEOUT": "30", "LLM_TIMEOUT": "300", "LLM_STREAM_IDLE_TIMEOUT": "300"}
 
 
 def test_the_setting_comes_from_the_environment(monkeypatch):

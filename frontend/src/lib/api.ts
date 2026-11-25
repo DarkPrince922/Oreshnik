@@ -1,5 +1,7 @@
 import axios, { AxiosError } from "axios";
 
+// Where the API is. Empty = the same address the panel itself was opened at (the production build: nginx hands /api on to the
+// backend, so there is nothing to configure and no CORS). Not set at all = the development default.
 const baseURL = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 export const TOKEN_KEY = "oreshnik_token";
@@ -31,6 +33,7 @@ export function notifyUnauthorized(): void {
   onUnauthorized?.();
 }
 export function apiWsUrl(path: string): string {
+  if (baseURL === "") return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}${path}`;
   return baseURL.replace(/^http/, "ws") + path;
 }
 
@@ -77,6 +80,8 @@ export interface User {
   email: string;
   role: Role;
   is_active: boolean;
+  /** May use «Агент» (their own OpenHands server). Administrators always may. */
+  agent_access: boolean;
   created_at: string;
 }
 
@@ -86,6 +91,8 @@ export interface LLMProfile {
   provider: Provider;
   model: string;
   base_url: string | null;
+  /** Every model the provider served when «Загрузить модели» last ran: what a scan can pick from (plus `model`, the default). */
+  models: string[];
   api_key_hint: string;
   strix_model: string;
   created_at: string;
@@ -151,6 +158,8 @@ export interface Scan {
   runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  /** The model the scan runs with: the one chosen, else the profile's default. */
+  llm_model: string | null;
   targets: string[];
   scan_mode: ScanMode;
   instruction: string | null;
@@ -185,6 +194,8 @@ export interface ScanList {
   total: number;
   limit: number;
   offset: number;
+  /** How many scans of each status the list holds (same schedule and search), whatever status the rows are narrowed to. */
+  counts: Partial<Record<ScanStatus, number>>;
 }
 
 export interface Finding {
@@ -219,7 +230,7 @@ export const changePassword = (current_password: string, new_password: string) =
 export const listUsers = async () => (await api.get<User[]>("/api/users")).data;
 export const createUser = async (body: { email: string; password: string; role: Role }) =>
   (await api.post<User>("/api/users", body)).data;
-export const updateUser = async (id: number, body: Partial<{ role: Role; is_active: boolean; password: string }>) =>
+export const updateUser = async (id: number, body: Partial<{ role: Role; is_active: boolean; agent_access: boolean; password: string }>) =>
   (await api.patch<User>(`/api/users/${id}`, body)).data;
 export const deleteUser = (id: number) => api.delete(`/api/users/${id}`);
 
@@ -232,17 +243,20 @@ export const fetchModels = async (body: {
   base_url: string | null;
   api_key?: string;
   profile_id?: number;
-}) => (await api.post<{ models: string[] }>("/api/llm-profiles/models", body)).data.models;
+}) => (await api.post<{ models: string[]; saved: boolean }>("/api/llm-profiles/models", body)).data;
+/** Ask the provider again, with the profile's stored key, and keep the whole list. */
+export const refreshProfileModels = async (id: number) => (await api.post<LLMProfile>(`/api/llm-profiles/${id}/refresh-models`)).data;
 export const createProfile = async (body: {
   name: string;
   provider: Provider;
   model: string;
   base_url: string | null;
   api_key: string;
+  models?: string[];
 }) => (await api.post<LLMProfile>("/api/llm-profiles", body)).data;
 export const updateProfile = async (
   id: number,
-  body: { name: string; provider: Provider; model: string; base_url: string | null; api_key?: string }
+  body: { name: string; provider: Provider; model: string; base_url: string | null; api_key?: string; models?: string[] }
 ) => (await api.patch<LLMProfile>(`/api/llm-profiles/${id}`, body)).data;
 export const deleteProfile = (id: number) => api.delete(`/api/llm-profiles/${id}`);
 
@@ -289,9 +303,11 @@ export interface ScanCreateInput {
   max_budget: number | null;
   runner_id: number | null;
   llm_profile_id: number | null;
+  /** One of the profile's models; null = the profile's own default. */
+  llm_model?: string | null;
 }
 export const createScan = async (body: ScanCreateInput) => (await api.post<Scan>("/api/scans", body)).data;
-export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; limit?: number; offset?: number } = {}) =>
+export const listScans = async (params: { status?: ScanStatus; schedule_id?: number; active?: boolean; q?: string; owner?: "mine" | "others"; limit?: number; offset?: number } = {}) =>
   (await api.get<ScanList>("/api/scans", { params })).data;
 export const getScan = async (id: number) => (await api.get<Scan>(`/api/scans/${id}`)).data;
 export const cancelScan = async (id: number) => (await api.post<Scan>(`/api/scans/${id}/cancel`)).data;
@@ -360,6 +376,7 @@ export interface ContinueInput {
   instruction: string | null;
   max_budget: number | null;
   llm_profile_id: number | null;
+  llm_model?: string | null;
   /** false (default): continue this very scan. true: create a new scan on a copy of the run. */
   as_new_scan?: boolean;
 }
@@ -386,6 +403,7 @@ export interface Schedule {
   runner_kind: RunnerKind | null;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  llm_model: string | null;
   next_run_at: string | null;
   next_runs: string[];
   last_run_at: string | null;
@@ -407,6 +425,7 @@ export interface ScheduleInput {
   max_budget: number | null;
   runner_id: number | null;
   llm_profile_id: number | null;
+  llm_model?: string | null;
 }
 
 export interface SchedulePreview {
@@ -466,6 +485,7 @@ export interface OpsRun {
   goal: string;
   llm_profile_id: number | null;
   llm_profile_name: string | null;
+  llm_model: string | null;
   status: OpsRunStatus;
   script: string | null;
   script_error: string | null;
@@ -480,6 +500,396 @@ export interface OpsRun {
 export const listOpsTargetRunners = async () => (await api.get<{ id: number; name: string }[]>("/api/ops/runners")).data;
 export const listOpsRuns = async () => (await api.get<OpsRun[]>("/api/ops")).data;
 export const getOpsRun = async (id: number) => (await api.get<OpsRun>(`/api/ops/${id}`)).data;
-export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; runner_ids: number[] }) =>
+export const createOpsRun = async (body: { name: string; goal: string; llm_profile_id: number; llm_model?: string | null; runner_ids: number[] }) =>
   (await api.post<OpsRun>("/api/ops", body)).data;
 export const cancelOpsRun = async (id: number) => (await api.post<OpsRun>(`/api/ops/${id}/cancel`)).data;
+
+// ── Агент ────────────────────────────────────────────────────────────────
+//
+// A chat with Codex CLI that runs in the isolated agent container (see backend/app/api/agent.py). Each message is one "turn"; what the agent
+// does comes back as an ordered history of events plus snapshots of what it is writing right now, live over a WebSocket.
+
+export type AgentSessionStatus = "idle" | "running";
+export type ApprovalMode = "auto" | "ask";
+export type WebSearchMode = "auto" | "on" | "off";
+/** A goal makes the agent work by itself, turn after turn, until it is reached or its token budget is spent. */
+export interface AgentGoal {
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete" | string;
+  token_budget: number | null;
+  tokens_used: number;
+  seconds_used: number;
+}
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+
+export interface AgentSession {
+  id: number;
+  title: string;
+  llm_profile_id: number | null;
+  llm_profile_name: string | null;
+  /** The model the session talks to: the one chosen, else the profile's default. */
+  llm_model: string | null;
+  instructions: string | null;
+  persona_id: number | null;
+  persona_name: string | null;
+  reasoning_effort: string | null;
+  approval_mode: ApprovalMode;
+  web_search: WebSearchMode;
+  goal: AgentGoal | null;
+  /** Tokens in the model's context after the last turn, and the window Codex assumes for the model (a guess when `context_window_known` is false). */
+  context_used: number | null;
+  context_window: number | null;
+  context_window_known: boolean;
+  /** Spent by the session in total. */
+  tokens_in: number;
+  tokens_out: number;
+  status: AgentSessionStatus;
+  turn_count: number;
+  last_error: string | null;
+  cancel_requested: boolean;
+  event_count: number;
+  /** A listener open for this session right now (see docs/ARCHITECTURE.md §27), or null. */
+  listener_port: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentListener {
+  port: number | null;
+  opened_at: string | null;
+  last_active: string | null;
+}
+export interface AgentListenerRange {
+  available: boolean;
+  min: number | null;
+  max: number | null;
+}
+
+/** One stored event: `kind` is "user", "action", "turn.started", "item.completed", "turn.diff", "turn.plan", "approval.requested/resolved",
+ * "turn.completed", "thread.reverted", "turn.error"/"turn.stopped"/"turn.notice" (the panel's own notes). */
+export interface AgentEvent {
+  seq: number;
+  kind: string;
+  payload: Record<string, unknown>;
+}
+
+export interface AgentSessionInput {
+  title: string;
+  llm_profile_id: number;
+  llm_model?: string | null;
+  instructions?: string | null;
+  persona_id?: number | null;
+  reasoning_effort?: string | null;
+  approval_mode?: ApprovalMode;
+}
+export interface AgentSettingsInput {
+  title?: string;
+  instructions?: string | null;
+  persona_id?: number | null;
+  reasoning_effort?: string | null;
+  approval_mode?: ApprovalMode;
+  web_search?: WebSearchMode;
+}
+export type ReviewTarget = { type: "uncommittedChanges" } | { type: "baseBranch"; branch: string } | { type: "commit"; sha: string } | { type: "custom"; instructions: string };
+export type AgentActionInput =
+  | { action: "compact" }
+  | { action: "revert" }
+  | { action: "goal"; objective?: string; token_budget?: number }
+  | { action: "goal_clear" }
+  | { action: "shell"; command: string }
+  | { action: "review"; target?: ReviewTarget };
+export type ApprovalDecision = "accept" | "accept_session" | "decline" | "cancel" | "answer";
+
+export interface AgentFileEntry {
+  name: string;
+  dir: boolean;
+  size: number | null;
+  modified: number;
+}
+export interface AgentFileListing {
+  path: string;
+  entries: AgentFileEntry[];
+}
+export interface AgentFilePreview {
+  binary: boolean;
+  size: number;
+  text: string | null;
+  truncated: boolean;
+}
+
+const A = "/api/agent/sessions";
+export const getAgentHealth = async () => (await api.get<{ ok: boolean; detail: string }>("/api/agent/health")).data;
+export const listAgentSessions = async () => (await api.get<AgentSession[]>(A)).data;
+export const createAgentSession = async (body: AgentSessionInput) => (await api.post<AgentSession>(A, body)).data;
+export const getAgentSession = async (id: number) => (await api.get<AgentSession>(`${A}/${id}`)).data;
+export const updateAgentSession = async (id: number, body: AgentSettingsInput) => (await api.patch<AgentSession>(`${A}/${id}`, body)).data;
+export const deleteAgentSession = async (id: number) => {
+  await api.delete(`${A}/${id}`);
+};
+export const sendAgentMessage = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/messages`, { text })).data;
+/** Add an instruction to the turn that is running now. */
+export const steerAgentTurn = async (id: number, text: string) => (await api.post<AgentSession>(`${A}/${id}/steer`, { text })).data;
+export const stopAgentTurn = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/stop`)).data;
+export const getAgentListenerRange = async () => (await api.get<AgentListenerRange>("/api/agent/listener-range")).data;
+export const getAgentListener = async (id: number) => (await api.get<AgentListener>(`${A}/${id}/listener`)).data;
+export const openAgentListener = async (id: number, port: number) => (await api.post<AgentListener>(`${A}/${id}/listener`, { port })).data;
+export const closeAgentListener = async (id: number) => {
+  await api.delete(`${A}/${id}/listener`);
+};
+export const runAgentAction = async (id: number, body: AgentActionInput) => (await api.post<AgentSession>(`${A}/${id}/actions`, body)).data;
+export const forkAgentSession = async (id: number) => (await api.post<AgentSession>(`${A}/${id}/fork`, undefined, { timeout: 300_000 })).data;
+export const answerAgentApproval = async (id: number, requestId: string, decision: ApprovalDecision, answers?: Record<string, string | string[]>) => {
+  await api.post(`${A}/${id}/approvals/${encodeURIComponent(requestId)}`, { decision, answers: answers ?? null });
+};
+
+export const listAgentFiles = async (id: number, path = "") => (await api.get<AgentFileListing>(`${A}/${id}/files`, { params: { path } })).data;
+export const readAgentFile = async (id: number, path: string) => (await api.get<AgentFilePreview>(`${A}/${id}/files/content`, { params: { path } })).data;
+export const uploadAgentFile = async (id: number, path: string, file: File) =>
+  (await api.put<{ path: string; size: number }>(`${A}/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
+export const cloneIntoAgent = async (id: number, url: string) => (await api.post<{ path: string }>(`${A}/${id}/files/clone`, { url }, { timeout: 330_000 })).data;
+
+/** Save a file the panel serves behind the login: fetched with the token, then handed to the browser as a download. */
+async function saveBlob(url: string, params: Record<string, string>, filename: string): Promise<void> {
+  const response = await api.get<Blob>(url, { params, responseType: "blob", timeout: 600_000 });
+  const href = URL.createObjectURL(response.data);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
+export const downloadAgentFile = (id: number, path: string) => saveBlob(`${A}/${id}/files/download`, { path }, path.split("/").pop() || "file");
+export const downloadAgentArchive = (id: number, title: string) => saveBlob(`${A}/${id}/files/archive`, {}, `${title.replace(/[^\p{L}\p{N}._-]+/gu, "_") || "session"}.zip`);
+
+export interface AgentFromScan {
+  session: AgentSession;
+  /** The task proposed for the first message: the user reads it and sends it. */
+  draft: string;
+  files: number;
+}
+export const createAgentFromScan = async (scanId: number, body: { llm_profile_id: number; llm_model?: string | null }) =>
+  (await api.post<AgentFromScan>(`/api/agent/from-scan/${scanId}`, body, { timeout: 120_000 })).data;
+
+// ── Настройки ────────────────────────────────────────────────────────────
+//
+// The operating parameters that used to live only in `.env`. `value` applies right now; `default` is what `.env` / the built-in
+// default says (what "сбросить" returns to); `restart` is not empty for a parameter that needs a restart of that part to apply.
+
+export type SettingKind = "int" | "float" | "bool" | "choice" | "text";
+export type SettingValue = number | boolean | string;
+
+export interface AppSettingItem {
+  key: string;
+  env: string;
+  label: string;
+  hint: string;
+  kind: SettingKind;
+  minimum: number | null;
+  maximum: number | null;
+  choices: string[];
+  unit: string;
+  restart: string;
+  value: SettingValue;
+  default: SettingValue;
+  changed: boolean;
+  updated_at: string | null;
+}
+export interface AppSettingsGroup {
+  name: string;
+  items: AppSettingItem[];
+}
+export const getAppSettings = async () => (await api.get<{ groups: AppSettingsGroup[] }>("/api/settings")).data.groups;
+/** key -> new value; `null` resets that parameter to its default. All or nothing. */
+export const updateAppSettings = async (values: Record<string, SettingValue | null>) =>
+  (await api.put<{ groups: AppSettingsGroup[] }>("/api/settings", { values })).data.groups;
+
+// ── Огоньки в меню ───────────────────────────────────────────────────────
+//
+// What is new since the user last opened «Сканы» / «Агент» (see backend/app/api/attention.py).
+
+export interface Attention {
+  /** The server's clock: stored as "seen" when a section is opened. */
+  now: string;
+  scans: { finished: number; failed: number; findings: number };
+  agent: { finished: number; waiting: number };
+}
+export const getAttention = async (params: { scans_since?: string; agent_since?: string }) => (await api.get<Attention>("/api/attention", { params })).data;
+
+// ── Личности ─────────────────────────────────────────────────────────────
+
+export type PersonaScope = "both" | "code" | "agent";
+/** Who an AI agent is: its role, tone and rules, given to it as its instructions. */
+export interface Persona {
+  id: number;
+  name: string;
+  description: string;
+  instructions: string;
+  scope: PersonaScope;
+  /** Made by an administrator for everybody: anyone picks it, only an administrator changes it. */
+  shared: boolean;
+  /** The user's own default for new sessions. */
+  is_default: boolean;
+  mine: boolean;
+  editable: boolean;
+  /** Sessions of the current user that run with it. */
+  sessions: number;
+  /** The skills an agent with this persona gets: exactly these names; null = every enabled skill. */
+  skills: string[] | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface PersonaInput {
+  name: string;
+  description: string;
+  instructions: string;
+  scope: PersonaScope;
+  shared?: boolean;
+  is_default: boolean;
+  skills?: string[] | null;
+}
+export const listPersonas = async () => (await api.get<Persona[]>("/api/personas")).data;
+export const createPersona = async (body: PersonaInput) => (await api.post<Persona>("/api/personas", body)).data;
+export const updatePersona = async (id: number, body: Partial<PersonaInput>) => (await api.patch<Persona>(`/api/personas/${id}`, body)).data;
+export const deletePersona = (id: number) => api.delete(`/api/personas/${id}`);
+
+// ── Навыки ───────────────────────────────────────────────────────────────
+
+export type SkillScope = PersonaScope;
+/** An Agent Skill: SKILL.md (name, description, instructions) and the files next to it — the open format of Codex, OpenHands, Claude Code. */
+export interface Skill {
+  id: number;
+  name: string;
+  description: string;
+  skill_md: string;
+  files: { path: string; size: number }[];
+  scope: SkillScope;
+  shared: boolean;
+  enabled: boolean;
+  mine: boolean;
+  editable: boolean;
+  /** A shared skill the user's own one of the same name replaces. */
+  overridden: boolean;
+  /** What the panel repaired in SKILL.md on this save. */
+  notes: string[];
+  created_at: string;
+  updated_at: string;
+}
+export interface SkillInput {
+  skill_md: string;
+  scope: SkillScope;
+  enabled: boolean;
+  shared?: boolean;
+}
+export const listSkills = async () => (await api.get<Skill[]>("/api/skills")).data;
+export const createSkill = async (body: SkillInput) => (await api.post<Skill>("/api/skills", body)).data;
+export const updateSkill = async (id: number, body: Partial<SkillInput>) => (await api.patch<Skill>(`/api/skills/${id}`, body)).data;
+export const deleteSkill = (id: number) => api.delete(`/api/skills/${id}`);
+export const importSkills = async (file: File, shared = false) => {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("shared", String(shared));
+  return (await api.post<{ skills: Skill[]; skipped: string[] }>("/api/skills/import", form, { timeout: 300_000 })).data;
+};
+export const putSkillFile = async (id: number, path: string, file: File) =>
+  (await api.put<Skill>(`/api/skills/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
+export const deleteSkillFile = async (id: number, path: string) => (await api.delete<Skill>(`/api/skills/${id}/files`, { params: { path } })).data;
+export const readSkillFile = async (id: number, path: string) =>
+  (await api.get<{ path: string; size: number; text: string | null }>(`/api/skills/${id}/files/content`, { params: { path } })).data;
+export const exportSkill = (id: number, name: string) => saveBlob(`/api/skills/${id}/export`, {}, `${name}.zip`);
+
+// ── MCP-серверы ──────────────────────────────────────────────────────────
+
+export interface McpSecret {
+  name: string;
+  /** null keeps the stored value (the panel never shows it back). */
+  value: string | null;
+}
+export interface McpCheckResult {
+  ok: boolean;
+  tools: { name: string; description: string }[];
+  error: string | null;
+  at: string | null;
+}
+export interface McpServer {
+  id: number;
+  name: string;
+  description: string;
+  transport: "command" | "url";
+  command: string | null;
+  url: string | null;
+  env_names: string[];
+  header_names: string[];
+  has_token: boolean;
+  scope: PersonaScope;
+  enabled: boolean;
+  shared: boolean;
+  mine: boolean;
+  editable: boolean;
+  overridden: boolean;
+  startup_timeout_sec: number;
+  tool_timeout_sec: number;
+  last_check: McpCheckResult | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface McpInput {
+  name: string;
+  description: string;
+  transport: "command" | "url";
+  command: string | null;
+  url: string | null;
+  env: McpSecret[];
+  headers: McpSecret[];
+  /** null keeps the stored token, "" removes it. */
+  bearer_token: string | null;
+  scope: PersonaScope;
+  enabled: boolean;
+  shared?: boolean;
+  startup_timeout_sec: number;
+  tool_timeout_sec: number;
+}
+export const listMcp = async () => (await api.get<McpServer[]>("/api/mcp")).data;
+export const createMcp = async (body: McpInput) => (await api.post<McpServer>("/api/mcp", body)).data;
+export const updateMcp = async (id: number, body: Partial<McpInput>) => (await api.patch<McpServer>(`/api/mcp/${id}`, body)).data;
+export const deleteMcp = (id: number) => api.delete(`/api/mcp/${id}`);
+export const checkMcp = async (id: number) => (await api.post<McpServer>(`/api/mcp/${id}/check`, undefined, { timeout: 720_000 })).data;
+
+// ── Агент (OpenHands на своём сервере) ───────────────────────────────────
+
+export type AgentServerStatus = "new" | "offline" | "installing" | "online" | "error";
+export interface AgentServer {
+  ssh_host: string;
+  ssh_port: number;
+  ssh_user: string;
+  has_key: boolean;
+  has_password: boolean;
+  /** The confirmed host key; null until the user compared and confirmed it. */
+  host_key_fingerprint: string | null;
+  /** A key the server showed that waits for confirmation. */
+  pending_fingerprint: string | null;
+  status: AgentServerStatus;
+  status_detail: string | null;
+  openhands_version: string | null;
+  installing: boolean;
+  checked_at: string | null;
+}
+export interface AgentServerInput {
+  ssh_host: string;
+  ssh_port: number;
+  ssh_user: string;
+  ssh_private_key?: string | null;
+  ssh_password?: string | null;
+  clear_key?: boolean;
+  clear_password?: boolean;
+}
+const AS = "/api/agent-server";
+export const getAgentServer = async () => (await api.get<AgentServer | null>(AS)).data;
+export const saveAgentServer = async (body: AgentServerInput) => (await api.put<AgentServer>(AS, body)).data;
+export const deleteAgentServer = () => api.delete(AS);
+export const checkAgentServer = async () => (await api.post<AgentServer>(`${AS}/check`, undefined, { timeout: 120_000 })).data;
+export const trustAgentServerKey = async (fingerprint: string) => (await api.post<AgentServer>(`${AS}/trust-host-key`, { fingerprint }, { timeout: 120_000 })).data;
+export const forgetAgentServerKey = async () => (await api.post<AgentServer>(`${AS}/forget-host-key`)).data;
+export const installAgentServer = async () => (await api.post<AgentServer>(`${AS}/install`)).data;
+export const getAgentServerLog = async () => (await api.get<{ running: boolean; log: string }>(`${AS}/install-log`)).data;

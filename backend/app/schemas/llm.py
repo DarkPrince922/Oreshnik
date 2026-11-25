@@ -3,7 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.models.llm_profile import Provider
-from app.services.llm import strix_model_id
+from app.services.llm import clean_model_list, strix_model_id
 
 
 def _clean_base_url(value: str | None) -> str | None:
@@ -23,8 +23,15 @@ class LLMProfileCreate(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     base_url: str | None = None
     api_key: str = Field(min_length=1, max_length=500)
+    # The list loaded with «Загрузить модели»: saved with the profile so a scan can pick any of them.
+    models: list[str] = Field(default_factory=list, max_length=5000)
 
     _url = field_validator("base_url")(_clean_base_url)
+
+    @field_validator("models")
+    @classmethod
+    def _models(cls, v: list[str]) -> list[str]:
+        return clean_model_list(v)
 
     @field_validator("name", "model", "api_key")
     @classmethod
@@ -44,8 +51,14 @@ class LLMProfileUpdate(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=200)
     base_url: str | None = None
     api_key: str | None = Field(default=None, max_length=500)
+    models: list[str] | None = Field(default=None, max_length=5000)  # replaces the saved list when sent
 
     _url = field_validator("base_url")(_clean_base_url)
+
+    @field_validator("models")
+    @classmethod
+    def _models(cls, v: list[str] | None) -> list[str] | None:
+        return None if v is None else clean_model_list(v)
 
     @field_validator("name", "model")
     @classmethod
@@ -68,6 +81,7 @@ class LLMProfileOut(BaseModel):
     provider: Provider
     model: str
     base_url: str | None
+    models: list[str] = []
     api_key_hint: str
     created_at: datetime
     updated_at: datetime
@@ -114,3 +128,5 @@ class ModelListRequest(BaseModel):
 
 class ModelListResponse(BaseModel):
     models: list[str]
+    # True when the list was also stored on the profile (a saved profile whose stored endpoint and key were used).
+    saved: bool = False

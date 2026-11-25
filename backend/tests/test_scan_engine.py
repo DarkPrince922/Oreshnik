@@ -217,7 +217,7 @@ def test_reaper_fails_scans_whose_worker_vanished(monkeypatch):
     done = make_scan(user.id, runner.id, status=ScanStatus.succeeded, heartbeat_at=old)
 
     assert reap_stale_scans() == 3
-    assert load_scan(stale.id).status == ScanStatus.failed and "Воркер потерян" in load_scan(stale.id).status_detail
+    assert load_scan(stale.id).status == ScanStatus.failed and "воркер пропал" in load_scan(stale.id).status_detail
     assert load_scan(stale_cancelling.id).status == ScanStatus.cancelled
     assert load_scan(never_beat.id).status == ScanStatus.failed
     assert load_scan(alive.id).status == ScanStatus.running
@@ -320,3 +320,123 @@ def test_a_model_that_never_answers_ends_the_scan_with_the_whole_reason_in_its_s
     detail = load_scan(scan.id).status_detail
     assert "did not answer within 30s (LLM_PREFLIGHT_TIMEOUT)" in detail and "endpoint is reachable." in detail
     assert "Проверьте, что до Base URL профиля достаёт именно раннер" in detail
+
+
+def _lost_run(scan_id: int, name: str = "example-com_ab12") -> Path:
+    """What a Strix run leaves in the scan's directory when the server goes down under it."""
+    import sqlite3
+
+    from app.services.scan_files import scan_dir
+
+    run = scan_dir(scan_id) / "strix_runs" / name
+    (run / ".state").mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"run_name": name, "status": "running", "llm_usage": {"cost": 1.5, "total_tokens": 4000}}))
+    (run / ".state" / "agents.json").write_text(json.dumps({"root": {"id": "a1"}}))
+    sqlite3.connect(run / ".state" / "agents.db").close()
+    (run / "vulnerabilities.json").write_text(json.dumps([{"id": "vuln-0001", "title": "SQLi", "severity": "high"}]))
+    return run
+
+
+def test_a_scan_lost_with_the_server_keeps_its_run_findings_and_spend_and_can_be_picked_up(monkeypatch):
+    """A restart of the server: the worker vanishes under a running scan. What the run had done is still on disk — the reaper takes
+    it in, so «Продолжить» resumes the run (it would start the scan over without its name) and the findings so far are shown."""
+    monkeypatch.setattr(tasks, "cleanup_containers", lambda label: 0)
+    user, runner = make_user("a@example.com"), make_runner()
+    started = datetime.now(timezone.utc) - timedelta(hours=5)
+    last_beat = started + timedelta(minutes=40)            # the server went down here, and came back hours later
+    scan = make_scan(user.id, runner.id, status=ScanStatus.running, started_at=started, heartbeat_at=last_beat)
+    _lost_run(scan.id)
+    assert reap_stale_scans() == 1
+    lost = load_scan(scan.id)
+    assert lost.status == ScanStatus.failed and lost.run_name == "example-com_ab12" and lost.cost == 1.5 and lost.total_tokens == 4000
+    assert "подхватит прогон" in lost.status_detail
+    assert [f.title for f in findings(scan.id)] == ["SQLi"]
+    assert abs((lost.finished_at - last_beat).total_seconds()) < 1  # the hours the server was down are not counted as scanning
+
+
+def test_a_lost_scan_without_agent_state_says_it_starts_over(monkeypatch):
+    monkeypatch.setattr(tasks, "cleanup_containers", lambda label: 0)
+    user, runner = make_user("a@example.com"), make_runner()
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    scan = make_scan(user.id, runner.id, status=ScanStatus.running, started_at=old, heartbeat_at=old)
+    reap_stale_scans()
+    assert load_scan(scan.id).run_name is None and "запустит скан заново" in load_scan(scan.id).status_detail
+
+
+def test_a_queued_scan_whose_task_was_lost_is_sent_again_once(monkeypatch):
+    sent = []
+    import types
+
+    monkeypatch.setattr(tasks, "scan_run", types.SimpleNamespace(delay=lambda scan_id: sent.append(scan_id)))
+    user, runner = make_user("a@example.com"), make_runner()
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    lost = make_scan(user.id, runner.id, status=ScanStatus.queued, created_at=old)
+    waiting = make_scan(user.id, runner.id, status=ScanStatus.queued, created_at=old, heartbeat_at=datetime.now(timezone.utc))  # its task polls
+    fresh = make_scan(user.id, runner.id, status=ScanStatus.queued)
+    reap_stale_scans()
+    assert sent == [lost.id]
+    reap_stale_scans()
+    assert sent == [lost.id]                              # sent once: the scan now counts as held
+    assert waiting.id not in sent and fresh.id not in sent
+
+
+def test_only_one_chain_of_retries_waits_for_a_place(monkeypatch):
+    store: dict = {}
+
+    class FakeRedis:
+        def set(self, key, value, nx=False, ex=None):
+            if nx and key in store:
+                return False
+            store[key] = value.encode()
+            return True
+
+        def get(self, key):
+            return store.get(key)
+
+        def expire(self, key, ttl):
+            return True
+
+    monkeypatch.setattr(tasks, "_redis", FakeRedis)
+    assert tasks._own_wait_loop(7, "first") and tasks._own_wait_loop(7, "first")
+    assert not tasks._own_wait_loop(7, "second")          # a duplicate task stops instead of retrying alongside
+    assert tasks._own_wait_loop(8, "second")
+
+
+def test_a_repository_clone_that_is_gone_is_cloned_again_before_a_resume(tmp_path):
+    """Strix 1.7.0 refuses to resume a run whose repository clone is gone ("cloned repo … is missing") and never clones it again."""
+    import subprocess
+    import sys
+
+    from app.engine.clones import RESTORE_CLONES_PY
+
+    repo = tmp_path / "src-repo"
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin"}
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (repo / "app.py").write_text("print(1)\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "x"], cwd=repo, check=True, env=env)
+    kept = tmp_path / "still-here"
+    kept.mkdir()
+    run = tmp_path / "strix_runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"targets_info": [
+        {"type": "repository", "details": {"target_repo": str(repo), "cloned_repo_path": "/tmp/strix_repos/r1/src-repo-gone"}},
+        {"type": "repository", "details": {"target_repo": str(repo), "cloned_repo_path": str(kept)}},
+        {"type": "web_application", "details": {"target_url": "https://x"}},
+    ], "llm_usage": {"cost": 1}}))
+    out = subprocess.run([sys.executable, "-c", RESTORE_CLONES_PY, str(run), str(tmp_path / "tmp")], capture_output=True, text=True, env=env)
+    assert out.returncode == 0 and "скачиваю заново" in out.stdout
+    record = json.loads((run / "run.json").read_text())
+    restored = record["targets_info"][0]["details"]["cloned_repo_path"]
+    assert restored == str((tmp_path / "tmp" / "strix_repos" / "r1" / "src-repo").resolve()) and (Path(restored) / "app.py").exists()
+    assert record["targets_info"][1]["details"]["cloned_repo_path"] == str(kept) and record["llm_usage"] == {"cost": 1}
+
+
+def test_strix_clones_into_the_scans_own_directory(tmp_path):
+    """$TMPDIR inside the scan's directory (a volume): a clone outlives a restart or a rebuild of the worker container."""
+    from app.engine.base import ScanSpec
+    from app.engine.local import LocalRunner
+
+    spec = ScanSpec(scan_id=3, targets=["x"], scan_mode="quick", instruction=None, max_budget=None, work_dir=tmp_path, run_label="l")
+    assert LocalRunner("strix").build_env(spec)["TMPDIR"] == str(tmp_path / "tmp")

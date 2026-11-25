@@ -1,0 +1,25 @@
+#!/bin/sh
+# Open (or close) THIS agent session's panel listener — the panel proxies one host port into this container.
+# Usage:  oreshnik-listen <port>          open a listener on <port> (a port from the configured range)
+#         oreshnik-listen close <port>    close it
+# The panel enables this per session via ORESHNIK_PANEL_URL + ORESHNIK_LISTENER_TOKEN (a short-lived, session-scoped token).
+set -eu
+
+if [ -z "${ORESHNIK_PANEL_URL:-}" ] || [ -z "${ORESHNIK_LISTENER_TOKEN:-}" ]; then
+  echo "Самозапрос листенера выключен панелью: открыть порт должен пользователь в настройках сессии." >&2
+  exit 3
+fi
+
+method=POST
+if [ "${1:-}" = "close" ]; then method=DELETE; shift; fi
+port="${1:-}"
+case "$port" in
+  '' | *[!0-9]*) echo "usage: oreshnik-listen <port> | oreshnik-listen close <port>" >&2; exit 2 ;;
+esac
+
+# --noproxy '*': the panel is reached directly over the internal network, never through the agent's outbound proxy.
+curl -fsS --noproxy '*' -X "$method" "$ORESHNIK_PANEL_URL/api/agent/internal/listener" \
+  -H "Authorization: Bearer $ORESHNIK_LISTENER_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data "{\"port\": $port}"
+echo

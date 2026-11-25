@@ -1,16 +1,19 @@
 import hashlib
 import logging
 import time
+import uuid
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.engine import RunResult, ScanSpec, get_runner
 from app.engine.docker_cleanup import cleanup_containers, run_label
+from app.engine.hints import scan_instruction
+from app.engine.retry import run_with_retries
 from app.models.llm_profile import LLMProfile
 from app.models.ops import OpsHostStatus, OpsRun, OpsRunHost, OpsRunStatus
 from app.models.runner import Runner, RunnerKind, RunnerStatus
@@ -168,13 +171,27 @@ class _Snapshot:
     resume_count: int = 0
 
 
-def _claim(scan_id: int) -> _Snapshot | None:
-    """Atomically move queued -> running; None if the scan is gone or was cancelled meanwhile."""
+# Serializes "count what runs, then start one" between workers, so two of them cannot both take the last place.
+_SLOT_LOCK = 7101
+_WAIT_SECONDS = 5
+# A queued scan with no sign of its task for this long has lost it (see reap_stale_scans).
+ORPHAN_SECONDS = 600
+
+
+def _claim(scan_id: int) -> "_Snapshot | str | None":
+    """Atomically move queued -> running; None if the scan is gone or was cancelled meanwhile, "busy" while the
+    limit of scans running at once (`scan_concurrency`, changeable in «Настройки») is reached — the scan stays queued."""
     with SessionLocal() as db:
+        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _SLOT_LOCK})  # released by the commit below
+        if db.scalar(select(Scan.status).where(Scan.id == scan_id)) != ScanStatus.queued:
+            return None
+        running = db.scalar(select(func.count()).select_from(Scan).where(Scan.status.in_((ScanStatus.running, ScanStatus.cancelling))))
+        if running >= settings.scan_concurrency:
+            return "busy"
         claimed = db.execute(
             update(Scan)
             .where(Scan.id == scan_id, Scan.status == ScanStatus.queued)
-            .values(status=ScanStatus.running, started_at=_utcnow(), heartbeat_at=_utcnow())
+            .values(status=ScanStatus.running, started_at=_utcnow(), heartbeat_at=_utcnow(), status_detail=None)  # the "waits for a place" note is over
         )
         db.commit()
         if claimed.rowcount == 0:
@@ -193,7 +210,7 @@ def _claim(scan_id: int) -> _Snapshot | None:
                 ssh_error = f"Не удалось подготовить SSH-подключение ({exc.__class__.__name__})"
         if scan.llm_profile is not None:
             try:
-                env = build_strix_env(scan.llm_profile)  # decrypts the key; only lives in this process
+                env = build_strix_env(scan.llm_profile, scan.llm_model)  # decrypts the key; only lives in this process
             except Exception as exc:
                 env_error = f"Не удалось подготовить LLM-профиль ({exc.__class__.__name__})"
         # The original instruction was handed to the agents when the scan first started; a resume carries only what
@@ -263,47 +280,104 @@ class _CancelProbe:
         return self._flag
 
 
+def _store_findings(db, scan_id: int, parsed: ParsedRun) -> None:
+    # Only replace the findings when the run directory was really read: a scan that is continued in place already
+    # holds its results, and a run that could not be parsed must not wipe them.
+    if parsed.run_name is not None:
+        db.execute(delete(Finding).where(Finding.scan_id == scan_id))
+    for f in parsed.findings:
+        db.add(
+            Finding(
+                scan_id=scan_id,
+                vuln_id=f.vuln_id,
+                title=f.title,
+                severity=f.severity,
+                target=f.target,
+                endpoint=f.endpoint,
+                method=f.method,
+                cve=f.cve,
+                cwe=f.cwe,
+                cvss=f.cvss,
+                found_at=f.found_at,
+                data=f.data,
+            )
+        )
+
+
+def _take_results(db, scan: Scan, parsed: ParsedRun) -> None:
+    """What a run left: its name (what «Продолжить» resumes), findings, run status and spend (cumulative across resumes: what is
+    known stays when the numbers could not be read)."""
+    _store_findings(db, scan.id, parsed)
+    scan.run_name = parsed.run_name or scan.run_name
+    scan.run_status = parsed.run_status if parsed.run_name is not None else scan.run_status
+    scan.cost = parsed.cost if parsed.cost is not None else scan.cost
+    scan.total_tokens = parsed.total_tokens if parsed.total_tokens is not None else scan.total_tokens
+
+
 def _finalize(scan_id: int, status: ScanStatus, detail: str | None, result: RunResult, parsed: ParsedRun) -> None:
     with SessionLocal() as db:
         scan = db.get(Scan, scan_id)
         if scan is None:
             return
-        # Only replace the findings when the run directory was really read: a scan that is continued in place already
-        # holds its results, and a run that could not be parsed must not wipe them.
-        if parsed.run_name is not None:
-            db.execute(delete(Finding).where(Finding.scan_id == scan_id))
-        for f in parsed.findings:
-            db.add(
-                Finding(
-                    scan_id=scan_id,
-                    vuln_id=f.vuln_id,
-                    title=f.title,
-                    severity=f.severity,
-                    target=f.target,
-                    endpoint=f.endpoint,
-                    method=f.method,
-                    cve=f.cve,
-                    cwe=f.cwe,
-                    cvss=f.cvss,
-                    found_at=f.found_at,
-                    data=f.data,
-                )
-            )
+        _take_results(db, scan, parsed)
         scan.status = status
         scan.status_detail = detail
         scan.exit_code = result.exit_code
-        scan.run_name = parsed.run_name or scan.run_name
-        scan.run_status = parsed.run_status if parsed.run_name is not None else scan.run_status
-        # cumulative across resumes: keep what is known if the final numbers could not be read
-        scan.cost = parsed.cost if parsed.cost is not None else scan.cost
-        scan.total_tokens = parsed.total_tokens if parsed.total_tokens is not None else scan.total_tokens
         scan.finished_at = _utcnow()
         db.commit()
 
 
+def _note_waiting(scan_id: int) -> None:
+    """Say on a queued scan why it has not started: every place for a running scan is taken. Shown on the scan's page."""
+    detail = (
+        f"Ждёт свободного места: сейчас выполняется столько сканов, сколько разрешено ({settings.scan_concurrency}). "
+        "Стартует сам, когда один из них завершится. Число меняется в «Настройках»: «Сканов одновременно»."
+    )
+    try:
+        with SessionLocal() as db:
+            # heartbeat_at of a queued scan: "a task still holds it". The reaper sends a new task for a queued scan nobody holds.
+            db.execute(update(Scan).where(Scan.id == scan_id, Scan.status == ScanStatus.queued).values(status_detail=detail, heartbeat_at=_utcnow()))
+            db.commit()
+    except Exception as exc:  # a note only: never worth failing the task over
+        log.warning("scan %s: could not note why it waits: %s", scan_id, exc)
+
+
+def _redis():
+    import redis
+
+    return redis.Redis.from_url(settings.redis_url, socket_timeout=5)
+
+
+def _own_wait_loop(scan_id: int, token: str) -> bool:
+    """Whether this chain of retries is THE one waiting for a place for the scan. A scan can get a second task (the reaper re-sends
+    one for a scan whose task was lost, the queue may deliver a lost task back later): without this both would go on retrying."""
+    try:
+        client = _redis()
+        key = f"oreshnik:scan-wait:{scan_id}"
+        if client.set(key, token, nx=True, ex=_WAIT_SECONDS * 6):
+            return True
+        if (client.get(key) or b"").decode() == token:
+            client.expire(key, _WAIT_SECONDS * 6)
+            return True
+        return False
+    except Exception as exc:  # no Redis: rather a duplicate retry than a scan nobody starts
+        log.warning("scan %s: wait lock unavailable: %s", scan_id, exc)
+        return True
+
+
 @celery.task(name="oreshnik.scan_run")
-def scan_run(scan_id: int) -> str:
+def scan_run(scan_id: int, wait_token: str | None = None) -> str:
     snap = _claim(scan_id)
+    if snap == "busy":
+        # No free place: try again shortly, the scan stays queued meanwhile (cancelling it makes the next try a no-op).
+        # Places are not handed out strictly in the order of arrival.
+        token = wait_token or uuid.uuid4().hex
+        if not _own_wait_loop(scan_id, token):
+            return "duplicate"
+        _note_waiting(scan_id)
+        if not celery.conf.task_always_eager:
+            scan_run.apply_async((scan_id, token), countdown=_WAIT_SECONDS)
+        return "waiting"
     if snap is None:
         return "skipped"
 
@@ -363,7 +437,7 @@ def scan_run(scan_id: int) -> str:
             scan_id=scan_id,
             targets=snap.targets,
             scan_mode=snap.scan_mode,
-            instruction=snap.instruction,
+            instruction=scan_instruction(snap.instruction, resumed=snap.resume_run is not None),
             max_budget=snap.max_budget,
             work_dir=work_dir,
             run_label=run_label(scan_id),
@@ -373,7 +447,7 @@ def scan_run(scan_id: int) -> str:
             ssh=snap.ssh,
         )
         tailer.start()
-        result = engine.run(spec, writer.write, _CancelProbe(scan_id))
+        result = run_with_retries(engine, spec, writer.write, _CancelProbe(scan_id))
     except _Preflight as exc:
         early_error = str(exc)
     except Exception as exc:
@@ -409,7 +483,13 @@ def scan_run(scan_id: int) -> str:
 
 @celery.task(name="oreshnik.reap_stale_scans")
 def reap_stale_scans() -> int:
-    """Fail scans whose worker vanished (no heartbeat), and remove their leftover sandboxes."""
+    """Fail scans whose worker vanished (no heartbeat), and remove their leftover sandboxes; send a new task for queued scans whose
+    task was lost.
+
+    A worker vanishes with the server (a restart, a power cut, the out-of-memory killer). What its scan had done is still in the
+    scan's directory — kept locally, or mirrored from an SSH runner every few seconds — so it is taken in like at a normal end: the
+    run's name (without it «Продолжить» would start the scan over), the findings so far, the spend. The scan ends at its last
+    heartbeat, not when the loss was noticed, so the time the server was down is not counted as scanning."""
     cutoff = _utcnow() - timedelta(seconds=settings.scan_stale_seconds)
     reaped: list[int] = []
     remote_cleanups: list[tuple[int, SshTarget]] = []
@@ -426,19 +506,49 @@ def reap_stale_scans() -> int:
                     remote_cleanups.append((scan.id, target_for(scan.runner)))
                 except Exception:
                     log.warning("scan %s: cannot prepare remote cleanup", scan.id)
+            try:
+                _take_results(db, scan, parse_run_dir(find_run_dir(scan_dir(scan.id))))
+            except Exception:
+                log.exception("scan %s: could not read what the lost run left", scan.id)
+            resumable = False
+            if scan.run_name:
+                try:
+                    check_resumable(scan.id, scan.run_name)
+                    resumable = True
+                except ResumeError:
+                    pass
             was_cancelling = scan.status == ScanStatus.cancelling
             scan.status = ScanStatus.cancelled if was_cancelling else ScanStatus.failed
-            scan.status_detail = (
-                "Остановлен (воркер не отвечал)" if was_cancelling else "Воркер потерян: нет heartbeat, скан прерван"
-            )
-            scan.finished_at = _utcnow()
+            if was_cancelling:
+                scan.status_detail = "Остановлен (воркер не отвечал)"
+            else:
+                scan.status_detail = "Скан прерван: воркер пропал (например, сервер перезагрузился)." + (
+                    " Найденное сохранено; «Продолжить» подхватит прогон с того места, где он остановился." if resumable
+                    else " Strix не успел записать состояние агентов — «Продолжить» запустит скан заново."
+                )
+            scan.finished_at = max(scan.heartbeat_at or scan.started_at or _utcnow(), scan.started_at or scan.created_at)
             reaped.append(scan.id)
+
+        # Queued scans nobody holds: their task was lost (the queue lost it in a restart). Send a new one; a scan that waits for a
+        # place has its heartbeat refreshed by its task every few seconds, so it is never sent twice.
+        orphans = db.scalars(
+            select(Scan).where(Scan.status == ScanStatus.queued, func.coalesce(Scan.heartbeat_at, Scan.created_at) < _utcnow() - timedelta(seconds=ORPHAN_SECONDS))
+        ).all()
+        for scan in orphans:
+            scan.heartbeat_at = _utcnow()
+        orphan_ids = [s.id for s in orphans]
         db.commit()
     for scan_id in reaped:
         log.warning("reaped stale scan %s", scan_id)
         cleanup_containers(run_label(scan_id))
     for scan_id, target in remote_cleanups:  # the worker that ran these is gone: Strix may still be running on the host
         cleanup_remote(target, scan_id, run_label(scan_id))
+    for scan_id in orphan_ids:
+        log.warning("scan %s was queued with no task: sending it again", scan_id)
+        try:
+            scan_run.delay(scan_id)
+        except Exception as exc:
+            log.error("could not re-send scan %s: %s", scan_id, exc)
     return len(reaped)
 
 
@@ -497,7 +607,7 @@ def ops_run(ops_run_id: int) -> str:
         return "no_profile"
 
     try:
-        script = ops.draft_script(profile, run.goal, runner_names)
+        script = ops.draft_script(profile, run.goal, runner_names, run.llm_model)
     except ops.OpsError as exc:
         _ops_finish(ops_run_id, OpsRunStatus.failed, script_error=str(exc))
         _ops_fail_all_hosts(ops_run_id, str(exc))
@@ -570,3 +680,81 @@ def _ops_fail_all_hosts(ops_run_id: int, note: str, *, status: OpsHostStatus = O
             .values(status=status, output=note, finished_at=_utcnow())
         )
         db.commit()
+
+
+# ── Агент ────────────────────────────────────────────────────────────────
+
+
+@celery.task(name="oreshnik.agent_turn")
+def agent_turn(session_id: int, prompt: str, action: str = "message", extra: dict | None = None) -> None:
+    """One action of a session (a message, compact, shell command, review, revert): stream the isolated container's events into its history."""
+    from app.services import agent as agent_service
+
+    agent_service.run_turn(SessionLocal, session_id, prompt, action, extra)
+
+
+@celery.task(name="oreshnik.reap_stale_agent_turns")
+def reap_stale_agent_turns() -> int:
+    """A turn whose worker vanished (no event for `agent_stale_seconds`) is given up on, so the chat is usable again."""
+    from app.models.agent import AgentSession, AgentSessionStatus
+    from app.services import agent as agent_service
+
+    cutoff = _utcnow() - timedelta(seconds=settings.agent_stale_seconds)
+    reaped: list[str] = []
+    with SessionLocal() as db:
+        stale = db.scalars(
+            select(AgentSession).where(
+                AgentSession.status == AgentSessionStatus.running,
+                func.coalesce(AgentSession.heartbeat_at, AgentSession.updated_at) < cutoff,
+            )
+        ).all()
+        for session in stale:
+            message = "Воркер потерян: ход прерван"
+            agent_service.append_event(db, session.id, "turn.error", {"message": message})
+            session.status = AgentSessionStatus.idle
+            session.last_error = message
+            session.cancel_requested = False
+            agent_service.live_delete(db, session.id)  # what it was in the middle of writing is not going to be finished
+            reaped.append(session.key)
+        db.commit()
+    for key in reaped:
+        agent_service.stop_turn(key)
+    return len(reaped)
+
+
+@celery.task(name="oreshnik.agent_server_install")
+def agent_server_install(server_id: int) -> dict:
+    """Install OpenHands on a user's own «Агент» server, logging every step into the server's `install_log`."""
+    from app.models.agent_server import AgentServer
+    from app.services import openhands
+
+    def save(text: str) -> None:
+        with SessionLocal() as db:
+            db.execute(update(AgentServer).where(AgentServer.id == server_id).values(install_log=text))
+            db.commit()
+
+    buffer = openhands.LogBuffer(save)
+    with SessionLocal() as db:
+        server = db.get(AgentServer, server_id)
+        if server is None:
+            return {"status": "error", "detail": "server not found"}
+        db.expunge(server)  # do not hold a transaction open for the minutes the installation takes
+    try:
+        outcome = openhands.install(server, buffer)
+    except Exception:
+        log.exception("installation on agent server %s crashed", server_id)
+        buffer("✗ Внутренняя ошибка установки")
+        outcome = openhands.InstallOutcome("error", "Установка прервана: внутренняя ошибка")
+    buffer.flush()
+    with SessionLocal() as db:
+        row = db.get(AgentServer, server_id)
+        if row is not None:
+            row.status, row.status_detail = outcome.status, outcome.detail
+            row.install_started_at = None
+            row.checked_at = _utcnow()
+            if outcome.api_key_enc:
+                row.api_key_enc = outcome.api_key_enc
+            if outcome.version:
+                row.openhands_version = outcome.version
+            db.commit()
+    return {"status": outcome.status, "detail": outcome.detail}

@@ -225,7 +225,7 @@ def test_fetch_models_endpoint_proxies_the_provider(client, operator, monkeypatc
     r = client.post(
         "/api/llm-profiles/models", headers=operator, json={"provider": "openai", "api_key": "sk-x"}
     )
-    assert r.status_code == 200 and r.json() == {"models": ["m1", "m2"]}
+    assert r.status_code == 200 and r.json() == {"models": ["m1", "m2"], "saved": False}  # a typed key is only probed, nothing is stored
 
 
 def test_fetch_models_endpoint_surfaces_provider_errors_as_502(client, operator, monkeypatch):

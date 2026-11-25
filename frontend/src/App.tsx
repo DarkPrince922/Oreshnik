@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import AnimatedBackground from "./components/AnimatedBackground";
+import ConfirmHost from "./components/ConfirmHost";
 import Layout from "./components/Layout";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { AuthProvider } from "./lib/auth";
@@ -10,7 +11,11 @@ import Dashboard from "./pages/Dashboard";
 import LLMProfiles from "./pages/LLMProfiles";
 import Login from "./pages/Login";
 import NewScan from "./pages/NewScan";
+import Agent from "./pages/Agent";
+import AgentServerPage from "./pages/AgentServer";
+import Settings from "./pages/Settings";
 import Ops from "./pages/Ops";
+import Workshop from "./pages/Workshop";
 import Runners from "./pages/Runners";
 import Schedules from "./pages/Schedules";
 import ScanDetail from "./pages/ScanDetail";
@@ -22,6 +27,7 @@ export default function App() {
     <AuthProvider>
       <div className="relative min-h-screen">
         <AnimatedBackground />
+        <ConfirmHost />
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route
@@ -68,10 +74,46 @@ export default function App() {
             />
             <Route path="runners" element={<Runners />} />
             <Route
+              path="code"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Agent />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="workshop"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <Workshop />
+                </ProtectedRoute>
+              }
+            />
+            {/* the three sections that the workshop joined: old links keep working */}
+            <Route path="personas" element={<Navigate to="/workshop?tab=personas" replace />} />
+            <Route path="skills" element={<Navigate to="/workshop?tab=skills" replace />} />
+            <Route path="mcp" element={<Navigate to="/workshop?tab=mcp" replace />} />
+            <Route
+              path="agent"
+              element={
+                <ProtectedRoute roles={["admin", "operator"]}>
+                  <AgentServerPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
               path="ops"
               element={
                 <ProtectedRoute roles={["admin"]}>
                   <Ops />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="settings"
+              element={
+                <ProtectedRoute roles={["admin"]}>
+                  <Settings />
                 </ProtectedRoute>
               }
             />

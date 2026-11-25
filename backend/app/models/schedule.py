@@ -33,6 +33,8 @@ class Schedule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # the scan template
+    llm_model: Mapped[str | None] = mapped_column(String(200), nullable=True)  # None = the profile's default model
+
     targets: Mapped[list[str]] = mapped_column(JSONB)
     scan_mode: Mapped[ScanMode] = mapped_column(Enum(ScanMode, name="scan_mode", create_type=False))
     instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
