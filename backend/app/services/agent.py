@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.crypto import decrypt
 from app.models.agent import AgentEvent, AgentLive, AgentSession, AgentSessionStatus
 from app.models.llm_profile import LLMProfile, Provider
+from app.models.user import Role, User
 
 log = logging.getLogger("oreshnik.agent")
 
@@ -342,6 +343,17 @@ def run_turn(db_factory: Callable[[], Session], session_id: int, prompt: str, ac
             return
         key, thread_id, chosen_model = session.key, session.thread_id, session.llm_model
         user_id = session.user_id
+        user = db.get(User, user_id)
+        if (not settings.agent_token or user_id != settings.agent_runtime_owner_id
+                or user is None or not user.is_active or user.role not in (Role.admin, Role.operator)):
+            message = "У аккаунта нет доступа к контейнеру «Кода»"
+            append_event(db, session_id, "turn.error", {"message": message})
+            live_delete(db, session_id)
+            session.status = AgentSessionStatus.idle
+            session.last_error = message
+            session.cancel_requested = False
+            db.commit()
+            return
         from app.models.persona import Persona
 
         persona = db.get(Persona, session.persona_id) if session.persona_id else None

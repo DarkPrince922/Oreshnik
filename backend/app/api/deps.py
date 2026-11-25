@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import decode_access_token
 from app.models.user import Role, User
@@ -47,3 +48,10 @@ def require_roles(*roles: Role) -> Callable[..., User]:
 
 require_admin = require_roles(Role.admin)
 require_operator = require_roles(Role.admin, Role.operator)
+
+
+def require_agent_runtime(user_id: int) -> None:
+    if not settings.agent_token:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Агент выключен: на сервере не задан AGENT_TOKEN")
+    if user_id != settings.agent_runtime_owner_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Контейнер «Кода» не выделен этому аккаунту")

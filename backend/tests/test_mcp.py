@@ -1,4 +1,5 @@
 """«MCP-серверы»: secrets stored encrypted and never shown back, own and shared servers, the check, and what a session of «Код» gets."""
+from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models import McpServer, Role
 from app.services import agent as agent_service
@@ -48,7 +49,9 @@ def test_own_servers_are_private_and_shared_ones_are_for_everybody(client):
 
 
 def test_the_check_lists_the_tools_and_is_remembered(client, monkeypatch):
-    _, h = op_user(client)
+    user, h = op_user(client)
+    monkeypatch.setattr(settings, "agent_token", "mock-agent-token")
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", user.id)
     server = make(client, h)
     sent = []
     monkeypatch.setattr(agent_service, "check_mcp", lambda payload, timeout: sent.append(payload) or {"ok": True, "tools": [{"name": "search", "description": "d"}], "error": None})
@@ -66,6 +69,7 @@ def test_a_session_of_kod_gets_the_enabled_servers_and_the_users_own_wins(client
     monkeypatch.setattr(agent_service, "stream_turn", lambda **kw: sent.append(kw) or real(**kw))
     _, admin = op_user(client, "admin@example.com", Role.admin)
     user, h = op_user(client)
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", user.id)
     make(client, admin, shared=True, env=[{"name": "SHODAN_API_KEY", "value": "admins"}])
     make(client, admin, name="agentonly", shared=True, scope="agent")
     make(client, h)

@@ -200,31 +200,52 @@ def read_archive(data: bytes) -> tuple[list[ParsedSkill], list[str]]:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
         raise SkillError("Это не zip-архив")
-    entries = {i.filename.replace("\\", "/"): i for i in archive.infolist() if not i.is_dir() and not _SKIP.search(i.filename)}
-    roots = sorted({posixpath.dirname(p) for p in entries if posixpath.basename(p) == "SKILL.md"}, key=len)
-    roots = [r for r in roots if not any(r != o and r.startswith(o + "/") for o in roots if o) and not ("" in roots and r != "")]
-    if not roots:
-        raise SkillError("В архиве нет SKILL.md")
+    with archive:
+        entries = {}
+        for info in archive.infolist():
+            path = info.filename.replace("\\", "/")
+            if not info.is_dir() and not path.startswith("/") and not _SKIP.search(path):
+                entries[path] = info
+        roots = {posixpath.dirname(path) for path in entries if posixpath.basename(path) == "SKILL.md"}
+        if not roots:
+            raise SkillError("В архиве нет SKILL.md")
+
+        files_by_root: dict[str, list[tuple[str, zipfile.ZipInfo]]] = {root: [] for root in roots}
+        for path, info in entries.items():
+            if posixpath.basename(path) == "SKILL.md":
+                continue
+            parent = posixpath.dirname(path)
+            while parent and parent not in roots:
+                parent = posixpath.dirname(parent)
+            if parent in roots:
+                relative = path[len(parent) + 1:] if parent else path
+                files_by_root[parent].append((relative, info))
+
+        parsed_by_name: dict[str, list[tuple[str, ParsedSkill]]] = {}
+        skipped: list[str] = []
+        for root in sorted(roots):
+            label = root or "."
+            try:
+                with archive.open(entries[posixpath.join(root, "SKILL.md")]) as f:
+                    text = f.read(MAX_SKILL_MD * 4 + 1).decode("utf-8", "replace")
+                skill = parse_skill_md(text, posixpath.basename(root) or "skill")
+                for relative, info in files_by_root[root]:
+                    if info.file_size > MAX_FILE:
+                        raise SkillError(f"файл {relative} больше {MAX_FILE // 1_000_000} МБ")
+                    with archive.open(info) as f:
+                        skill.files[clean_path(relative)] = base64.b64encode(f.read(MAX_FILE + 1)).decode()
+                check_files(skill.skill_md, skill.files)
+                parsed_by_name.setdefault(skill.name, []).append((label, skill))
+            except (SkillError, zipfile.BadZipFile, RuntimeError) as exc:
+                skipped.append(f"{label}: {exc}")
+
     skills: list[ParsedSkill] = []
-    skipped: list[str] = []
-    for root in roots:
-        label = posixpath.basename(root) or "skill"
-        try:
-            prefix = root + "/" if root else ""
-            with archive.open(entries[prefix + "SKILL.md"]) as f:
-                text = f.read(MAX_SKILL_MD * 4 + 1).decode("utf-8", "replace")
-            skill = parse_skill_md(text, label)
-            for path, info in entries.items():
-                if not path.startswith(prefix) or path == prefix + "SKILL.md":
-                    continue
-                if info.file_size > MAX_FILE:
-                    raise SkillError(f"файл {path} больше {MAX_FILE // 1_000_000} МБ")
-                with archive.open(info) as f:
-                    skill.files[clean_path(path[len(prefix):])] = base64.b64encode(f.read(MAX_FILE + 1)).decode()
-            check_files(skill.skill_md, skill.files)
-            skills.append(skill)
-        except SkillError as exc:
-            skipped.append(f"{label}: {exc}")
+    for name, candidates in parsed_by_name.items():
+        if len(candidates) == 1:
+            skills.append(candidates[0][1])
+        else:
+            folders = ", ".join(folder for folder, _ in candidates)
+            skipped.append(f"Имя {name!r} совпадает у нескольких навыков: {folders}")
     if not skills:
         raise SkillError("Ни один навык из архива не подошёл: " + "; ".join(skipped[:5]))
     return skills, skipped

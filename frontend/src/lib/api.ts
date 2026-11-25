@@ -763,7 +763,8 @@ export interface Skill {
   name: string;
   description: string;
   skill_md: string;
-  files: { path: string; size: number }[];
+  files: { path: string; size: number; revision: string }[];
+  edit_revision: string;
   scope: SkillScope;
   shared: boolean;
   enabled: boolean;
@@ -784,17 +785,18 @@ export interface SkillInput {
 }
 export const listSkills = async () => (await api.get<Skill[]>("/api/skills")).data;
 export const createSkill = async (body: SkillInput) => (await api.post<Skill>("/api/skills", body)).data;
-export const updateSkill = async (id: number, body: Partial<SkillInput>) => (await api.patch<Skill>(`/api/skills/${id}`, body)).data;
-export const deleteSkill = (id: number) => api.delete(`/api/skills/${id}`);
+export const updateSkill = async (id: number, body: Partial<SkillInput> & { expected_revision?: string }) => (await api.patch<Skill>(`/api/skills/${id}`, body)).data;
+export const deleteSkill = (id: number, expectedRevision: string) =>
+  api.delete(`/api/skills/${id}`, { params: { expected_revision: expectedRevision } });
 export const importSkills = async (file: File, shared = false) => {
   const form = new FormData();
   form.append("file", file);
   form.append("shared", String(shared));
   return (await api.post<{ skills: Skill[]; skipped: string[] }>("/api/skills/import", form, { timeout: 300_000 })).data;
 };
-export const putSkillFile = async (id: number, path: string, file: File) =>
-  (await api.put<Skill>(`/api/skills/${id}/files`, file, { params: { path }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
-export const deleteSkillFile = async (id: number, path: string) => (await api.delete<Skill>(`/api/skills/${id}/files`, { params: { path } })).data;
+export const putSkillFile = async (id: number, path: string, file: File, expectedRevision: string) =>
+  (await api.put<Skill>(`/api/skills/${id}/files`, file, { params: { path, expected_revision: expectedRevision }, headers: { "Content-Type": "application/octet-stream" }, timeout: 300_000 })).data;
+export const deleteSkillFile = async (id: number, path: string, expectedRevision: string) => (await api.delete<Skill>(`/api/skills/${id}/files`, { params: { path, expected_revision: expectedRevision } })).data;
 export const readSkillFile = async (id: number, path: string) =>
   (await api.get<{ path: string; size: number; text: string | null }>(`/api/skills/${id}/files/content`, { params: { path } })).data;
 export const exportSkill = (id: number, name: string) => saveBlob(`/api/skills/${id}/export`, {}, `${name}.zip`);

@@ -2,21 +2,23 @@ import type { McpServer, PersonaScope, Skill } from "./api";
 
 type Where = Exclude<PersonaScope, "both">;
 
-/** The skills an agent of `where` gets: enabled, meant for it, and not replaced by the user's own skill of the same name. */
-export function effectiveSkills(skills: Skill[], where: Where): Skill[] {
-  return skills.filter((s) => s.enabled && !s.overridden && (s.scope === "both" || s.scope === where)).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/** The skills an agent with `persona` gets: the persona's own choice (enabled or not, the user's own skill winning over a shared one
- * of the same name), or every enabled skill when the persona chose none. Mirrors app/api/skills.py `for_agent`. */
+/** Match the API: filter by scope and selection before resolving duplicate names. */
 export function skillsForPersona(skills: Skill[], persona: { skills: string[] | null } | null | undefined, where: Where): Skill[] {
-  if (!persona || persona.skills === null || persona.skills === undefined) return effectiveSkills(skills, where);
-  const wanted = new Set(persona.skills);
+  const wanted = persona?.skills == null ? null : new Set(persona.skills);
   const chosen = new Map<string, Skill>();
-  for (const s of [...skills].sort((a, b) => Number(!a.shared) - Number(!b.shared))) {
-    if (wanted.has(s.name) && (s.scope === "both" || s.scope === where)) chosen.set(s.name, s);
+  for (const skill of skills) {
+    if (skill.scope !== "both" && skill.scope !== where) continue;
+    if (wanted ? !wanted.has(skill.name) : !skill.enabled) continue;
+    const previous = chosen.get(skill.name);
+    if (!previous || (!skill.shared && previous.shared) || (skill.shared === previous.shared && skill.id > previous.id)) {
+      chosen.set(skill.name, skill);
+    }
   }
   return [...chosen.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function effectiveSkills(skills: Skill[], where: Where): Skill[] {
+  return skillsForPersona(skills, null, where);
 }
 
 /** The same for MCP servers. */

@@ -20,6 +20,7 @@ from tests.test_agentd import TOKEN, agentd  # noqa: F401  (the `agentd` fixture
 @pytest.fixture
 def wired(agentd, monkeypatch):
     """The panel talking to the real agentd that runs the stand-in Codex."""
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", 1)  # the isolated fixture uses one owner
     monkeypatch.setattr(settings, "agent_token", TOKEN)
     monkeypatch.setattr(settings, "agent_url", agentd.url)
     # The panel's own note about ports is off here, so these tests see the user's instructions alone; it has tests of its own below.
@@ -140,10 +141,12 @@ def test_a_claude_profile_is_refused_with_a_reason(client, wired):
     assert r.status_code == 422 and "Responses" in r.json()["detail"]
 
 
-def test_someone_elses_profile_and_session_are_invisible(client, wired):
+def test_someone_elses_profile_and_session_are_invisible(client, wired, monkeypatch):
     a, ha = op_user(client, "a@example.com")
     b, hb = op_user(client, "b@example.com")
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", b.id)
     assert client.post("/api/agent/sessions", json={"llm_profile_id": openai_profile(a.id).id}, headers=hb).status_code == 404
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", a.id)
     s = new_session(client, ha, openai_profile(a.id, "mine"))
     sid = s["id"]
     for method, path, body in (("GET", "", None), ("PATCH", "", {"title": "x"}), ("POST", "/messages", {"text": "hi"}), ("POST", "/steer", {"text": "hi"}),
@@ -220,6 +223,7 @@ def test_a_crashing_codex_is_reported_and_the_next_message_works(client, wired):
 
 
 def test_an_unreachable_agent_container_is_an_error_not_a_hang(client, monkeypatch):
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", 1)
     monkeypatch.setattr(settings, "agent_token", TOKEN)
     monkeypatch.setattr(settings, "agent_url", "http://127.0.0.1:1")
     user, h = op_user(client)
@@ -739,12 +743,14 @@ def test_a_scan_without_files_on_disk_still_gives_its_stored_findings(client, wi
     assert r.status_code == 201 and r.json()["files"] == 2 and "Находок: 0" in r.json()["draft"]
 
 
-def test_scans_of_other_people_are_not_available_to_an_operator_but_to_an_admin(client, wired):
+def test_scans_of_other_people_are_not_available_to_an_operator_but_to_an_admin(client, wired, monkeypatch):
     owner, _ = op_user(client, "owner@example.com")
     scan = scan_with_results(owner.id)
     stranger, hs = op_user(client, "stranger@example.com")
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", stranger.id)
     assert client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": openai_profile(stranger.id).id}, headers=hs).status_code == 404
     admin, ha = op_user(client, "boss@example.com", Role.admin)
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", admin.id)
     assert client.post(f"/api/agent/from-scan/{scan.id}", json={"llm_profile_id": openai_profile(admin.id).id}, headers=ha).status_code == 201
 
 

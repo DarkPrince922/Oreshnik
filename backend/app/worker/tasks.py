@@ -715,7 +715,8 @@ def reap_stale_agent_turns() -> int:
             session.last_error = message
             session.cancel_requested = False
             agent_service.live_delete(db, session.id)  # what it was in the middle of writing is not going to be finished
-            reaped.append(session.key)
+            if session.user_id == settings.agent_runtime_owner_id:
+                reaped.append(session.key)
         db.commit()
     for key in reaped:
         agent_service.stop_turn(key)

@@ -204,6 +204,8 @@ class Settings(BaseSettings):
     # Agent («Агент»): Codex CLI in its own container (agentd/). The token must be the same on both sides; empty = feature off.
     agent_url: str = "http://agent:8100"
     agent_token: str = ""
+    # The command runtime and its filesystem are a single trust boundary.
+    agent_runtime_owner_id: int = Field(default=0, ge=0)
     # Wall-clock limit of ONE turn (one message to the agent).
     agent_turn_timeout_seconds: int = Field(default=1800, ge=10, le=24 * 3600)
     max_agent_sessions_per_user: int = 20

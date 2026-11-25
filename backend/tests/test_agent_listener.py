@@ -20,6 +20,7 @@ def _clean(monkeypatch):
     listener bound on a shared port once it is done."""
     monkeypatch.setattr(settings, "agent_listener_ports", "33001-33010")
     monkeypatch.setattr(settings, "agent_listener_idle_seconds", 1800)
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", 1)
     monkeypatch.setattr(settings, "agent_token", "test-token")  # the listener endpoints gate on the agent feature being on at all
     # Two different loopback addresses stand in for two different machines: the panel's own bind (normally 0.0.0.0, reachable
     # from outside Docker) and the agent container's host name on `agentnet` — binding both to the SAME port number on 127.0.0.1

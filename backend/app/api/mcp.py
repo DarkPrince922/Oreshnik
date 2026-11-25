@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_operator
+from app.api.deps import require_agent_runtime, require_operator
 from app.core.crypto import decrypt, encrypt
 from app.core.db import get_db
 from app.models.mcp_server import McpServer
@@ -159,6 +159,7 @@ def check_server(server_id: int, user: User = Depends(require_operator), db: Ses
     from app.services.agent import AgentError, check_mcp
 
     server = _get(db, user, server_id)
+    require_agent_runtime(user.id)
     try:
         result = check_mcp(agent_payload(server), timeout=server.startup_timeout_sec + 60)
     except AgentError as exc:

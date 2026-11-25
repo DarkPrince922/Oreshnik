@@ -7,7 +7,7 @@ list of names and descriptions and reads a skill's instructions when the task ca
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -21,6 +21,10 @@ def _now() -> datetime:
 
 class Skill(Base):
     __tablename__ = "skills"
+    __table_args__ = (
+        Index("uq_skills_shared_name", "name", unique=True, postgresql_where=text("shared")),
+        Index("uq_skills_private_name", "user_id", "name", unique=True, postgresql_where=text("NOT shared")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)  # who made it

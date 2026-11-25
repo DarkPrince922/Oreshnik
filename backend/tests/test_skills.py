@@ -1,10 +1,13 @@
 """«Навыки»: SKILL.md repaired for every agent, own and shared skills, import and export of folders, and how «Код» gets them."""
+import asyncio
 import base64
 import io
 import zipfile
 
+import httpx
 import pytest
 
+from app.core.config import settings
 from app.models import Role
 from app.services import agent as agent_service
 from app.services import skills as svc
@@ -83,7 +86,9 @@ def test_files_of_a_skill_are_added_read_and_removed(client):
     _, h = op_user(client)
     skill = make(client, h)
     r = client.put(f"/api/skills/{skill['id']}/files", params={"path": "references/owasp.md"}, content=b"# OWASP", headers=h)
-    assert r.status_code == 200 and r.json()["files"] == [{"path": "references/owasp.md", "size": 7}]
+    assert r.status_code == 200
+    [file] = r.json()["files"]
+    assert file["path"] == "references/owasp.md" and file["size"] == 7 and file["revision"]
     assert client.get(f"/api/skills/{skill['id']}/files/content", params={"path": "references/owasp.md"}, headers=h).json()["text"] == "# OWASP"
     assert client.put(f"/api/skills/{skill['id']}/files", params={"path": "../x"}, content=b"x", headers=h).status_code == 422
     assert client.delete(f"/api/skills/{skill['id']}/files", params={"path": "references/owasp.md"}, headers=h).json()["files"] == []
@@ -100,6 +105,7 @@ def test_a_session_of_kod_gets_the_enabled_skills_and_the_users_own_wins_over_a_
     monkeypatch.setattr(agent_service, "stream_turn", spy)
     _, admin = op_user(client, "admin@example.com", Role.admin)
     user, h = op_user(client)
+    monkeypatch.setattr(settings, "agent_runtime_owner_id", user.id)
     make(client, admin, MD.replace("Сначала", "ОБЩИЙ"), shared=True)
     make(client, admin, MD.replace("recon", "only-agent"), shared=True, scope="agent")
     make(client, h, MD.replace("Сначала", "СВОЙ"))
@@ -142,3 +148,63 @@ def test_a_bad_skill_in_an_archive_is_skipped_not_fatal(client):
     assert [s["name"] for s in body["skills"]] == ["ok-skill"]
     assert len(body["skipped"]) == 1 and "broken" in body["skipped"][0]
     _ = bad
+
+
+def test_nested_skills_keep_their_own_files_and_duplicate_names_are_reported(client, operator):
+    markdown = "---\nname: {}\ndescription: Sample\n---\nExample"
+    archive = zip_of({
+        "SKILL.md": markdown.format("root"),
+        "child/SKILL.md": markdown.format("child"),
+        "child/example.txt": "child only",
+        "first/SKILL.md": markdown.format("collision"),
+        "second/SKILL.md": markdown.format("collision"),
+    })
+    response = client.post("/api/skills/import", files={"file": ("skills.zip", archive)}, headers=operator)
+    assert response.status_code == 200
+    body = response.json()
+    results = {skill["name"]: skill["files"] for skill in body["skills"]}
+    assert set(results) == {"root", "child"}
+    assert results["root"] == []
+    assert [file["path"] for file in results["child"]] == ["example.txt"]
+    [collision] = body["skipped"]
+    assert all(word in collision for word in ("collision", "first", "second"))
+
+
+def test_shared_skill_attachments_and_stale_revisions(client, admin):
+    from tests.conftest import auth_headers, make_user
+
+    make_user("second-admin@example.com", role=Role.admin)
+    second = auth_headers(client, "second-admin@example.com")
+    skill = make(client, admin, shared=True)
+    url = f"/api/skills/{skill['id']}"
+
+    async def upload_both():
+        gate = asyncio.Event()
+        waiting = 0
+
+        async def content(value):
+            nonlocal waiting
+            waiting += 1
+            if waiting == 2:
+                gate.set()
+            await asyncio.wait_for(gate.wait(), timeout=5)
+            yield value
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app), base_url="http://testserver") as api:
+            return await asyncio.gather(
+                api.put(f"{url}/files", headers=admin, params={"path": "a.txt", "expected_revision": ""}, content=content(b"a")),
+                api.put(f"{url}/files", headers=second, params={"path": "b.txt", "expected_revision": ""}, content=content(b"b")),
+            )
+
+    assert [r.status_code for r in asyncio.run(upload_both())] == [200, 200]
+    [latest] = client.get("/api/skills", headers=admin).json()
+    assert [file["path"] for file in latest["files"]] == ["a.txt", "b.txt"]
+    assert latest["edit_revision"] == skill["edit_revision"]
+    [a, _] = latest["files"]
+    params = {"path": a["path"], "expected_revision": a["revision"]}
+    assert client.put(f"{url}/files", headers=admin, params=params, content=b"new").status_code == 200
+    assert client.delete(f"{url}/files", headers=second, params=params).status_code == 409
+
+    original = skill["edit_revision"]
+    assert client.patch(url, headers=admin, json={"expected_revision": original, "enabled": False}).status_code == 200
+    assert client.patch(url, headers=second, json={"expected_revision": original, "scope": "code"}).status_code == 409

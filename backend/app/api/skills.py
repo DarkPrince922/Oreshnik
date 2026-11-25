@@ -2,10 +2,15 @@
 
 import base64
 import binascii
+import hashlib
+import json
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_operator
@@ -28,22 +33,59 @@ def _editable(user: User, skill: Skill) -> bool:
     return skill.user_id == user.id if not skill.shared else user.role == Role.admin
 
 
+def _edit_revision(skill: Skill) -> str:
+    state = json.dumps([skill.skill_md, skill.scope, skill.enabled], ensure_ascii=False)
+    return hashlib.sha256(state.encode()).hexdigest()
+
+
+def _file_revision(content: str | None) -> str:
+    return hashlib.sha256(content.encode()).hexdigest() if content is not None else ""
+
+
+def _check_revision(expected: str | None, current: str) -> None:
+    if expected is not None and expected != current:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Данные уже изменились. Скопируйте несохранённый текст и откройте актуальную версию.")
+
+
+def _flush_changes(db: Session) -> None:
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) not in {
+            "uq_skills_shared_name", "uq_skills_private_name",
+        }:
+            raise
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Навык с таким именем уже существует") from exc
+
+
 def _out(user: User, skill: Skill, own_names: set[str], notes: list[str] | None = None) -> SkillOut:
     return SkillOut(
         id=skill.id, name=skill.name, description=skill.description, skill_md=skill.skill_md,
-        files=[SkillFile(path=p, size=len(base64.b64decode(c))) for p, c in sorted((skill.files or {}).items())],
+        files=[SkillFile(path=p, size=len(base64.b64decode(c)), revision=_file_revision(c)) for p, c in sorted((skill.files or {}).items())],
+        edit_revision=_edit_revision(skill),
         scope=skill.scope, shared=skill.shared, enabled=skill.enabled, mine=skill.user_id == user.id and not skill.shared,
         editable=_editable(user, skill), overridden=skill.shared and skill.name in own_names, notes=notes or [],
         created_at=skill.created_at, updated_at=skill.updated_at,
     )
 
 
+def _commit_skill(db: Session, user: User, skill: Skill, notes: list[str] | None = None) -> SkillOut:
+    _flush_changes(db)
+    result = _out(user, skill, _own_names(db, user), notes)
+    db.commit()
+    return result
+
+
 def _own_names(db: Session, user: User) -> set[str]:
     return set(db.scalars(select(Skill.name).where(Skill.user_id == user.id, Skill.shared.is_(False))))
 
 
-def _get(db: Session, user: User, skill_id: int, *, edit: bool = False) -> Skill:
-    skill = db.scalar(select(Skill).where(Skill.id == skill_id, visible(user)))
+def _get(db: Session, user: User, skill_id: int, *, edit: bool = False, lock: bool = False) -> Skill:
+    query = select(Skill).where(Skill.id == skill_id, visible(user))
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    skill = db.scalar(query)
     if skill is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Навык не найден")
     if edit and not _editable(user, skill):
@@ -51,14 +93,14 @@ def _get(db: Session, user: User, skill_id: int, *, edit: bool = False) -> Skill
     return skill
 
 
-def _twin(db: Session, user: User, name: str, shared: bool, not_id: int | None = None) -> Skill | None:
+def _twin(db: Session, user: User, name: str, shared: bool, not_id: int | None = None, *, lock: bool = False) -> Skill | None:
     """The skill that already has this name in the same list (the user's own, or the shared ones)."""
     q = select(Skill).where(Skill.name == name, Skill.shared.is_(shared))
     if not shared:
         q = q.where(Skill.user_id == user.id)
     if not_id is not None:
         q = q.where(Skill.id != not_id)
-    return db.scalar(q)
+    return db.scalar(q.with_for_update() if lock else q)
 
 
 def _parse(text: str, fallback: str = "") -> svc.ParsedSkill:
@@ -88,6 +130,7 @@ def list_skills(user: User = Depends(require_operator), db: Session = Depends(ge
 @router.post("", response_model=SkillOut, status_code=status.HTTP_201_CREATED)
 def create_skill(body: SkillCreate, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> SkillOut:
     _check_shared(user, body.shared)
+    db.scalar(select(User.id).where(User.id == user.id).with_for_update())
     _check_quota(db, user)
     parsed = _parse(body.skill_md)
     if _twin(db, user, parsed.name, body.shared):
@@ -95,14 +138,13 @@ def create_skill(body: SkillCreate, user: User = Depends(require_operator), db: 
     skill = Skill(user_id=user.id, shared=body.shared, name=parsed.name, description=parsed.description, skill_md=parsed.skill_md,
                   files={}, scope=body.scope, enabled=body.enabled)
     db.add(skill)
-    db.commit()
-    db.refresh(skill)
-    return _out(user, skill, _own_names(db, user), parsed.notes)
+    return _commit_skill(db, user, skill, parsed.notes)
 
 
 @router.patch("/{skill_id}", response_model=SkillOut)
 def update_skill(skill_id: int, body: SkillUpdate, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> SkillOut:
-    skill = _get(db, user, skill_id, edit=True)
+    skill = _get(db, user, skill_id, edit=True, lock=True)
+    _check_revision(body.expected_revision, _edit_revision(skill))
     notes: list[str] = []
     if body.skill_md is not None:
         parsed = _parse(body.skill_md, skill.name)
@@ -117,14 +159,14 @@ def update_skill(skill_id: int, body: SkillUpdate, user: User = Depends(require_
         skill.scope = body.scope
     if body.enabled is not None:
         skill.enabled = body.enabled
-    db.commit()
-    db.refresh(skill)
-    return _out(user, skill, _own_names(db, user), notes)
+    return _commit_skill(db, user, skill, notes)
 
 
 @router.delete("/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_skill(skill_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
-    db.delete(_get(db, user, skill_id, edit=True))
+def delete_skill(skill_id: int, expected_revision: datetime | None = None, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
+    skill = _get(db, user, skill_id, edit=True, lock=True)
+    _check_revision(expected_revision.isoformat() if expected_revision else None, skill.updated_at.isoformat())
+    db.delete(skill)
     db.commit()
 
 
@@ -140,15 +182,23 @@ async def import_skills(
     skipped: list[str] = []
     try:
         if filename.lower().endswith(".zip") or data[:4] == b"PK\x03\x04":
-            found, skipped = svc.read_archive(data)
+            found, skipped = await run_in_threadpool(svc.read_archive, data)
         else:
             stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
             found = [svc.parse_skill_md(data.decode("utf-8", "replace"), "" if stem.upper() == "SKILL" else stem)]
     except svc.SkillError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+    names = [parsed.name for parsed in found]
+    query = select(Skill.name, Skill.updated_at).where(Skill.name.in_(names), Skill.shared.is_(shared))
+    if not shared:
+        query = query.where(Skill.user_id == user.id)
+    baseline = {name: updated_at for name, updated_at in db.execute(query)}
+    db.scalar(select(User.id).where(User.id == user.id).with_for_update())
     saved: list[tuple[Skill, list[str]]] = []
-    for parsed in found:
-        skill = _twin(db, user, parsed.name, shared)
+    for parsed in sorted(found, key=lambda item: item.name):
+        skill = _twin(db, user, parsed.name, shared, lock=True)
+        if (skill.updated_at if skill is not None else None) != baseline.get(parsed.name):
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Навык {parsed.name} изменился во время импорта. Повторите импорт после проверки.")
         if skill is None:
             _check_quota(db, user)
             skill = Skill(user_id=user.id, shared=shared, name=parsed.name, scope="both", enabled=True)
@@ -157,11 +207,12 @@ async def import_skills(
         else:
             notes = [*parsed.notes, "заменил навык с тем же именем"]
         skill.description, skill.skill_md, skill.files = parsed.description, parsed.skill_md, parsed.files
-        db.flush()
+        _flush_changes(db)
         saved.append((skill, notes))
-    db.commit()
     own = _own_names(db, user)
-    return SkillImport(skills=[_out(user, s, own, n) for s, n in saved], skipped=skipped)
+    result = SkillImport(skills=[_out(user, skill, own, notes) for skill, notes in saved], skipped=skipped)
+    db.commit()
+    return result
 
 
 @router.get("/{skill_id}/export")
@@ -179,36 +230,43 @@ def _path(path: str) -> str:
 
 
 @router.put("/{skill_id}/files", response_model=SkillOut)
-async def put_file(skill_id: int, request: Request, path: str = Query(...), user: User = Depends(require_operator), db: Session = Depends(get_db)) -> SkillOut:
+async def put_file(
+    skill_id: int, request: Request, path: str = Query(...), expected_revision: str | None = None,
+    user: User = Depends(require_operator), db: Session = Depends(get_db),
+) -> SkillOut:
     """Add or replace one file of the skill (a script, a reference, a template); the body is the file as it is."""
-    skill = _get(db, user, skill_id, edit=True)
     path = _path(path)
-    data = b""
+    data = bytearray()
     async for chunk in request.stream():
-        data += chunk
+        data.extend(chunk)
         if len(data) > svc.MAX_FILE:
             raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"Файл больше {svc.MAX_FILE // 1_000_000} МБ")
-    files = {**(skill.files or {}), path: base64.b64encode(data).decode()}
+    # Serialize updates after reading the body so a slow upload holds no row lock.
+    skill = _get(db, user, skill_id, edit=True, lock=True)
+    files = dict(skill.files or {})
+    _check_revision(expected_revision, _file_revision(files.get(path)))
+    files[path] = base64.b64encode(data).decode()
     try:
         svc.check_files(skill.skill_md, files)
     except svc.SkillError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     skill.files = files
-    db.commit()
-    db.refresh(skill)
-    return _out(user, skill, _own_names(db, user))
+    return _commit_skill(db, user, skill)
 
 
 @router.delete("/{skill_id}/files", response_model=SkillOut)
-def delete_file(skill_id: int, path: str = Query(...), user: User = Depends(require_operator), db: Session = Depends(get_db)) -> SkillOut:
-    skill = _get(db, user, skill_id, edit=True)
+def delete_file(
+    skill_id: int, path: str = Query(...), expected_revision: str | None = None,
+    user: User = Depends(require_operator), db: Session = Depends(get_db),
+) -> SkillOut:
+    skill = _get(db, user, skill_id, edit=True, lock=True)
     files = dict(skill.files or {})
-    if files.pop(_path(path), None) is None:
+    path = _path(path)
+    _check_revision(expected_revision, _file_revision(files.get(path)))
+    if files.pop(path, None) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого файла")
     skill.files = files
-    db.commit()
-    db.refresh(skill)
-    return _out(user, skill, _own_names(db, user))
+    return _commit_skill(db, user, skill)
 
 
 @router.get("/{skill_id}/files/content", response_model=SkillFilePreview)

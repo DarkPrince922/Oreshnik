@@ -24,6 +24,7 @@ class SkillCreate(BaseModel):
 
 
 class SkillUpdate(BaseModel):
+    expected_revision: str | None = None
     skill_md: str | None = Field(default=None, min_length=1, max_length=600_000)
     scope: str | None = None
     enabled: bool | None = None
@@ -37,6 +38,7 @@ class SkillUpdate(BaseModel):
 class SkillFile(BaseModel):
     path: str
     size: int
+    revision: str
 
 
 class SkillOut(BaseModel):
@@ -45,6 +47,7 @@ class SkillOut(BaseModel):
     description: str
     skill_md: str
     files: list[SkillFile]
+    edit_revision: str
     scope: str
     shared: bool
     enabled: bool

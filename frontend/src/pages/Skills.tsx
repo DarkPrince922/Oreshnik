@@ -18,10 +18,11 @@ interface Draft {
   scope: SkillScope;
   enabled: boolean;
   shared: boolean;
+  revision?: string;
 }
 
-function draftOf(md: string, scope: SkillScope = "both", enabled = true, shared = false): Draft {
-  return { md, fields: splitSkillMd(md), scope, enabled, shared };
+function draftOf(md: string, scope: SkillScope = "both", enabled = true, shared = false, revision?: string): Draft {
+  return { md, fields: splitSkillMd(md), scope, enabled, shared, revision };
 }
 
 function size(n: number): string {
@@ -86,6 +87,7 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
   const [importShared, setImportShared] = useState(false);
   const [preview, setPreview] = useState<{ path: string; text: string | null } | null>(null);
   const [folder, setFolder] = useState("scripts");
+  const selection = useRef<number | "new" | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -109,14 +111,16 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
   const readOnly = current !== null && !current.editable;
 
   function pick(s: Skill, keepNotes: string[] = []) {
+    selection.current = s.id;
     setSelected(s.id);
-    setDraft(draftOf(s.skill_md, s.scope, s.enabled, s.shared));
+    setDraft(draftOf(s.skill_md, s.scope, s.enabled, s.shared, s.edit_revision));
     setNotes(keepNotes);
     setPreview(null);
     setError(null);
   }
 
   const startNew = (fields: SkillFields = SKILL_TEMPLATES[0].fields) => {
+    selection.current = "new";
     setSelected("new");
     setDraft(draftOf(composeSkillMd(fields)));
     setMode("fields");
@@ -135,6 +139,11 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
     } finally {
       setBusy(null);
     }
+  };
+
+  const applySkill = (fresh: Skill) => {
+    setList((rows) => rows?.map((row) => row.id === fresh.id ? fresh : row) ?? null);
+    onChanged?.();
   };
 
   const reloadTo = async (id: number, keepNotes: string[] = []) => {
@@ -156,29 +165,30 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
     void run("save", async () => {
       const saved = selected === "new"
         ? await createSkill({ skill_md: draft.md, scope: draft.scope, enabled: draft.enabled, shared: draft.shared })
-        : await updateSkill(selected as number, { skill_md: draft.md, scope: draft.scope, enabled: draft.enabled });
+        : await updateSkill(selected as number, { skill_md: draft.md, scope: draft.scope, enabled: draft.enabled, expected_revision: draft.revision });
       await reloadTo(saved.id, saved.notes);
     });
   };
 
   const toggle = (s: Skill, enabled: boolean) => void run(`t${s.id}`, async () => {
-    await updateSkill(s.id, { enabled });
-    const rows = await load();
-    if (s.id === selected) {
-      const fresh = rows?.find((r) => r.id === s.id);
-      if (fresh) setDraft((d) => ({ ...d, enabled: fresh.enabled }));
+    const fresh = await updateSkill(s.id, { enabled, expected_revision: s.edit_revision });
+    applySkill(fresh);
+    if (selection.current === s.id) {
+      setDraft((d) => d.revision === s.edit_revision ? { ...d, enabled: fresh.enabled, revision: fresh.edit_revision } : d);
     }
-    onChanged?.();
   });
 
   const remove = async (target: Skill | null = current) => {
     if (!target || !(await confirm(`Удалить навык ${target.name}? Агенты перестанут его видеть со следующего сообщения.`))) return;
     void run("delete", async () => {
-      await deleteSkill(target.id);
+      await deleteSkill(target.id, target.updated_at);
       const rows = await load();
-      if (target.id === selected) {
+      if (target.id === selection.current) {
         if (rows && rows.length > 0) pick(rows[0]);
-        else setSelected(null);
+        else {
+          selection.current = null;
+          setSelected(null);
+        }
       }
       onChanged?.();
     });
@@ -201,8 +211,9 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
     if (!file || !current) return;
     const dir = folder.trim().replace(/^\/+|\/+$/g, "");
     void run("file", async () => {
-      await putSkillFile(current.id, dir ? `${dir}/${file.name}` : file.name, file);
-      await reloadTo(current.id);
+      const path = dir ? `${dir}/${file.name}` : file.name;
+      const expected = current.files.find((entry) => entry.path === path)?.revision ?? "";
+      applySkill(await putSkillFile(current.id, path, file, expected));
     });
     if (fileInput.current) fileInput.current.value = "";
   };
@@ -352,7 +363,7 @@ export default function Skills({ embedded = false, onChanged }: { embedded?: boo
                           </button>
                           <span className="shrink-0 text-[11px] text-slate-500">{size(f.size)}</span>
                           {!readOnly && (
-                            <button type="button" className="shrink-0 text-[11px] text-signal-bad hover:underline" onClick={() => void confirm(`Удалить ${f.path}?`).then((ok) => void (ok && run("rm", async () => { await deleteSkillFile(current.id, f.path); await reloadTo(current.id); })))}>
+                            <button type="button" className="shrink-0 text-[11px] text-signal-bad hover:underline" onClick={() => void confirm(`Удалить ${f.path}?`).then((ok) => void (ok && run("rm", async () => { applySkill(await deleteSkillFile(current.id, f.path, f.revision)); if (selection.current === current.id) setPreview(null); })))}>
                               удалить
                             </button>
                           )}

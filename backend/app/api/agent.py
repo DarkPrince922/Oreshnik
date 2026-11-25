@@ -17,7 +17,7 @@ from sqlalchemy import func, select, true, update
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from app.api.deps import require_operator
+from app.api.deps import require_agent_runtime, require_operator
 from app.core.config import settings
 from app.core.db import SessionLocal, get_db
 from app.core.security import decode_access_token, decode_listener_token
@@ -84,11 +84,6 @@ def _usable_profile(db: Session, user: User, profile_id: int, model: str | None 
     return profile
 
 
-def _require_enabled() -> None:
-    if not settings.agent_token:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Агент выключен: на сервере не задан AGENT_TOKEN")
-
-
 def _agent_http_error(exc: AgentError) -> HTTPException:
     return HTTPException(exc.status if exc.status in PROXIED_STATUSES else status.HTTP_502_BAD_GATEWAY, str(exc))
 
@@ -113,7 +108,9 @@ def _check_profile_alive(db: Session, user: User, session: AgentSession) -> None
 
 
 @router.get("/health")
-def health(_: User = Depends(require_operator)) -> dict:
+def health(user: User = Depends(require_operator)) -> dict:
+    if user.id != settings.agent_runtime_owner_id:
+        return {"ok": False, "detail": "Контейнер «Кода» не выделен этому аккаунту"}
     return agent_service.agent_health()
 
 
@@ -141,7 +138,7 @@ def _new_session(db: Session, user: User, profile: LLMProfile, body: AgentSessio
 
 @router.post("/sessions", response_model=AgentSessionOut, status_code=status.HTTP_201_CREATED)
 def create_session(body: AgentSessionCreate, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentSessionOut:
-    _require_enabled()
+    require_agent_runtime(user.id)
     profile = _usable_profile(db, user, body.llm_profile_id, body.llm_model)
     return _out(db, _new_session(db, user, profile, body))
 
@@ -181,7 +178,8 @@ async def delete_session(session_id: int, user: User = Depends(require_operator)
     key = session.key
     db.delete(session)
     db.commit()
-    agent_service.forget_session(key)  # best effort: its working directory in the agent container
+    if user.id == settings.agent_runtime_owner_id:
+        agent_service.forget_session(key)  # best effort: its working directory in the agent container
     await agent_listener.close_for_session(key)
 
 
@@ -201,7 +199,7 @@ def list_events(
 @router.post("/sessions/{session_id}/messages", response_model=AgentSessionOut, status_code=status.HTTP_202_ACCEPTED)
 def send_message(session_id: int, body: AgentMessage, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentSessionOut:
     session = _own_or_404(db, user, session_id)
-    _require_enabled()
+    require_agent_runtime(user.id)
     _check_profile_alive(db, user, session)
     _claim(db, session)
     if agent_service.append_event(db, session.id, "user", {"text": body.text}) is None:
@@ -220,6 +218,7 @@ def send_message(session_id: int, body: AgentMessage, user: User = Depends(requi
 def steer(session_id: int, body: AgentMessage, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentSessionOut:
     """Add an instruction to the turn that is running now: the agent takes it into account without starting over."""
     session = _own_or_404(db, user, session_id)
+    require_agent_runtime(user.id)
     if session.status != AgentSessionStatus.running:
         raise HTTPException(status.HTTP_409_CONFLICT, "Сейчас нет хода, который можно дополнить: отправьте обычное сообщение")
     try:
@@ -236,6 +235,7 @@ def steer(session_id: int, body: AgentMessage, user: User = Depends(require_oper
 def answer_approval(session_id: int, request_id: str, body: AgentApproval, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> None:
     """The user's answer to something the agent asked: approve a command or a file change, decline it, or answer its question."""
     session = _own_or_404(db, user, session_id)
+    require_agent_runtime(user.id)
     try:
         agent_service.answer_approval(session.key, request_id[:64], body.decision, body.answers)
     except AgentError as exc:
@@ -263,7 +263,7 @@ def _last_turn_id(db: Session, session_id: int) -> str | None:
 def run_action(session_id: int, body: AgentAction, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentSessionOut:
     """Compress the conversation, review the changes, run a command yourself in the session, or undo the last turn (the conversation, not the files)."""
     session = _own_or_404(db, user, session_id)
-    _require_enabled()
+    require_agent_runtime(user.id)
     _check_profile_alive(db, user, session)
     extra: dict = {}
     note: dict = {"action": body.action}
@@ -317,7 +317,7 @@ def run_action(session_id: int, body: AgentAction, user: User = Depends(require_
 def fork_session(session_id: int, user: User = Depends(require_operator), db: Session = Depends(get_db)) -> AgentSessionOut:
     """A copy of the session — its conversation and its files — to take in another direction while this one stays as it is."""
     source = _own_or_404(db, user, session_id)
-    _require_enabled()
+    require_agent_runtime(user.id)
     if source.status == AgentSessionStatus.running:
         raise HTTPException(status.HTTP_409_CONFLICT, "Дождитесь конца хода")
     count = db.scalar(select(func.count()).select_from(AgentSession).where(AgentSession.user_id == user.id))
@@ -348,7 +348,8 @@ def stop(session_id: int, user: User = Depends(require_operator), db: Session = 
     if session.status == AgentSessionStatus.running:
         session.cancel_requested = True
         db.commit()
-        agent_service.stop_turn(session.key)
+        if user.id == settings.agent_runtime_owner_id:
+            agent_service.stop_turn(session.key)
         db.refresh(session)
     return _out(db, session)
 
@@ -381,7 +382,7 @@ async def open_listener(session_id: int, body: AgentListenerOpen, user: User = D
     """Start proxying `body.port` on the panel's host to the same port inside this session's agent container. The agent
     must bind that port itself (e.g. with a shell command) for anything to come through; this call only opens the pipe."""
     session = _own_or_404(db, user, session_id)
-    _require_enabled()
+    require_agent_runtime(user.id)
     try:
         listener = await agent_listener.open_listener(port=body.port, session_key=session.key, session_id=session.id, user_id=user.id)
     except AgentError as exc:
@@ -400,36 +401,56 @@ async def close_listener(session_id: int, user: User = Depends(require_operator)
 # session-scoped token the panel put in the turn's environment. Gated by AGENT_LISTENER_SELF; still bounded to the one session
 # and the configured port range, so even on, a session can only open a port in that range for itself.
 
-def _listener_claims(request: Request) -> dict:
+def _listener_session(request: Request) -> tuple[int, str, int]:
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нет токена листенера")
     try:
         claims = decode_listener_token(auth[7:].strip())
-    except jwt.PyJWTError:
+        scope = int(claims["sid"]), str(claims["skey"]), int(claims["uid"])
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен листенера")
     if not settings.agent_listener_self:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Самозапрос листенера выключен (AGENT_LISTENER_SELF)")
-    return claims
+    if not _listener_session_exists(*scope):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Токен листенера отозван")
+    return scope
+
+
+def _listener_session_exists(session_id: int, session_key: str, user_id: int) -> bool:
+    with SessionLocal() as db:
+        return db.scalar(
+            select(AgentSession.id)
+            .join(User, User.id == AgentSession.user_id)
+            .where(
+                AgentSession.id == session_id, AgentSession.key == session_key,
+                User.id == user_id, User.is_active.is_(True), User.role.in_((Role.admin, Role.operator)),
+            )
+        ) is not None
 
 
 @router.post("/internal/listener", response_model=AgentListenerOut)
 async def open_listener_self(body: AgentListenerOpen, request: Request) -> AgentListenerOut:
-    claims = _listener_claims(request)
-    _require_enabled()
+    session_id, session_key, user_id = _listener_session(request)
+    require_agent_runtime(user_id)
     try:
         listener = await agent_listener.open_listener(
-            port=body.port, session_key=claims["skey"], session_id=int(claims["sid"]), user_id=int(claims["uid"]),
+            port=body.port, session_key=session_key, session_id=session_id, user_id=user_id,
         )
     except AgentError as exc:
         raise _agent_http_error(exc)
+    # Opening a socket yields control; deletion may have committed in the meantime.
+    if not _listener_session_exists(session_id, session_key, user_id):
+        await agent_listener.close_listener(body.port, session_key=session_key)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Токен листенера отозван")
     return _listener_out(listener)
 
 
 @router.delete("/internal/listener", status_code=status.HTTP_204_NO_CONTENT)
 async def close_listener_self(body: AgentListenerOpen, request: Request) -> None:
-    claims = _listener_claims(request)
-    await agent_listener.close_listener(body.port, session_key=claims["skey"])
+    _, session_key, user_id = _listener_session(request)
+    require_agent_runtime(user_id)
+    await agent_listener.close_listener(body.port, session_key=session_key)
 
 
 # ── the session's files ───────────────────────────────────────────────────────────────────────
@@ -445,8 +466,8 @@ def _session_key(user_id: int, session_id: int) -> str:
 
 
 async def _files_json(user: User, session_id: int, method: str, suffix: str, **kwargs) -> Response:
-    _require_enabled()
     key = await run_in_threadpool(_session_key, user.id, session_id)
+    require_agent_runtime(user.id)
     try:
         async with agent_service.agent_async_client(60.0) as client:
             reply = await client.request(method, f"/sessions/{key}/{suffix}", **kwargs)
@@ -480,8 +501,8 @@ async def files_clone(session_id: int, body: AgentClone, user: User = Depends(re
 @router.put("/sessions/{session_id}/files")
 async def files_upload(session_id: int, path: str, request: Request, user: User = Depends(require_operator)) -> Response:
     """Upload a file (the request body is the file) to `path` in the session's folder."""
-    _require_enabled()
     key = await run_in_threadpool(_session_key, user.id, session_id)
+    require_agent_runtime(user.id)
     try:
         async with agent_service.agent_async_client(httpx.Timeout(30.0, read=300.0, write=300.0)) as client:
             reply = await client.put(f"/sessions/{key}/file", params={"path": path}, content=request.stream())
@@ -497,8 +518,8 @@ async def files_upload(session_id: int, path: str, request: Request, user: User 
 
 
 async def _download(user: User, session_id: int, suffix: str, params: dict) -> StreamingResponse:
-    _require_enabled()
     key = await run_in_threadpool(_session_key, user.id, session_id)
+    require_agent_runtime(user.id)
     client = agent_service.agent_async_client(httpx.Timeout(30.0, read=600.0))
     try:
         reply = await client.send(client.build_request("GET", f"/sessions/{key}/{suffix}", params=params), stream=True)
@@ -588,7 +609,7 @@ def _scan_draft(scan: Scan, findings: int) -> str:
 @router.post("/from-scan/{scan_id}", response_model=AgentFromScanOut, status_code=status.HTTP_201_CREATED)
 async def from_scan(scan_id: int, body: AgentFromScan, user: User = Depends(require_operator)) -> AgentFromScanOut:
     """A new session with the scan's findings and report already in its folder, and a proposed first message."""
-    _require_enabled()
+    require_agent_runtime(user.id)
 
     def create() -> tuple[AgentSessionOut, str, list[tuple[str, bytes]], str]:
         with SessionLocal() as db:
